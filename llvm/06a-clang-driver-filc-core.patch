@@ -42,6 +42,7 @@ Rebase-Notes (llvmorg-21.1.8 -> llvmorg-22.1.8):
   - Options.td: moved from clang/include/clang/Driver/Options.td to clang/include/clang/Options/Options.td in LLVM 22.
   - Clang.cpp & Linux.cpp: context updated for options:: namespace cleanup and reordered resource-dir include.
   - Gnu.cpp & CommonArgs.cpp: getStaticPIE() moved from Gnu.cpp to CommonArgs.cpp in LLVM 22; applied -static -> -static-pie override in CommonArgs.cpp.
+  - Linux.cpp: replaced options::OPT_nostdinc with options::OPT_nostdinc (Options moved to clang::options in LLVM 22).
 
 ---
 diff --git a/clang/include/clang/Basic/DiagnosticDriverKinds.td b/clang/include/clang/Basic/DiagnosticDriverKinds.td
@@ -1126,7 +1127,7 @@ index d525b417b..bff15844c 100644
 +      }
 +      addSystemInclude(DriverArgs, CC1Args, P);
 +    }
-+    if (!DriverArgs.hasArg(clang::driver::options::OPT_nostdinc)
++    if (!DriverArgs.hasArg(options::OPT_nostdinc)
 +        && !DriverArgs.hasArg(options::OPT_nostdlibinc)) {
 +      std::string P;
 +      if (Arg *A = DriverArgs.getLastArg(options::OPT_filc_include)) {
@@ -1146,7 +1147,7 @@ index d525b417b..bff15844c 100644
 +
 +  SmallString<128> ResourceDirInclude(D.ResourceDir);
 +  llvm::sys::path::append(ResourceDirInclude, "include");
-+  if (!DriverArgs.hasArg(clang::driver::options::OPT_nostdinc)
++  if (!DriverArgs.hasArg(options::OPT_nostdinc)
 +      && !DriverArgs.hasArg(options::OPT_nobuiltininc))
 +    addSystemInclude(DriverArgs, CC1Args, ResourceDirInclude);
 +

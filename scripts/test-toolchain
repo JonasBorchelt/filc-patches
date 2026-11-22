@@ -265,14 +265,19 @@ run_and_capture vertest_comma "$TEST_DIR/vertest_comma"
 RC_VER_EQ="$(cat "$TEST_DIR/vertest_eq.rc")"
 RC_VER_COMMA="$(cat "$TEST_DIR/vertest_comma.rc")"
 NM_OK=1
+: > "$TEST_DIR/vertest.nm"
 if command -v nm >/dev/null 2>&1; then
   for so in "$TEST_DIR/libvertest_eq.so" "$TEST_DIR/libvertest_comma.so"; do
-    if ! nm -D "$so" | grep -q ' T pizlonated_vertest_add$'; then
-      echo "error: expected exported pizlonated_vertest_add in $so" >&2
+    echo "=== nm -D --defined-only $(basename "$so") ===" >> "$TEST_DIR/vertest.nm"
+    nm -D --defined-only "$so" >> "$TEST_DIR/vertest.nm" 2>&1 || true
+    if ! nm -D --defined-only "$so" | grep -Eq ' [A-Za-z] pizlonated_vertest_add@@VERTEST_1\.0$'; then
+      echo "error: expected versioned export pizlonated_vertest_add@@VERTEST_1.0 in $so" >&2
+      nm -D --defined-only "$so" >&2 || true
       NM_OK=0
     fi
-    if nm -D "$so" | grep -q 'vertest_secret'; then
+    if nm -D --defined-only "$so" | grep -q 'vertest_secret'; then
       echo "error: expected vertest_secret to stay local in $so" >&2
+      nm -D --defined-only "$so" >&2 || true
       NM_OK=0
     fi
   done
@@ -368,9 +373,13 @@ ARCH="$(uname -m)"
   fi
   echo ""
   echo "--- TEST (d) SHARED LIB -Wl,--version-script [$STATUS_VERSCRIPT] ---"
-  echo "EXIT_CODE_EQ: $RC_VER_EQ  EXIT_CODE_COMMA: $RC_VER_COMMA"
+  echo "EXIT_CODE_EQ: $RC_VER_EQ  EXIT_CODE_COMMA: $RC_VER_COMMA  NM_OK: $NM_OK"
   echo "STDOUT:"
   sed 's/^/  | /' "$TEST_DIR/vertest_eq.stdout"
+  if [[ -s "$TEST_DIR/vertest.nm" ]]; then
+    echo "EXPORTS:"
+    sed 's/^/  | /' "$TEST_DIR/vertest.nm"
+  fi
   echo "================================================================================"
 } > "$REPORT_FILE"
 

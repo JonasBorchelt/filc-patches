@@ -165,7 +165,8 @@ on_exit() {
     if [[ "$CURRENT_STAGE" == "test" ]]; then
       dump_test_logs || true
     fi
-    echo "FILC_PORT $PORT_NAME failed kind=$fkind stage=$CURRENT_STAGE rc=$rc" >&2
+    local dur=$(( $(date +%s) - T_START ))
+    echo "FILC_PORT $PORT_NAME failed:$fkind policy=$POLICY_CLASS duration=$dur stage=$CURRENT_STAGE rc=$rc" >&2
     write_state "failed" "$CURRENT_STAGE" "$fkind" || true
   fi
 }
@@ -198,7 +199,7 @@ compute_sha256() {
 }
 
 echo "=== Building port: $NAME $VERSION (tier=$TIER, policy=$POLICY_CLASS) ==="
-echo "FILC_PORT $PORT_NAME building"
+echo "FILC_PORT $PORT_NAME building policy=$POLICY_CLASS"
 
 # 1. Dependency check
 CURRENT_STAGE="deps"
@@ -401,4 +402,4 @@ fi
 touch "$STATE_DIR/$PORT_NAME.installed"
 write_state "$FINAL_STATUS" "" ""
 PORT_DONE=1
-echo "FILC_PORT $PORT_NAME $FINAL_STATUS duration=$(( $(date +%s) - T_START ))s patches=$PATCH_COUNT"
+echo "FILC_PORT $PORT_NAME $FINAL_STATUS policy=$POLICY_CLASS duration=$(( $(date +%s) - T_START )) patches=$PATCH_COUNT"

@@ -255,12 +255,17 @@ def main() -> int:
     results = {}
     env = os.environ.copy()
     env["FILC_PORTS_DIR"] = os.path.abspath(args.ports_dir)
+    print(f"FILC_PORTS_TOTAL {len(order)}", flush=True)
 
     for idx, name in enumerate(order, 1):
         meta = ports[name]
         blockers = find_root_blockers(name, ports, results)
         if blockers:
             print(f"[{idx}/{len(order)}] BLOCKED {name} (blocked by: {', '.join(blockers)})", flush=True)
+            print(
+                f"FILC_PORT {name} blocked policy={meta['policy_class']} blocked_by={','.join(blockers)}",
+                flush=True,
+            )
             rec = {
                 "name": name,
                 "version": meta["version"],

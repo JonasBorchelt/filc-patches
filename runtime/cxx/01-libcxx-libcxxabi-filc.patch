@@ -1,5 +1,5 @@
 Subject: Fil-C libc++ and libc++abi runtime adaptations
-Upstream-Base: llvmorg-20.1.8 (87f0227cb60147a26a1eeb4fb06e3b505e9c7261)
+Upstream-Base: llvmorg-21.1.8 (2078da43e25a4623cab2d0d60decddf709aaea28)
 Fil-C-Head: cede3de02b42b58a14acc9ce39c9894ab952a915 (branch deluge)
 
 Adapts libc++abi exception personality to <pizlonated_eh_landing_pad.h>,
@@ -12,9 +12,12 @@ Fil-C-Origin-Commits (3):
   1636dbb63e6bdf76451c30b38743345114bbc5ba 2026-09-19 cosmo: libc++/libc++abi for the cosmo flavor (static) + C++ tests enabled
   d292f5dbb951d549fc9b053950d5a330d532b361 2025-08-22 Rebase Fil-C to clang/llvm 20.1.8
 
+Rebase-Notes (llvmorg-20.1.8 -> llvmorg-21.1.8):
+  - libcxx/CMakeLists.txt: context updated for LIBCXX_USE_COMPILER_RT option moved above ABI library options.
+
 ---
 diff --git a/libc/include/llvm-libc-types/cfloat16.h b/libc/include/llvm-libc-types/cfloat16.h
-index 2d4cef756272..ad54bde72a9a 100644
+index 2d4cef756..ad54bde72 100644
 --- a/libc/include/llvm-libc-types/cfloat16.h
 +++ b/libc/include/llvm-libc-types/cfloat16.h
 @@ -13,7 +13,10 @@
@@ -30,11 +33,11 @@ index 2d4cef756272..ad54bde72a9a 100644
  typedef _Complex _Float16 cfloat16;
  #endif
 diff --git a/libcxx/CMakeLists.txt b/libcxx/CMakeLists.txt
-index abe12c2805a7..8b9f17ce8981 100644
+index 85514cc75..b8b832a70 100644
 --- a/libcxx/CMakeLists.txt
 +++ b/libcxx/CMakeLists.txt
-@@ -234,10 +234,16 @@ if (NOT "${LIBCXX_LIBC}" IN_LIST LIBCXX_SUPPORTED_C_LIBRARIES)
- endif()
+@@ -226,10 +226,16 @@ set(LIBCXX_EXTRA_SITE_DEFINES "" CACHE STRING "Extra defines to add into __confi
+ option(LIBCXX_USE_COMPILER_RT "Use compiler-rt instead of libgcc" OFF)
  
  # ABI Library options ---------------------------------------------------------
 -if (MSVC)
@@ -53,7 +56,7 @@ index abe12c2805a7..8b9f17ce8981 100644
  endif()
  
  set(LIBCXX_SUPPORTED_ABI_LIBRARIES none libcxxabi system-libcxxabi libcxxrt libstdc++ libsupc++ vcruntime)
-@@ -293,6 +299,11 @@ endif()
+@@ -285,6 +291,11 @@ endif()
  
  # Feature options -------------------------------------------------------------
  option(LIBCXX_HAS_MUSL_LIBC "Build libc++ with support for the Musl C library" OFF)
@@ -65,7 +68,7 @@ index abe12c2805a7..8b9f17ce8981 100644
  option(LIBCXX_HAS_PTHREAD_API "Ignore auto-detection and force use of pthread API" OFF)
  option(LIBCXX_HAS_WIN32_THREAD_API "Ignore auto-detection and force use of win32 thread API" OFF)
  option(LIBCXX_HAS_EXTERNAL_THREAD_API
-@@ -317,6 +328,7 @@ if (WIN32)
+@@ -309,6 +320,7 @@ if (WIN32)
  endif()
  option(LIBCXX_HERMETIC_STATIC_LIBRARY
    "Do not export any symbols from the static library." ${LIBCXX_HERMETIC_STATIC_LIBRARY_DEFAULT})
@@ -73,7 +76,7 @@ index abe12c2805a7..8b9f17ce8981 100644
  
  #===============================================================================
  # Check option configurations
-@@ -473,6 +485,8 @@ include(HandleLibcxxFlags)
+@@ -466,6 +478,8 @@ include(HandleLibcxxFlags)
  # 'config-ix' use them during feature checks. It also adds them to both
  # 'LIBCXX_COMPILE_FLAGS' and 'LIBCXX_LINK_FLAGS'
  
@@ -82,7 +85,7 @@ index abe12c2805a7..8b9f17ce8981 100644
  if (${CMAKE_SYSTEM_NAME} MATCHES "AIX")
    add_flags_if_supported("-mdefault-visibility-export-mapping=explicit")
    set(CMAKE_AIX_EXPORT_ALL_SYMBOLS OFF)
-@@ -755,6 +769,7 @@ config_define(${LIBCXX_HAS_PTHREAD_API} _LIBCPP_HAS_THREAD_API_PTHREAD)
+@@ -742,6 +756,7 @@ config_define(${LIBCXX_HAS_PTHREAD_API} _LIBCPP_HAS_THREAD_API_PTHREAD)
  config_define(${LIBCXX_HAS_EXTERNAL_THREAD_API} _LIBCPP_HAS_THREAD_API_EXTERNAL)
  config_define(${LIBCXX_HAS_WIN32_THREAD_API} _LIBCPP_HAS_THREAD_API_WIN32)
  config_define(${LIBCXX_HAS_MUSL_LIBC} _LIBCPP_HAS_MUSL_LIBC)
@@ -91,7 +94,7 @@ index abe12c2805a7..8b9f17ce8981 100644
  config_define(${LIBCXX_ENABLE_FILESYSTEM} _LIBCPP_HAS_FILESYSTEM)
  config_define(${LIBCXX_ENABLE_RANDOM_DEVICE} _LIBCPP_HAS_RANDOM_DEVICE)
 diff --git a/libcxx/include/__atomic/contention_t.h b/libcxx/include/__atomic/contention_t.h
-index 5b42a0125f87..f588672fb2b7 100644
+index 5b42a0125..f588672fb 100644
 --- a/libcxx/include/__atomic/contention_t.h
 +++ b/libcxx/include/__atomic/contention_t.h
 @@ -19,11 +19,14 @@
@@ -112,10 +115,10 @@ index 5b42a0125f87..f588672fb2b7 100644
  using __cxx_atomic_contention_t _LIBCPP_NODEBUG = __cxx_atomic_impl<__cxx_contention_t>;
  
 diff --git a/libcxx/include/__config b/libcxx/include/__config
-index a866a7e65183..347b7c7d0d0a 100644
+index 699e195da..dd7f12acb 100644
 --- a/libcxx/include/__config
 +++ b/libcxx/include/__config
-@@ -908,7 +908,7 @@ typedef __char32_t char32_t;
+@@ -925,7 +925,7 @@ typedef __char32_t char32_t;
  #  endif
  
  #  if defined(__BIONIC__) || defined(__NuttX__) || defined(__Fuchsia__) || defined(__wasi__) ||                        \
@@ -125,7 +128,7 @@ index a866a7e65183..347b7c7d0d0a 100644
  #  endif
  
 diff --git a/libcxx/include/__config_site.in b/libcxx/include/__config_site.in
-index fc01aaf2d874..30b51d572958 100644
+index fc01aaf2d..30b51d572 100644
 --- a/libcxx/include/__config_site.in
 +++ b/libcxx/include/__config_site.in
 @@ -17,6 +17,7 @@
@@ -137,10 +140,10 @@ index fc01aaf2d874..30b51d572958 100644
  #cmakedefine01 _LIBCPP_HAS_THREAD_API_EXTERNAL
  #cmakedefine01 _LIBCPP_HAS_THREAD_API_WIN32
 diff --git a/libcxx/include/__locale_dir/locale_base_api.h b/libcxx/include/__locale_dir/locale_base_api.h
-index 9d92a5ea1f0a..4d1bec261431 100644
+index 8dbc28e83..ffbe36c91 100644
 --- a/libcxx/include/__locale_dir/locale_base_api.h
 +++ b/libcxx/include/__locale_dir/locale_base_api.h
-@@ -226,19 +226,48 @@ inline _LIBCPP_HIDE_FROM_ABI int __tolower(int __ch, __locale_t __loc) { return
+@@ -221,19 +221,48 @@ inline _LIBCPP_HIDE_FROM_ABI int __tolower(int __ch, __locale_t __loc) { return
  
  #      if _LIBCPP_HAS_WIDE_CHARACTERS
  inline _LIBCPP_HIDE_FROM_ABI int __wcscoll(const wchar_t* __s1, const wchar_t* __s2, __locale_t __loc) {
@@ -192,7 +195,7 @@ index 9d92a5ea1f0a..4d1bec261431 100644
  inline _LIBCPP_HIDE_FROM_ABI int __iswblank(wint_t __ch, __locale_t __loc) { return iswblank_l(__ch, __loc); }
  inline _LIBCPP_HIDE_FROM_ABI int __iswdigit(wint_t __ch, __locale_t __loc) { return iswdigit_l(__ch, __loc); }
 diff --git a/libcxx/lib/notweak.exp b/libcxx/lib/notweak.exp
-index fafde1c84b63..b1e1981f7837 100644
+index fafde1c84..b1e1981f7 100644
 --- a/libcxx/lib/notweak.exp
 +++ b/libcxx/lib/notweak.exp
 @@ -1,5 +1,5 @@
@@ -205,7 +208,7 @@ index fafde1c84b63..b1e1981f7837 100644
 +_pizlonated__ZS*
  
 diff --git a/libcxx/lib/weak.exp b/libcxx/lib/weak.exp
-index 6bdcc0578460..a43e416fdc5b 100644
+index 6bdcc0578..a43e416fd 100644
 --- a/libcxx/lib/weak.exp
 +++ b/libcxx/lib/weak.exp
 @@ -1,16 +1,16 @@
@@ -242,7 +245,7 @@ index 6bdcc0578460..a43e416fdc5b 100644
 +_pizlonated__ZTISt9bad_alloc
 +_pizlonated__ZTISt9exception
 diff --git a/libcxx/src/atomic.cpp b/libcxx/src/atomic.cpp
-index c1af8d6f95aa..9335fd307d37 100644
+index 903084da0..07676b387 100644
 --- a/libcxx/src/atomic.cpp
 +++ b/libcxx/src/atomic.cpp
 @@ -16,16 +16,20 @@
@@ -294,7 +297,7 @@ index c1af8d6f95aa..9335fd307d37 100644
  
  #elif defined(__APPLE__) && defined(_LIBCPP_USE_ULOCK)
 diff --git a/libcxx/src/chrono.cpp b/libcxx/src/chrono.cpp
-index dbc0f617b4fc..4e97ff239b7a 100644
+index 20387ea76..23d89028e 100644
 --- a/libcxx/src/chrono.cpp
 +++ b/libcxx/src/chrono.cpp
 @@ -37,8 +37,10 @@
@@ -310,7 +313,7 @@ index dbc0f617b4fc..4e97ff239b7a 100644
  #endif
  
 diff --git a/libcxx/src/experimental/tzdb.cpp b/libcxx/src/experimental/tzdb.cpp
-index f38f495c2d0b..8ac183d7ec22 100644
+index ac5c62bb8..c49715a4d 100644
 --- a/libcxx/src/experimental/tzdb.cpp
 +++ b/libcxx/src/experimental/tzdb.cpp
 @@ -52,7 +52,9 @@ namespace chrono {
@@ -325,7 +328,7 @@ index f38f495c2d0b..8ac183d7ec22 100644
  #else
  #  error "unknown path to the IANA Time Zone Database"
 diff --git a/libcxx/src/include/config_elast.h b/libcxx/src/include/config_elast.h
-index 7edff2d9375d..31c54bcf1abe 100644
+index 7edff2d93..31c54bcf1 100644
 --- a/libcxx/src/include/config_elast.h
 +++ b/libcxx/src/include/config_elast.h
 @@ -33,7 +33,7 @@
@@ -338,10 +341,10 @@ index 7edff2d9375d..31c54bcf1abe 100644
  #elif defined(__APPLE__)
  // No _LIBCPP_ELAST needed on Apple
 diff --git a/libcxxabi/CMakeLists.txt b/libcxxabi/CMakeLists.txt
-index 6dcfc51e5532..dd5ae4eb78ed 100644
+index cf478bcee..fa5b0e513 100644
 --- a/libcxxabi/CMakeLists.txt
 +++ b/libcxxabi/CMakeLists.txt
-@@ -411,6 +411,8 @@ if (LIBCXXABI_HAS_UNDEFINED_SYMBOLS)
+@@ -418,6 +418,8 @@ if (LIBCXXABI_HAS_UNDEFINED_SYMBOLS)
    endif()
  endif()
  
@@ -351,7 +354,7 @@ index 6dcfc51e5532..dd5ae4eb78ed 100644
    add_definitions(-D_LIBCPP_HAS_THREAD_API_PTHREAD)
  endif()
 diff --git a/libcxxabi/include/__cxxabi_config.h b/libcxxabi/include/__cxxabi_config.h
-index 759445dac91f..a4c2cdfc8033 100644
+index 759445dac..a4c2cdfc8 100644
 --- a/libcxxabi/include/__cxxabi_config.h
 +++ b/libcxxabi/include/__cxxabi_config.h
 @@ -10,7 +10,7 @@
@@ -364,7 +367,7 @@ index 759445dac91f..a4c2cdfc8033 100644
  #endif
  
 diff --git a/libcxxabi/lib/cxxabiv1.exp b/libcxxabi/lib/cxxabiv1.exp
-index 0a22831a63d0..c00211882e4a 100644
+index 0a22831a6..c00211882 100644
 --- a/libcxxabi/lib/cxxabiv1.exp
 +++ b/libcxxabi/lib/cxxabiv1.exp
 @@ -1,35 +1,35 @@
@@ -434,7 +437,7 @@ index 0a22831a63d0..c00211882e4a 100644
 +_pizlonated__ZTVN10__cxxabiv123__fundamental_type_infoE
 +_pizlonated__ZTVN10__cxxabiv129__pointer_to_member_type_infoE
 diff --git a/libcxxabi/lib/fundamental-types.exp b/libcxxabi/lib/fundamental-types.exp
-index fe21022328fe..ddcebcabe0e7 100644
+index fe2102232..ddcebcabe 100644
 --- a/libcxxabi/lib/fundamental-types.exp
 +++ b/libcxxabi/lib/fundamental-types.exp
 @@ -1,153 +1,153 @@
@@ -742,7 +745,7 @@ index fe21022328fe..ddcebcabe0e7 100644
 +_pizlonated__ZTSx
 +_pizlonated__ZTSy
 diff --git a/libcxxabi/lib/itanium-base.exp b/libcxxabi/lib/itanium-base.exp
-index 0c23a19c94c5..748d5a21105d 100644
+index 0c23a19c9..748d5a211 100644
 --- a/libcxxabi/lib/itanium-base.exp
 +++ b/libcxxabi/lib/itanium-base.exp
 @@ -1,31 +1,31 @@
@@ -808,7 +811,7 @@ index 0c23a19c94c5..748d5a21105d 100644
 +_pizlonated___cxa_unexpected_handler
 +_pizlonated___cxa_new_handler
 diff --git a/libcxxabi/lib/itanium-exceptions.exp b/libcxxabi/lib/itanium-exceptions.exp
-index 9a7f317b0232..fb015198f133 100644
+index 9a7f317b0..fb015198f 100644
 --- a/libcxxabi/lib/itanium-exceptions.exp
 +++ b/libcxxabi/lib/itanium-exceptions.exp
 @@ -1,14 +1,14 @@
@@ -840,7 +843,7 @@ index 9a7f317b0232..fb015198f133 100644
 +_pizlonated___cxa_rethrow
 +_pizlonated___cxa_throw
 diff --git a/libcxxabi/lib/new-delete.exp b/libcxxabi/lib/new-delete.exp
-index 4f97de7e8bb6..ab1c6c64b0df 100644
+index 4f97de7e8..ab1c6c64b 100644
 --- a/libcxxabi/lib/new-delete.exp
 +++ b/libcxxabi/lib/new-delete.exp
 @@ -1,21 +1,21 @@
@@ -886,21 +889,21 @@ index 4f97de7e8bb6..ab1c6c64b0df 100644
 +_pizlonated__ZnamSt11align_val_t
 +_pizlonated__ZnamSt11align_val_tRKSt9nothrow_t
 diff --git a/libcxxabi/lib/personality-sjlj.exp b/libcxxabi/lib/personality-sjlj.exp
-index be0bfac668e2..d87ff75584e7 100644
+index be0bfac66..d87ff7558 100644
 --- a/libcxxabi/lib/personality-sjlj.exp
 +++ b/libcxxabi/lib/personality-sjlj.exp
 @@ -1 +1 @@
 -___gxx_personality_sj0
 +_pizlonated___gxx_personality_sj0
 diff --git a/libcxxabi/lib/personality-v0.exp b/libcxxabi/lib/personality-v0.exp
-index 610e4e3568dc..cdabf6025336 100644
+index 610e4e356..cdabf6025 100644
 --- a/libcxxabi/lib/personality-v0.exp
 +++ b/libcxxabi/lib/personality-v0.exp
 @@ -1 +1 @@
 -___gxx_personality_v0
 +_pizlonated___gxx_personality_v0
 diff --git a/libcxxabi/lib/std-exceptions.exp b/libcxxabi/lib/std-exceptions.exp
-index bb4a2b2e93ea..b598735f17b9 100644
+index bb4a2b2e9..b598735f1 100644
 --- a/libcxxabi/lib/std-exceptions.exp
 +++ b/libcxxabi/lib/std-exceptions.exp
 @@ -1,121 +1,121 @@
@@ -1138,7 +1141,7 @@ index bb4a2b2e93ea..b598735f17b9 100644
 +_pizlonated__ZNSt9type_infoD1Ev
 +_pizlonated__ZNSt9type_infoD2Ev
 diff --git a/libcxxabi/lib/std-misc.exp b/libcxxabi/lib/std-misc.exp
-index 0ce6a2944398..2d7318204323 100644
+index 0ce6a2944..2d7318204 100644
 --- a/libcxxabi/lib/std-misc.exp
 +++ b/libcxxabi/lib/std-misc.exp
 @@ -1,9 +1,9 @@
@@ -1160,7 +1163,7 @@ index 0ce6a2944398..2d7318204323 100644
 +_pizlonated__ZSt15set_new_handlerPFvvE
 +_pizlonated__ZSt9terminatev
 diff --git a/libcxxabi/lib/symbols-not-reexported.exp b/libcxxabi/lib/symbols-not-reexported.exp
-index ea5d0b3fc15d..ed05958ee771 100644
+index ea5d0b3fc..ed05958ee 100644
 --- a/libcxxabi/lib/symbols-not-reexported.exp
 +++ b/libcxxabi/lib/symbols-not-reexported.exp
 @@ -4,10 +4,10 @@
@@ -1179,7 +1182,7 @@ index ea5d0b3fc15d..ed05958ee771 100644
 -___cxa_rethrow_primary_exception
 +_pizlonated___cxa_rethrow_primary_exception
 diff --git a/libcxxabi/src/cxa_exception.h b/libcxxabi/src/cxa_exception.h
-index aba08f299210..f04bc05038ee 100644
+index aba08f299..f04bc0503 100644
 --- a/libcxxabi/src/cxa_exception.h
 +++ b/libcxxabi/src/cxa_exception.h
 @@ -17,6 +17,10 @@
@@ -1206,7 +1209,7 @@ index aba08f299210..f04bc05038ee 100644
      void *adjustedPtr;
  #endif
 diff --git a/libcxxabi/src/cxa_guard_impl.h b/libcxxabi/src/cxa_guard_impl.h
-index 191a589176b1..640e4c1fda0f 100644
+index 191a58917..640e4c1fd 100644
 --- a/libcxxabi/src/cxa_guard_impl.h
 +++ b/libcxxabi/src/cxa_guard_impl.h
 @@ -63,6 +63,8 @@
@@ -1245,7 +1248,7 @@ index 191a589176b1..640e4c1fda0f 100644
  #else
  constexpr void (*PlatformFutexWait)(int*, int) = nullptr;
 diff --git a/libcxxabi/src/cxa_personality.cpp b/libcxxabi/src/cxa_personality.cpp
-index 5f6e75c5be19..944ae41b37a0 100644
+index 5f6e75c5b..944ae41b3 100644
 --- a/libcxxabi/src/cxa_personality.cpp
 +++ b/libcxxabi/src/cxa_personality.cpp
 @@ -22,6 +22,10 @@
@@ -1540,7 +1543,7 @@ index 5f6e75c5be19..944ae41b37a0 100644
                  // We need to __cxa_end_catch for both the old exception and the
                  //   new exception.  Technically we should do it in that order.
 diff --git a/libcxxabi/src/cxa_thread_atexit.cpp b/libcxxabi/src/cxa_thread_atexit.cpp
-index 8546cfe48c39..094ea83d7419 100644
+index 8546cfe48..094ea83d7 100644
 --- a/libcxxabi/src/cxa_thread_atexit.cpp
 +++ b/libcxxabi/src/cxa_thread_atexit.cpp
 @@ -17,6 +17,8 @@

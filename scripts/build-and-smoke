@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Build Fil-C Clang + LLD (Release, no assertions, X86;AArch64) and run a
+# freestanding C smoke test verifying the Fil-C pass pipeline on both targets.
+#
+# Usage: scripts/build-and-smoke [LLVM_SRC_DIR] [BUILD_DIR]
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LLVM_SRC="${1:-$REPO_ROOT/.work/llvm-project}"
+BUILD_DIR="${2:-$REPO_ROOT/.work/build}"
+
+if [[ ! -f "$LLVM_SRC/llvm/CMakeLists.txt" ]]; then
+  echo "error: LLVM sources not found at $LLVM_SRC (run scripts/apply first)" >&2
+  exit 1
+fi
+
+NPROC="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)"
+if [[ -r /proc/meminfo ]]; then
+  MEM_MB="$(awk '/MemTotal:/ {printf "%d", $2/1024}' /proc/meminfo)"
+else
+  MEM_MB="$(( $(sysctl -n hw.memsize 2>/dev/null || echo 8589934592) / 1024 / 1024 ))"
+fi
+
+# On >=24 GiB hosts (high-memory), default to full CPU parallelism and 2 link jobs.
+# On 8 GiB CI VMs, cap concurrency to avoid OOM (~2.5 GiB/job budget, 1 link job).
+if (( MEM_MB >= 24576 )); then
+  DEFAULT_COMPILE_JOBS="$NPROC"
+  DEFAULT_LINK_JOBS=2
+else
+  DEFAULT_COMPILE_JOBS=$(( (MEM_MB - 1024) / 2560 ))
+  (( DEFAULT_COMPILE_JOBS < 1 )) && DEFAULT_COMPILE_JOBS=1
+  DEFAULT_LINK_JOBS=1
+fi
+
+COMPILE_JOBS="${FILC_COMPILE_JOBS:-$DEFAULT_COMPILE_JOBS}"
+LINK_JOBS="${FILC_LINK_JOBS:-$DEFAULT_LINK_JOBS}"
+(( COMPILE_JOBS > NPROC )) && COMPILE_JOBS="$NPROC"
+
+echo "Host: nproc=${NPROC}, mem=${MEM_MB} MiB -> compile_jobs=${COMPILE_JOBS}, link_jobs=${LINK_JOBS}"
+
+CMAKE_ARGS=(
+  -S "$LLVM_SRC/llvm"
+  -B "$BUILD_DIR"
+  -G Ninja
+  -DCMAKE_BUILD_TYPE=Release
+  -DLLVM_ENABLE_ASSERTIONS=OFF
+  -DLLVM_TARGETS_TO_BUILD="X86;AArch64"
+  -DLLVM_ENABLE_PROJECTS="clang;lld"
+  -DCLANG_ENABLE_CIR=OFF
+  -DLLVM_PARALLEL_LINK_JOBS="$LINK_JOBS"
+  -DLLVM_ENABLE_LIBXML2=OFF
+  -DLLVM_ENABLE_LIBEDIT=OFF
+  -DLLVM_ENABLE_LIBPFM=OFF
+  -DLLVM_ENABLE_ZLIB=OFF
+  -DLLVM_ENABLE_ZSTD=OFF
+  -DLLVM_ENABLE_CURL=OFF
+  -DLLVM_ENABLE_HTTPLIB=OFF
+  -DLLVM_INCLUDE_BENCHMARKS=OFF
+  -DLLVM_INCLUDE_EXAMPLES=OFF
+  -DLLVM_INCLUDE_TESTS=OFF
+  -DLLVM_INCLUDE_DOCS=OFF
+  -DCLANG_INCLUDE_TESTS=OFF
+  -DCLANG_INCLUDE_DOCS=OFF
+)
+
+if command -v clang >/dev/null 2>&1 && command -v clang++ >/dev/null 2>&1; then
+  CMAKE_ARGS+=(-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++)
+fi
+
+if command -v ld.lld >/dev/null 2>&1; then
+  CMAKE_ARGS+=(-DLLVM_ENABLE_LLD=ON)
+fi
+
+if command -v ccache >/dev/null 2>&1; then
+  CMAKE_ARGS+=(-DLLVM_CCACHE_BUILD=ON)
+fi
+
+T_START="$(date +%s)"
+echo "=== Configuring LLVM + Clang + LLD ==="
+cmake "${CMAKE_ARGS[@]}"
+
+echo "=== Building clang and lld (jobs=${COMPILE_JOBS}, link_jobs=${LINK_JOBS}) ==="
+ninja -C "$BUILD_DIR" -j"$COMPILE_JOBS" clang lld
+T_BUILD_END="$(date +%s)"
+echo "BUILD_DURATION_SECONDS=$((T_BUILD_END - T_START))"
+
+CLANG_BIN="$BUILD_DIR/bin/clang"
+LLD_BIN="$BUILD_DIR/bin/ld.lld"
+
+echo "=== Tool versions ==="
+"$CLANG_BIN" --version
+"$LLD_BIN" --version
+
+echo "=== Running Fil-C compiler pipeline smoke tests (X86_64 + AArch64) ==="
+SMOKE_DIR="$BUILD_DIR/smoke"
+mkdir -p "$SMOKE_DIR"
+
+cat > "$SMOKE_DIR/smoke.c" <<'EOF'
+struct node {
+    int value;
+    union {
+        long num;
+        struct node *next;
+    } u;
+};
+
+typedef int (*fn_t)(int *, int);
+
+int sum_array(int *arr, int n) {
+    int acc = 0;
+    for (int i = 0; i < n; ++i)
+        acc += arr[i];
+    return acc;
+}
+
+int walk_and_call(struct node *head, int *arr, int n, fn_t cb) {
+    int total = 0;
+    while (head) {
+        total += head->value;
+        head = head->u.next;
+    }
+    return total + cb(arr, n);
+}
+EOF
+
+for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+  echo "--- Smoke test target: $target ---"
+  IR_FILE="$SMOKE_DIR/smoke_${target}.ll"
+  OBJ_FILE="$SMOKE_DIR/smoke_${target}.o"
+
+  "$CLANG_BIN" --target="$target" -ffreestanding -O2 -S -emit-llvm \
+    "$SMOKE_DIR/smoke.c" -o "$IR_FILE"
+  "$CLANG_BIN" --target="$target" -ffreestanding -O2 -c \
+    "$SMOKE_DIR/smoke.c" -o "$OBJ_FILE"
+
+  grep -q "pizlonated_sum_array" "$IR_FILE"
+  grep -q "pizlonated_walk_and_call" "$IR_FILE"
+  grep -qE "filc_|zptr_" "$IR_FILE"
+  test -s "$OBJ_FILE"
+  echo "PASS ($target): IR=$(wc -l < "$IR_FILE") lines, OBJ=$(wc -c < "$OBJ_FILE") bytes"
+done
+
+if command -v ccache >/dev/null 2>&1; then
+  echo "=== ccache stats ==="
+  ccache -s || true
+fi
+
+T_END="$(date +%s)"
+echo "TOTAL_DURATION_SECONDS=$((T_END - T_START))"
+echo "=== ALL SMOKE TESTS PASSED ==="

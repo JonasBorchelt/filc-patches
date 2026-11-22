@@ -1,0 +1,259 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Nightly check against the latest stable upstream LLVM release tag
+# (llvmorg-X.Y.Z, excluding rc/init tags).
+#
+# - If the latest release matches UPSTREAM: applies the patch series and runs
+#   scripts/build-and-smoke as a regression check.
+# - If a newer release tag is available: applies the patch series patch-by-patch,
+#   reports the first failing patch (if any), and runs scripts/build-and-smoke
+#   when all patches apply cleanly.
+#
+# Always emits a SHA-256-hashed evidence report (Belegdatei) to REPORT_FILE,
+# stdout, and optionally FILC_REPORT_ARCHIVE_DIR.
+#
+# Usage: scripts/nightly-check [LLVM_DIR] [BUILD_DIR] [REPORT_FILE]
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../UPSTREAM
+source "$REPO_ROOT/UPSTREAM"
+
+LLVM_DIR="${1:-$REPO_ROOT/.work/llvm-nightly}"
+BUILD_DIR="${2:-$REPO_ROOT/.work/build-nightly}"
+REPORT_FILE="${3:-$REPO_ROOT/.work/nightly-report.txt}"
+
+ARCHIVE_DIR="${FILC_REPORT_ARCHIVE_DIR:-}"
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+T_START="$(date +%s)"
+DATE_UTC="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+STAMP_UTC="$(date -u '+%Y%m%dT%H%M%SZ')"
+
+FILC_PATCHES_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+FILC_PATCHES_BRANCH="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+PINNED_RELEASE_TAG="${LLVM_TAG:-unknown}"
+PINNED_LLVM_COMMIT="${LLVM_COMMIT:-unknown}"
+
+RELEASE_TAG="unknown"
+RELEASE_COMMIT="unknown"
+RELEASE_SUBJECT="unknown"
+RUN_MODE="unknown"
+PATCH_STATUS="FAIL"
+FIRST_FAILING_PATCH="none"
+FIRST_FAILURE_DETAIL=""
+BUILD_AND_SMOKE_STATUS="SKIP"
+OVERALL_STATUS="FAIL"
+
+declare -a PATCH_RESULTS=()
+
+emit_report() {
+  local t_end duration body_file report_sha archived
+  t_end="$(date +%s)"
+  duration="$((t_end - T_START))"
+  mkdir -p "$(dirname "$REPORT_FILE")"
+  body_file="${REPORT_FILE}.body"
+
+  {
+    echo "DATE_UTC=${DATE_UTC}"
+    echo "FILC_PATCHES_COMMIT=${FILC_PATCHES_COMMIT}"
+    echo "FILC_PATCHES_BRANCH=${FILC_PATCHES_BRANCH}"
+    echo "LLVM_REPO=${LLVM_REPO}"
+    echo "PINNED_RELEASE_TAG=${PINNED_RELEASE_TAG}"
+    echo "PINNED_LLVM_COMMIT=${PINNED_LLVM_COMMIT}"
+    echo "RELEASE_TAG=${RELEASE_TAG}"
+    echo "RELEASE_COMMIT=${RELEASE_COMMIT}"
+    echo "RELEASE_SUBJECT=${RELEASE_SUBJECT}"
+    echo "RUN_MODE=${RUN_MODE}"
+    echo "PATCH_STATUS=${PATCH_STATUS}"
+    echo "FIRST_FAILING_PATCH=${FIRST_FAILING_PATCH}"
+    echo "BUILD_AND_SMOKE_STATUS=${BUILD_AND_SMOKE_STATUS}"
+    echo "OVERALL_STATUS=${OVERALL_STATUS}"
+    echo "DURATION_SECONDS=${duration}"
+    echo ""
+    echo "PATCH_SERIES:"
+    if (( ${#PATCH_RESULTS[@]} == 0 )); then
+      echo "  (no patches evaluated)"
+    else
+      for entry in "${PATCH_RESULTS[@]}"; do
+        echo "  ${entry}"
+      done
+    fi
+    if [[ -n "$FIRST_FAILURE_DETAIL" ]]; then
+      echo ""
+      echo "FIRST_FAILURE_DETAIL:"
+      printf '%s\n' "$FIRST_FAILURE_DETAIL" | sed 's/^/  /'
+    fi
+  } > "$body_file"
+
+  report_sha="$(sha256_file "$body_file")"
+  {
+    cat "$body_file"
+    echo ""
+    echo "REPORT_SHA256=${report_sha}"
+  } > "$REPORT_FILE"
+  rm -f "$body_file"
+  printf '%s  %s\n' "$report_sha" "$(basename "$REPORT_FILE")" > "${REPORT_FILE}.sha256"
+
+  echo "=== NIGHTLY EVIDENCE REPORT BEGIN ==="
+  cat "$REPORT_FILE"
+  echo "=== NIGHTLY EVIDENCE REPORT END ==="
+
+  if [[ -n "$ARCHIVE_DIR" ]]; then
+    if mkdir -p "$ARCHIVE_DIR" 2>/dev/null && [[ -w "$ARCHIVE_DIR" ]]; then
+      archived="${ARCHIVE_DIR}/nightly-${STAMP_UTC}-${RELEASE_TAG}.txt"
+      cp "$REPORT_FILE" "$archived"
+      printf '%s  %s\n' "$report_sha" "$(basename "$archived")" > "${archived}.sha256"
+      cp "$REPORT_FILE" "${ARCHIVE_DIR}/latest.txt"
+      echo "Archived evidence report to ${archived}"
+    fi
+  fi
+}
+
+echo "=== Resolving latest stable LLVM release tag from ${LLVM_REPO} ==="
+if [[ -n "${FILC_RELEASE_TAG:-}" ]]; then
+  RELEASE_TAG="$FILC_RELEASE_TAG"
+else
+  RELEASE_TAG="$(
+    git ls-remote --tags "$LLVM_REPO" 'refs/tags/llvmorg-*' \
+      | awk '{print $2}' \
+      | sed 's|^refs/tags/||' \
+      | grep -E '^llvmorg-[0-9]+\.[0-9]+\.[0-9]+$' \
+      | sort -V \
+      | tail -n 1
+  )"
+fi
+
+if [[ -z "$RELEASE_TAG" ]]; then
+  FIRST_FAILURE_DETAIL="Failed to resolve latest llvmorg-X.Y.Z release tag from ${LLVM_REPO}"
+  emit_report
+  exit 1
+fi
+
+RELEASE_COMMIT="$(git ls-remote --tags "$LLVM_REPO" "refs/tags/${RELEASE_TAG}^{}" | awk 'NR==1 {print $1}')"
+if [[ -z "$RELEASE_COMMIT" ]]; then
+  RELEASE_COMMIT="$(git ls-remote --tags "$LLVM_REPO" "refs/tags/${RELEASE_TAG}" | awk 'NR==1 {print $1}')"
+fi
+if [[ -z "$RELEASE_COMMIT" ]]; then
+  FIRST_FAILURE_DETAIL="Failed to resolve commit SHA for tag ${RELEASE_TAG} from ${LLVM_REPO}"
+  emit_report
+  exit 1
+fi
+
+if [[ "$RELEASE_TAG" == "$PINNED_RELEASE_TAG" && "$RELEASE_COMMIT" == "$PINNED_LLVM_COMMIT" ]]; then
+  RUN_MODE="regression"
+  echo "Latest release ${RELEASE_TAG} (${RELEASE_COMMIT}) matches UPSTREAM pin -> regression build + smoke"
+else
+  RUN_MODE="new-release"
+  echo "Newer release detected: ${RELEASE_TAG} (${RELEASE_COMMIT}) vs pinned ${PINNED_RELEASE_TAG} (${PINNED_LLVM_COMMIT})"
+fi
+
+mkdir -p "$(dirname "$LLVM_DIR")"
+if [[ ! -d "$LLVM_DIR/.git" ]]; then
+  git init -q "$LLVM_DIR"
+  git -C "$LLVM_DIR" remote add origin "$LLVM_REPO"
+fi
+
+if ! git -C "$LLVM_DIR" cat-file -e "${RELEASE_COMMIT}^{commit}" 2>/dev/null; then
+  git -C "$LLVM_DIR" config remote.origin.promisor true
+  git -C "$LLVM_DIR" config remote.origin.partialclonefilter blob:none
+  git -C "$LLVM_DIR" fetch --depth=1 --no-tags --filter=blob:none origin \
+    "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+fi
+
+git -C "$LLVM_DIR" sparse-checkout init --cone
+git -C "$LLVM_DIR" sparse-checkout set \
+  llvm clang lld cmake third-party libcxx libcxxabi libunwind libc polly
+git -C "$LLVM_DIR" checkout -q --force --detach "$RELEASE_COMMIT"
+git -C "$LLVM_DIR" clean -fdx -q
+
+ACTUAL="$(git -C "$LLVM_DIR" rev-parse HEAD)"
+if [[ "$ACTUAL" != "$RELEASE_COMMIT" ]]; then
+  FIRST_FAILURE_DETAIL="Checked-out commit ${ACTUAL} != resolved ${RELEASE_COMMIT} for ${RELEASE_TAG}"
+  emit_report
+  exit 1
+fi
+RELEASE_SUBJECT="$(git -C "$LLVM_DIR" log -1 --format='%cI %s' HEAD)"
+echo "Checked out ${RELEASE_TAG}: ${RELEASE_COMMIT} (${RELEASE_SUBJECT})"
+
+collect_patches() {
+  local base_dir="$1"
+  local series_file="$2"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"
+    line="$(echo "$line" | xargs)"
+    [[ -z "$line" ]] && continue
+    echo "${base_dir#"$REPO_ROOT"/}/${line}"
+  done < "$series_file"
+}
+
+declare -a ALL_PATCHES=()
+while IFS= read -r rel; do
+  ALL_PATCHES+=("$rel")
+done < <(
+  collect_patches "$REPO_ROOT/llvm" "$REPO_ROOT/llvm/series"
+  if [[ -f "$REPO_ROOT/runtime/cxx/series" ]]; then
+    collect_patches "$REPO_ROOT/runtime/cxx" "$REPO_ROOT/runtime/cxx/series"
+  fi
+)
+
+PATCH_STATUS="PASS"
+for rel in "${ALL_PATCHES[@]}"; do
+  patch_path="${REPO_ROOT}/${rel}"
+  if [[ ! -f "$patch_path" ]]; then
+    if [[ "$FIRST_FAILING_PATCH" == "none" ]]; then
+      FIRST_FAILING_PATCH="$rel"
+      FIRST_FAILURE_DETAIL="Missing patch file: ${rel}"
+    fi
+    PATCH_STATUS="FAIL"
+    PATCH_RESULTS+=("FAIL  missing                                                           ${rel}")
+    continue
+  fi
+
+  psha="$(sha256_file "$patch_path")"
+  if [[ "$PATCH_STATUS" != "PASS" ]]; then
+    PATCH_RESULTS+=("SKIP  ${psha}  ${rel}")
+    continue
+  fi
+
+  echo "Checking & applying ${rel} ..."
+  err_out=""
+  if err_out="$(git -C "$LLVM_DIR" apply --check --whitespace=nowarn "$patch_path" 2>&1)"; then
+    git -C "$LLVM_DIR" apply --whitespace=nowarn "$patch_path"
+    PATCH_RESULTS+=("PASS  ${psha}  ${rel}")
+  else
+    PATCH_STATUS="FAIL"
+    FIRST_FAILING_PATCH="$rel"
+    FIRST_FAILURE_DETAIL="$err_out"
+    PATCH_RESULTS+=("FAIL  ${psha}  ${rel}")
+    echo "FIRST FAILING PATCH: ${rel}" >&2
+    printf '%s\n' "$err_out" >&2
+  fi
+done
+
+if [[ "$PATCH_STATUS" == "PASS" ]]; then
+  echo "=== All ${#ALL_PATCHES[@]} patches applied cleanly (${RUN_MODE}); running build-and-smoke ==="
+  if "$REPO_ROOT/scripts/build-and-smoke" "$LLVM_DIR" "$BUILD_DIR"; then
+    BUILD_AND_SMOKE_STATUS="PASS"
+    OVERALL_STATUS="PASS"
+  else
+    BUILD_AND_SMOKE_STATUS="FAIL"
+    OVERALL_STATUS="FAIL"
+  fi
+else
+  BUILD_AND_SMOKE_STATUS="SKIP"
+  OVERALL_STATUS="FAIL"
+fi
+
+emit_report
+
+if [[ "$OVERALL_STATUS" != "PASS" ]]; then
+  exit 1
+fi

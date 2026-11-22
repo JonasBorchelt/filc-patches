@@ -132,12 +132,13 @@ Rebase-Notes (llvmorg-21.1.8 -> llvmorg-22.1.8):
 
 
 Rebase-Notes (llvmorg-22.1.8 -> llvmorg-23.1.6):
-  - Applied cleanly to llvmorg-23.1.6 with no conflicts.
+  - RegisterFilPasses.{h,cpp}: adapted to LLVM 23 enum class OptimizationLevel (#include OptimizationLevel.h, getInlineParamsFromOptLevel(static_cast<unsigned>(Level))).
+  - FilPizlonator.cpp: concatenated Module::getModuleInlineAsm() GlobalAsmFragment list into std::string for MATokenizer.
 
 ---
 diff --git a/llvm/include/llvm/Passes/RegisterFilPasses.h b/llvm/include/llvm/Passes/RegisterFilPasses.h
 new file mode 100644
-index 000000000..25e989a8d
+index 000000000..c13b0f5d9
 --- /dev/null
 +++ b/llvm/include/llvm/Passes/RegisterFilPasses.h
 @@ -0,0 +1,47 @@
@@ -162,11 +163,11 @@ index 000000000..25e989a8d
 +// PassManager.h, so it cannot be forward-declared as a class; include the
 +// header instead.
 +#include "llvm/IR/PassManager.h"
++#include "llvm/Passes/OptimizationLevel.h"
 +
 +namespace llvm {
 +
 +class PassBuilder;
-+class OptimizationLevel;
 +struct FilJITConfiguration;
 +
 +// Registers the Fil-C pass pipeline on a PassBuilder: the pipeline-start
@@ -301,7 +302,7 @@ index eaabf60b0..859d16e00 100644
    ADDITIONAL_HEADER_DIRS
 diff --git a/llvm/lib/Passes/RegisterFilPasses.cpp b/llvm/lib/Passes/RegisterFilPasses.cpp
 new file mode 100644
-index 000000000..09e54975a
+index 000000000..df6932259
 --- /dev/null
 +++ b/llvm/lib/Passes/RegisterFilPasses.cpp
 @@ -0,0 +1,260 @@
@@ -482,7 +483,7 @@ index 000000000..09e54975a
 +                  std::move(EarlyFPM), /*EagerlyInvalidate =*/ true));
 +
 +    if (FilCInline) {
-+      InlineParams IP = getInlineParams(Level.getSpeedupLevel(), Level.getSizeLevel());
++      InlineParams IP = getInlineParamsFromOptLevel(static_cast<unsigned>(Level));
 +      ModuleInlinerWrapperPass MIWP(IP, /*MandatoryFirst=*/true,
 +                                    InlineContext{
 +                                      ThinOrFullLTOPhase::None,
@@ -750,10 +751,10 @@ index 000000000..669af69e1
 +}
 diff --git a/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp b/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp
 new file mode 100644
-index 000000000..8d89ddd0f
+index 000000000..742829f22
 --- /dev/null
 +++ b/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp
-@@ -0,0 +1,17702 @@
+@@ -0,0 +1,17705 @@
 +//===- FilPizlonator.cpp - apply GIMSO semantics to LLVM IR ---------------===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -16071,7 +16072,10 @@ index 000000000..8d89ddd0f
 +  }
 +
 +  void compileModuleAsm() {
-+    MATokenizer MAT(M, M.getModuleInlineAsm());
++    std::string ModuleInlineAsm;
++    for (const Module::GlobalAsmFragment &Frag : M.getModuleInlineAsm())
++      ModuleInlineAsm += Frag.Asm;
++    MATokenizer MAT(M, ModuleInlineAsm);
 +
 +    std::ostringstream NewModuleAsm;
 +

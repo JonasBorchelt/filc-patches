@@ -10,6 +10,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
+export FILC_PORTS_CACHE_DIR="$TMP_DIR/cache"
+mkdir -p "$FILC_PORTS_CACHE_DIR"
 
 echo "=== 1. Real ports/ DAG & recipe dry-run validation ==="
 "$REPO_ROOT/scripts/build-ports" --wave 1 --dry-run

@@ -215,7 +215,7 @@ fi
 # 2. Fetch & SHA-256 verification
 CURRENT_STAGE="fetch"
 TARBALL_NAME="$(basename "${UPSTREAM_URL%%\?*}")"
-TARBALL_PATH="$CACHE_DIR/${NAME}-${VERSION}-${TARBALL_NAME}"
+TARBALL_PATH="$CACHE_DIR/${NAME}-${VERSION}-${UPSTREAM_SHA256:0:12}-${TARBALL_NAME}"
 
 if [[ ! -f "$TARBALL_PATH" ]]; then
   TMP_DL="$TARBALL_PATH.part.$$"

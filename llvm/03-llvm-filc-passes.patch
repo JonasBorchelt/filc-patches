@@ -125,6 +125,7 @@ Rebase-Notes (llvmorg-20.1.8 -> llvmorg-21.1.8):
   - llvm/lib/Transforms/Instrumentation/CMakeLists.txt: context updated for MemProf split and InstrOrderFile removal.
   - KillUB.cpp: removed Attribute::NoCapture (removed in LLVM 21; superseded by Attribute::Captures already present in KillUB).
   - FilPizlonator.cpp: simplified Triple(M.getTargetTriple()).getArch() to M.getTargetTriple().getArch() for LLVM 21 Triple return type.
+  - FilPizlonator.cpp: added .str() to InlineAsm::getConstraintString() / getAsmString() calls (now return StringRef in LLVM 21) and explicit <size_t>/<uint64_t> on std::max alignment calls.
 
 ---
 diff --git a/llvm/include/llvm/Passes/RegisterFilPasses.h b/llvm/include/llvm/Passes/RegisterFilPasses.h
@@ -6786,7 +6787,7 @@ index 000000000..279d28f38
 +    size_t Offset = 0;
 +    for (size_t Idx = 0; Idx < Elements.size(); ++Idx) {
 +      Type* T = Elements[Idx].T;
-+      size_t Alignment = std::max(WordSize, DL.getABITypeAlign(T).value());
++      size_t Alignment = std::max<size_t>(WordSize, DL.getABITypeAlign(T).value());
 +      Offset = (Offset + Alignment - 1) & -Alignment;
 +      Func(Idx, Elements[Idx], Offset);
 +      Offset += DL.getTypeAllocSize(T);
@@ -6801,7 +6802,7 @@ index 000000000..279d28f38
 +  size_t argsAlignment(const std::vector<ArgInfo>& Elements) {
 +    size_t Alignment = WordSize;
 +    iterateArgs(Elements, [&] (size_t Idx, ArgInfo AI, size_t Offset) {
-+      Alignment = std::max(Alignment, AI.A.value());
++      Alignment = std::max<size_t>(Alignment, AI.A.value());
 +    });
 +    return Alignment;
 +  }
@@ -9333,7 +9334,7 @@ index 000000000..279d28f38
 +    bool HasDirFlagClobber = false;
 +    std::unordered_set<std::string> ClobberFamilies;
 +
-+    std::string ConstraintStr = IA->getConstraintString();
++    std::string ConstraintStr = IA->getConstraintString().str();
 +    for (size_t idx = 0, end = ConstraintStr.size(); idx < end; ) {
 +      size_t comma = ConstraintStr.find(',', idx);
 +      if (comma == std::string::npos)
@@ -10428,7 +10429,7 @@ index 000000000..279d28f38
 +    };
 +
 +    // Split asm string into lines on \n and ;.
-+    std::string AsmStr = IA->getAsmString();
++    std::string AsmStr = IA->getAsmString().str();
 +    std::vector<std::string> lines;
 +    {
 +      std::string cur;
@@ -11985,7 +11986,7 @@ index 000000000..279d28f38
 +    bool HasFPSRClobber = false;
 +    std::unordered_set<std::string> ClobberFamilies;
 +
-+    std::string ConstraintStr = IA->getConstraintString();
++    std::string ConstraintStr = IA->getConstraintString().str();
 +    for (size_t idx = 0, end = ConstraintStr.size(); idx < end; ) {
 +      size_t comma = ConstraintStr.find(',', idx);
 +      if (comma == std::string::npos)
@@ -13051,7 +13052,7 @@ index 000000000..279d28f38
 +    };
 +
 +    // Split the asm string into statements on '\n' and ';'.
-+    std::string AsmStr = IA->getAsmString();
++    std::string AsmStr = IA->getAsmString().str();
 +    std::vector<std::string> lines;
 +    {
 +      std::string cur;
@@ -13896,7 +13897,7 @@ index 000000000..279d28f38
 +    std::vector<AsmIO> Outputs;
 +    std::vector<AsmIO> Inputs;
 +
-+    std::string Constraints = IA->getConstraintString();
++    std::string Constraints = IA->getConstraintString().str();
 +    for (size_t Index = 0, EndIndex; Index < Constraints.size(); Index = EndIndex + 1) {
 +      EndIndex = Constraints.find(',', Index);
 +      if (EndIndex == std::string::npos)
@@ -18077,7 +18078,7 @@ index 000000000..279d28f38
 +          assert(!(LAD.Size % WordSize));
 +          LAD.Payload = new AllocaInst(
 +            Int8Ty, 0, ConstantInt::get(IntPtrTy, LAD.Size),
-+            Align(std::max(GCMinAlign,
++            Align(std::max<uint64_t>(GCMinAlign,
 +                           std::max(DL.getABITypeAlign(AI->getAllocatedType()).value(),
 +                                    AI->getAlign().value()))),
 +            "filc_local_payload", AllocaInsertionPoint);

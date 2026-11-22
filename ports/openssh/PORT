@@ -1,0 +1,45 @@
+NAME="openssh"
+VERSION="10.6p2"
+LICENSE="BSD-2-Clause"
+UPSTREAM_URL="https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-10.6p2.tar.gz"
+UPSTREAM_SHA256="5ac4ab37a02f6185f9cfb6373d29a8aac2dad021b16bfc810482780b2c105004"
+EXTRACT_DIR="openssh-10.6p2"
+TIER=3
+DEPS="zlib openssl libedit"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--without-pam --without-selinux"
+MAKE_ARGS=""
+INSTALL_ARGS="install-nokeys"
+TEST_CMD=""
+POLICY_CLASS="P2-Package"
+POLICY_RATIONALE="Audited down from Fil-C openssh.projeny (52 files, +3626/-197) to 2 files (+12/-82): drops 50 distro-only GSSAPI/Fedora/systemd patches and keeps only Fil-C zsetproctitle() and seccomp sandbox runtime compatibility."
+FILC_ORIGIN_REF="cede3de02b42:projects/openssh.projeny"
+
+port_configure() {
+  CPPFLAGS="-I$PIZFIX/include" LDFLAGS="-L$PIZFIX/lib" \
+    ./configure --prefix="$PIZFIX" \
+      --with-ssl-dir="$PIZFIX" \
+      --with-zlib="$PIZFIX" \
+      --with-libedit="$PIZFIX" \
+      --without-pam \
+      --without-selinux
+}
+
+port_install() {
+  make -j"$JOBS" install-nokeys
+}
+
+port_test() {
+  "$PIZFIX/bin/ssh" -V 2>&1 | grep -q 'OpenSSH_10\.6'
+  local td
+  td="$(mktemp -d)"
+  "$PIZFIX/bin/ssh-keygen" -q -t ed25519 -N '' -f "$td/id_ed25519"
+  "$PIZFIX/bin/ssh-keygen" -q -t rsa -b 2048 -N '' -f "$td/id_rsa"
+  "$PIZFIX/bin/ssh-keygen" -lf "$td/id_ed25519.pub" | grep -q 'ED25519'
+  "$PIZFIX/bin/ssh-keygen" -lf "$td/id_rsa.pub" | grep -q 'RSA'
+  printf 'filc-openssh-sign-check\n' > "$td/msg.txt"
+  "$PIZFIX/bin/ssh-keygen" -Y sign -f "$td/id_ed25519" -n filc-test "$td/msg.txt"
+  printf 'filc-tester %s\n' "$(cat "$td/id_ed25519.pub")" > "$td/allowed"
+  "$PIZFIX/bin/ssh-keygen" -Y verify -f "$td/allowed" -I filc-tester -n filc-test -s "$td/msg.txt.sig" < "$td/msg.txt"
+  rm -rf "$td"
+}

@@ -1,0 +1,48 @@
+NAME="openssl"
+VERSION="3.6.5"
+LICENSE="Apache-2.0"
+UPSTREAM_URL="https://github.com/openssl/openssl/releases/download/openssl-3.6.5/openssl-3.6.5.tar.gz"
+UPSTREAM_SHA256="1f7fe0f6b2d9c46f70eee94d4e8700cf754623e9764af424e3eb9a9127d77999"
+EXTRACT_DIR="openssl-3.6.5"
+TIER=3
+DEPS="zlib zstd"
+BUILD_SYSTEM="custom"
+CONFIGURE_ARGS="no-asm zlib enable-zstd -DOPENSSL_NO_SECURE_MEMORY"
+MAKE_ARGS=""
+INSTALL_ARGS="install_sw install_ssldirs"
+TEST_CMD=""
+POLICY_CLASS="P2-Package"
+POLICY_RATIONALE="Audited down from Fil-C zunsafe-openssl3 (78 files, +2367/-756) to 1 file (+2/-1): pure-C no-asm build removes all -yolo-assembler/zunsafe wrappers, P1 llvm/06b eliminates shared-info.pl, and -DOPENSSL_NO_SECURE_MEMORY disables raw-arena secure malloc."
+FILC_ORIGIN_REF="cede3de02b42:projects/zunsafe-openssl3.projeny"
+
+port_configure() {
+  ./Configure no-asm zlib enable-zstd -DOPENSSL_NO_SECURE_MEMORY \
+    --prefix="$PIZFIX" --libdir=lib \
+    --with-zlib-include="$PIZFIX/include" --with-zlib-lib="$PIZFIX/lib" \
+    --with-zstd-include="$PIZFIX/include" --with-zstd-lib="$PIZFIX/lib" \
+    -I"$PIZFIX/include" -L"$PIZFIX/lib"
+}
+
+port_build() {
+  make -j"$JOBS"
+}
+
+port_install() {
+  make -j"$JOBS" install_sw install_ssldirs
+}
+
+port_test() {
+  "$PIZFIX/bin/openssl" version
+  HARNESS_JOBS="$JOBS" make test TESTS="test_sha test_evp test_rsa test_ec test_x509 test_ssl_new"
+  local td
+  td="$(mktemp -d)"
+  printf 'filc-openssl-check\n' > "$td/in.txt"
+  "$PIZFIX/bin/openssl" dgst -sha256 "$td/in.txt" | grep -q 'SHA2-256'
+  "$PIZFIX/bin/openssl" enc -aes-256-cbc -pbkdf2 -pass pass:filc-test -in "$td/in.txt" -out "$td/out.enc"
+  "$PIZFIX/bin/openssl" enc -d -aes-256-cbc -pbkdf2 -pass pass:filc-test -in "$td/out.enc" -out "$td/out.txt"
+  cmp -s "$td/in.txt" "$td/out.txt"
+  "$PIZFIX/bin/openssl" genpkey -algorithm ED25519 -out "$td/ed.key"
+  "$PIZFIX/bin/openssl" pkeyutl -sign -inkey "$td/ed.key" -rawin -in "$td/in.txt" -out "$td/in.sig"
+  "$PIZFIX/bin/openssl" pkeyutl -verify -inkey "$td/ed.key" -rawin -in "$td/in.txt" -sigfile "$td/in.sig"
+  rm -rf "$td"
+}

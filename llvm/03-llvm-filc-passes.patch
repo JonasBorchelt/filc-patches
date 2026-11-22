@@ -1,5 +1,5 @@
 Subject: Fil-C LLVM passes (KillUB, FilPizlonator, DeleteRedundantPollchecks, RegisterFilPasses)
-Upstream-Base: llvmorg-21.1.8 (2078da43e25a4623cab2d0d60decddf709aaea28)
+Upstream-Base: llvmorg-22.1.8 (ca7933e47d3a3451d81e72ac174dcb5aa28b59d1)
 Fil-C-Head: cede3de02b42b58a14acc9ce39c9894ab952a915 (branch deluge)
 
 Adds the core Fil-C instrumentation and pass-registration components:
@@ -126,6 +126,9 @@ Rebase-Notes (llvmorg-20.1.8 -> llvmorg-21.1.8):
   - KillUB.cpp: removed Attribute::NoCapture (removed in LLVM 21; superseded by Attribute::Captures already present in KillUB).
   - FilPizlonator.cpp: simplified Triple(M.getTargetTriple()).getArch() to M.getTargetTriple().getArch() for LLVM 21 Triple return type.
   - FilPizlonator.cpp: added .str() to InlineAsm::getConstraintString() / getAsmString() calls (now return StringRef in LLVM 21) and explicit <size_t>/<uint64_t> on std::max alignment calls.
+
+Rebase-Notes (llvmorg-21.1.8 -> llvmorg-22.1.8):
+  - llvm/lib/Passes/CMakeLists.txt: context updated for PassPlugin.cpp relocation to Plugins/.
 
 ---
 diff --git a/llvm/include/llvm/Passes/RegisterFilPasses.h b/llvm/include/llvm/Passes/RegisterFilPasses.h
@@ -281,13 +284,13 @@ index 000000000..c3f03f8a6
 +#endif /* LLVM_TRANSFORMS_INSTRUMENTATION_KILLUB_H */
 +
 diff --git a/llvm/lib/Passes/CMakeLists.txt b/llvm/lib/Passes/CMakeLists.txt
-index 91c8c4f67..3820a3394 100644
+index 5d7cd3689..8c4ac2610 100644
 --- a/llvm/lib/Passes/CMakeLists.txt
 +++ b/llvm/lib/Passes/CMakeLists.txt
-@@ -5,6 +5,7 @@ add_llvm_component_library(LLVMPasses
+@@ -4,6 +4,7 @@ add_llvm_component_library(LLVMPasses
+   PassBuilder.cpp
    PassBuilderBindings.cpp
    PassBuilderPipelines.cpp
-   PassPlugin.cpp
 +  RegisterFilPasses.cpp
    StandardInstrumentations.cpp
  
@@ -559,10 +562,10 @@ index 000000000..09e54975a
 +}
 +
 diff --git a/llvm/lib/Transforms/Instrumentation/CMakeLists.txt b/llvm/lib/Transforms/Instrumentation/CMakeLists.txt
-index 15fd421a4..b0f6189f1 100644
+index 80576c61f..0a4155bd2 100644
 --- a/llvm/lib/Transforms/Instrumentation/CMakeLists.txt
 +++ b/llvm/lib/Transforms/Instrumentation/CMakeLists.txt
-@@ -4,6 +4,8 @@ add_llvm_component_library(LLVMInstrumentation
+@@ -5,6 +5,8 @@ add_llvm_component_library(LLVMInstrumentation
    CGProfile.cpp
    ControlHeightReduction.cpp
    DataFlowSanitizer.cpp
@@ -571,7 +574,7 @@ index 15fd421a4..b0f6189f1 100644
    GCOVProfiling.cpp
    BlockCoverageInference.cpp
    MemProfInstrumentation.cpp
-@@ -13,6 +15,7 @@ add_llvm_component_library(LLVMInstrumentation
+@@ -14,6 +16,7 @@ add_llvm_component_library(LLVMInstrumentation
    IndirectCallPromotion.cpp
    InstrProfiling.cpp
    KCFI.cpp

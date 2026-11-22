@@ -40,6 +40,7 @@ Rebase-Notes (llvmorg-21.1.8 -> llvmorg-22.1.8):
   - clang/include/clang/AST/TypeBase.h & Type.h: split QualType::hasUnion() declarations into TypeBase.h following LLVM 22's Type.h split.
   - TargetInfo.{h,cpp} & Targets/{X86.h,AArch64.cpp}: LLVM 22 centralized DataLayout computation into TargetInfo::resetDataLayout() via Triple::computeDataLayout(); injected ni:0 for ELF x86_64/aarch64 directly in TargetInfo::resetDataLayout(), dropping per-target overrides in X86.h and AArch64.cpp.
   - clang/lib/Headers/cpuid.h: context updated for doxygen comments and removed bit_AVX10_512.
+  - clang/lib/Basic/Targets/NVPTX.cpp: replaced direct DataLayoutString assignment with resetDataLayout(...) matching TargetInfo's BeforeFilC/AfterFilC split.
 
 ---
 diff --git a/clang/include/clang/AST/Decl.h b/clang/include/clang/AST/Decl.h
@@ -274,6 +275,21 @@ index 794621c4b..3aaddbe3b 100644
  }
  
  bool
+diff --git a/clang/lib/Basic/Targets/NVPTX.cpp b/clang/lib/Basic/Targets/NVPTX.cpp
+index 6526eeff3..8839f7ed4 100644
+--- a/clang/lib/Basic/Targets/NVPTX.cpp
++++ b/clang/lib/Basic/Targets/NVPTX.cpp
+@@ -71,8 +71,8 @@ NVPTXTargetInfo::NVPTXTargetInfo(const llvm::Triple &Triple,
+   HasFloat16 = true;
+ 
+   // TODO: Make shortptr a proper ABI?
+-  DataLayoutString =
+-      Triple.computeDataLayout(Opts.NVPTXUseShortPointers ? "shortptr" : "");
++  resetDataLayout(
++      Triple.computeDataLayout(Opts.NVPTXUseShortPointers ? "shortptr" : ""));
+ 
+   // If possible, get a TargetInfo for our host triple, so we can match its
+   // types.
 diff --git a/clang/lib/Basic/Targets/SPIR.cpp b/clang/lib/Basic/Targets/SPIR.cpp
 index 2336fb3ef..26de054b5 100644
 --- a/clang/lib/Basic/Targets/SPIR.cpp

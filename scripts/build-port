@@ -183,7 +183,7 @@ run_with_timeout() {
 run_stage_fn() {
   local fn="$1"
   if command -v timeout >/dev/null 2>&1; then
-    export PORT_FILE SRC_DIR PIZFIX CC CXX AR RANLIB PREFIX PKG_CONFIG_PATH PATH CFLAGS CXXFLAGS LDFLAGS LD_LIBRARY_PATH JOBS
+    export PORT_FILE SRC_DIR PIZFIX CC CXX AR RANLIB PREFIX PKG_CONFIG_PATH PATH CFLAGS CXXFLAGS LDFLAGS JOBS
     timeout --foreground "$TIMEOUT_SEC" bash -ceu "source \"\$PORT_FILE\"; $fn"
   else
     "$fn"
@@ -315,7 +315,6 @@ else
 fi
 export PREFIX="$PIZFIX"
 export PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig:$PIZFIX/share/pkgconfig"
-export LD_LIBRARY_PATH="$PIZFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export PATH="$PIZFIX/bin:$(dirname "$CLANG_BIN"):$PATH"
 export CFLAGS="${CFLAGS:--O2 -g}"
 export CXXFLAGS="${CXXFLAGS:--O2 -g}"

@@ -205,7 +205,13 @@ DEPS=""
 BUILD_SYSTEM="custom"
 POLICY_CLASS="P0-Clean"
 
-port_configure() { test -n "\$PIZFIX"; touch "\$SRC_DIR/.configured"; }
+port_configure() {
+  test -n "\$PIZFIX"
+  case ":\${LD_LIBRARY_PATH:-}:" in
+    *":\$PIZFIX/lib:"*) echo "ERROR: LD_LIBRARY_PATH must not contain PIZFIX/lib" >&2; return 1 ;;
+  esac
+  touch "\$SRC_DIR/.configured"
+}
 port_build()     { test -f "\$SRC_DIR/.configured"; touch "\$SRC_DIR/.built"; }
 port_install()   { test -f "\$SRC_DIR/.built"; touch "\$PIZFIX/bin/fn-ok-installed"; }
 port_test()      { test -f "\$PIZFIX/bin/fn-ok-installed"; }

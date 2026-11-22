@@ -101,11 +101,12 @@ PATCH_FILES=0
 write_state() {
   local status="$1"
   local fail_stage="${2:-}"
+  local fail_kind="${3:-}"
   local dur=$(( $(date +%s) - T_START ))
   python3 - "$STATE_DIR/$PORT_NAME.json" "$NAME" "$VERSION" "$TIER" "$status" "$POLICY_CLASS" \
-    "$dur" "$PATCH_COUNT" "$PATCH_ADDED" "$PATCH_REMOVED" "$PATCH_FILES" "$fail_stage" "$DEPS" <<'PY'
+    "$dur" "$PATCH_COUNT" "$PATCH_ADDED" "$PATCH_REMOVED" "$PATCH_FILES" "$fail_stage" "$fail_kind" "$DEPS" <<'PY'
 import json, sys
-out_path, name, ver, tier, status, policy, dur, pc, pa, pr, pf, fstage, deps = sys.argv[1:]
+out_path, name, ver, tier, status, policy, dur, pc, pa, pr, pf, fstage, fkind, deps = sys.argv[1:]
 rec = {
     "name": name,
     "version": ver,
@@ -121,27 +122,70 @@ rec = {
 }
 if fstage:
     rec["failed_stage"] = fstage
+if fkind:
+    rec["failed_kind"] = fkind
 with open(out_path, "w", encoding="utf-8") as f:
     json.dump(rec, f, indent=2, sort_keys=True)
     f.write("\n")
 PY
 }
 
+dump_test_logs() {
+  [[ -n "${SRC_DIR:-}" && -d "${SRC_DIR:-}" ]] || return 0
+  local logf
+  while IFS= read -r logf; do
+    echo "--- TEST LOG ($logf) ---" >&2
+    grep -E '^(FAIL|XPASS|ERROR):' "$logf" >&2 || true
+    tail -n 120 "$logf" >&2 || true
+  done < <(find "$SRC_DIR" -maxdepth 3 -name 'test-suite.log' -type f 2>/dev/null)
+}
+
+classify_failure_kind() {
+  local stage="$1"
+  local rc="$2"
+  case "$stage" in
+    init|deps|toolchain)
+      echo "runner"
+      return
+      ;;
+  esac
+  if [[ "$rc" -eq 126 || "$rc" -eq 127 ]]; then
+    echo "runner"
+    return
+  fi
+  echo "package"
+}
+
 PORT_DONE=0
 on_exit() {
   local rc=$?
   if [[ "$PORT_DONE" != "1" ]]; then
-    echo "FILC_PORT $PORT_NAME failed stage=$CURRENT_STAGE rc=$rc" >&2
-    write_state "failed" "$CURRENT_STAGE" || true
+    local fkind
+    fkind="$(classify_failure_kind "$CURRENT_STAGE" "$rc")"
+    if [[ "$CURRENT_STAGE" == "test" ]]; then
+      dump_test_logs || true
+    fi
+    echo "FILC_PORT $PORT_NAME failed kind=$fkind stage=$CURRENT_STAGE rc=$rc" >&2
+    write_state "failed" "$CURRENT_STAGE" "$fkind" || true
   fi
 }
 trap on_exit EXIT
 
 run_with_timeout() {
   if command -v timeout >/dev/null 2>&1; then
-    timeout "$TIMEOUT_SEC" "$@"
+    timeout --foreground "$TIMEOUT_SEC" "$@"
   else
     "$@"
+  fi
+}
+
+run_stage_fn() {
+  local fn="$1"
+  if command -v timeout >/dev/null 2>&1; then
+    export PORT_FILE SRC_DIR PIZFIX CC CXX AR RANLIB PREFIX PKG_CONFIG_PATH PATH CFLAGS CXXFLAGS LDFLAGS LD_LIBRARY_PATH JOBS
+    timeout --foreground "$TIMEOUT_SEC" bash -ceu "source \"\$PORT_FILE\"; $fn"
+  else
+    "$fn"
   fi
 }
 
@@ -246,6 +290,7 @@ PY
 fi
 
 # 5. Prepare Fil-C toolchain environment
+CURRENT_STAGE="toolchain"
 if [[ ! -x "$CLANG_BIN" ]]; then
   echo "error: Fil-C clang not found at $CLANG_BIN (set FILC_TOOLCHAIN_ROOT)" >&2
   exit 1
@@ -257,20 +302,30 @@ fi
 
 export CC="$CLANG_BIN"
 export CXX="$CLANGXX_BIN"
-[[ -x "$LLVM_AR" ]] && export AR="$LLVM_AR"
-[[ -x "$LLVM_RANLIB" ]] && export RANLIB="$LLVM_RANLIB"
+if [[ -x "$LLVM_AR" ]]; then
+  export AR="$LLVM_AR"
+else
+  export AR="${AR:-ar}"
+fi
+if [[ -x "$LLVM_RANLIB" ]]; then
+  export RANLIB="$LLVM_RANLIB"
+else
+  export RANLIB="${RANLIB:-ranlib}"
+fi
 export PREFIX="$PIZFIX"
 export PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig:$PIZFIX/share/pkgconfig"
+export LD_LIBRARY_PATH="$PIZFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export PATH="$PIZFIX/bin:$(dirname "$CLANG_BIN"):$PATH"
 export CFLAGS="${CFLAGS:--O2 -g}"
 export CXXFLAGS="${CXXFLAGS:--O2 -g}"
+export LDFLAGS="${LDFLAGS:-}"
 
 # 6. Configure, Build, Install
 cd "$SRC_DIR"
 
 CURRENT_STAGE="configure"
 if declare -F port_configure >/dev/null 2>&1; then
-  run_with_timeout port_configure
+  run_stage_fn port_configure
 else
   case "$BUILD_SYSTEM" in
     autotools)
@@ -303,7 +358,7 @@ fi
 
 CURRENT_STAGE="build"
 if declare -F port_build >/dev/null 2>&1; then
-  run_with_timeout port_build
+  run_stage_fn port_build
 else
   case "$BUILD_SYSTEM" in
     autotools|make)
@@ -318,7 +373,7 @@ fi
 
 CURRENT_STAGE="install"
 if declare -F port_install >/dev/null 2>&1; then
-  run_with_timeout port_install
+  run_stage_fn port_install
 else
   case "$BUILD_SYSTEM" in
     autotools|make)
@@ -335,7 +390,7 @@ fi
 FINAL_STATUS="built"
 if declare -F port_test >/dev/null 2>&1; then
   CURRENT_STAGE="test"
-  run_with_timeout port_test
+  run_stage_fn port_test
   FINAL_STATUS="tested"
 elif [[ -n "$TEST_CMD" ]]; then
   CURRENT_STAGE="test"
@@ -344,6 +399,6 @@ elif [[ -n "$TEST_CMD" ]]; then
 fi
 
 touch "$STATE_DIR/$PORT_NAME.installed"
-write_state "$FINAL_STATUS" ""
+write_state "$FINAL_STATUS" "" ""
 PORT_DONE=1
 echo "FILC_PORT $PORT_NAME $FINAL_STATUS duration=$(( $(date +%s) - T_START ))s patches=$PATCH_COUNT"

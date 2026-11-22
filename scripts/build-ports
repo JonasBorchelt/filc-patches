@@ -308,6 +308,14 @@ def main() -> int:
         results[name] = rec
 
     counts = collections.Counter(r["status"] for r in results.values())
+    failed_runner = sum(
+        1 for r in results.values()
+        if r["status"] == "failed" and r.get("failed_kind") == "runner"
+    )
+    failed_package = sum(
+        1 for r in results.values()
+        if r["status"] == "failed" and r.get("failed_kind") != "runner"
+    )
     total_dur = int(time.monotonic() - t0)
     summary = {
         "updated_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -316,6 +324,8 @@ def main() -> int:
         "tested": counts.get("tested", 0),
         "built": counts.get("built", 0),
         "failed": counts.get("failed", 0),
+        "failed_runner": failed_runner,
+        "failed_package": failed_package,
         "blocked": counts.get("blocked", 0),
         "unmodified": unmodified,
         "patched": patched,
@@ -339,7 +349,9 @@ def main() -> int:
         f"PORTS_TOTAL={summary['total']}",
         f"PORTS_TESTED={summary['tested']}",
         f"PORTS_BUILT={summary['built']}",
-        f"PORTS_FAILED={summary['failed']}",
+        f"PORTS_FAILED={summary['failed']} (runner={failed_runner}, package={failed_package})",
+        f"PORTS_FAILED_RUNNER={failed_runner}",
+        f"PORTS_FAILED_PACKAGE={failed_package}",
         f"PORTS_BLOCKED={summary['blocked']}",
         f"PORTS_UNMODIFIED={unmodified}",
         f"PORTS_PATCHED={patched}",
@@ -349,9 +361,14 @@ def main() -> int:
     ]
     for n in order:
         r = results[n]
+        st_label = r["status"]
+        if st_label == "failed":
+            fkind = r.get("failed_kind", "package")
+            fstage = r.get("failed_stage", "")
+            st_label = f"failed:{fkind}" + (f"({fstage})" if fstage else "")
         blk = f" blocked_by={','.join(r.get('blocked_by', []))}" if r.get("blocked_by") else ""
         lines.append(
-            f"  {r['status']:8s} [T{r['tier']}] {r['name']:16s} {r['version']:10s} "
+            f"  {st_label:24s} [T{r['tier']}] {r['name']:16s} {r['version']:10s} "
             f"{r['policy_class']:12s} patches={r['patch_count']} ({r['duration_seconds']}s){blk}"
         )
     lines.append("================================================================================")

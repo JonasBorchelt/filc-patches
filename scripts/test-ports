@@ -153,8 +153,103 @@ fi
 python3 - "$BAD_WORK/ports-state/badpkg.json" <<'PY'
 import json, sys
 rec = json.load(open(sys.argv[1]))
-assert rec["status"] == "failed" and rec["failed_stage"] == "fetch", rec
+assert rec["status"] == "failed" and rec["failed_stage"] == "fetch" and rec["failed_kind"] == "package", rec
 print("SHA-256 MISMATCH REJECTION OK")
+PY
+
+echo "=== 6. Custom recipe shell functions under GNU-like timeout + failed_kind=runner vs package ==="
+FN_DIR="$TMP_DIR/fn-ports"
+FN_WORK="$TMP_DIR/fn-work"
+FN_TC="$TMP_DIR/fn-toolchain"
+FAKE_BIN="$TMP_DIR/fake-bin"
+mkdir -p "$FN_DIR/fn-ok" "$FN_DIR/fn-pkg-fail" "$FN_TC/build/bin" "$FN_TC/pizfix/lib" "$FN_TC/pizfix/bin" "$FAKE_BIN"
+
+# Fake clang/clang++ binaries
+printf '#!/usr/bin/env bash\nexit 0\n' > "$FN_TC/build/bin/clang"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$FN_TC/build/bin/clang++"
+chmod +x "$FN_TC/build/bin/clang" "$FN_TC/build/bin/clang++"
+
+# Strict GNU-like mock 'timeout' binary that rejects non-executable shell function names with rc=127
+cat > "$FAKE_BIN/timeout" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == "--foreground" ]] && shift
+shift # duration
+cmd="${1:-}"
+if ! command -v "$cmd" >/dev/null 2>&1; then
+  echo "timeout: failed to run command '$cmd': No such file or directory" >&2
+  exit 127
+fi
+exec "$@"
+EOF
+chmod +x "$FAKE_BIN/timeout"
+
+mkdir -p "$TMP_DIR/fn-src/fn-ok-1.0"
+echo "ok" > "$TMP_DIR/fn-src/fn-ok-1.0/README"
+tar -czf "$TMP_DIR/fn-ok-1.0.tar.gz" -C "$TMP_DIR/fn-src" fn-ok-1.0
+if command -v sha256sum >/dev/null 2>&1; then
+  FN_SHA="$(sha256sum "$TMP_DIR/fn-ok-1.0.tar.gz" | awk '{print $1}')"
+else
+  FN_SHA="$(shasum -a 256 "$TMP_DIR/fn-ok-1.0.tar.gz" | awk '{print $1}')"
+fi
+
+cat > "$FN_DIR/fn-ok/PORT" <<EOF
+NAME="fn-ok"
+VERSION="1.0"
+LICENSE="MIT"
+UPSTREAM_URL="file://$TMP_DIR/fn-ok-1.0.tar.gz"
+UPSTREAM_SHA256="$FN_SHA"
+EXTRACT_DIR="fn-ok-1.0"
+TIER=0
+DEPS=""
+BUILD_SYSTEM="custom"
+POLICY_CLASS="P0-Clean"
+
+port_configure() { test -n "\$PIZFIX"; touch "\$SRC_DIR/.configured"; }
+port_build()     { test -f "\$SRC_DIR/.configured"; touch "\$SRC_DIR/.built"; }
+port_install()   { test -f "\$SRC_DIR/.built"; touch "\$PIZFIX/bin/fn-ok-installed"; }
+port_test()      { test -f "\$PIZFIX/bin/fn-ok-installed"; }
+EOF
+
+cat > "$FN_DIR/fn-pkg-fail/PORT" <<EOF
+NAME="fn-pkg-fail"
+VERSION="1.0"
+LICENSE="MIT"
+UPSTREAM_URL="file://$TMP_DIR/fn-ok-1.0.tar.gz"
+UPSTREAM_SHA256="$FN_SHA"
+EXTRACT_DIR="fn-ok-1.0"
+TIER=0
+DEPS=""
+BUILD_SYSTEM="custom"
+POLICY_CLASS="P0-Clean"
+
+port_configure() { :; }
+port_build()     { :; }
+port_install()   { :; }
+port_test()      { echo "FAIL: mock_unit_test" > "\$SRC_DIR/test-suite.log"; return 2; }
+EOF
+
+set +e
+PATH="$FAKE_BIN:$PATH" FILC_TOOLCHAIN_ROOT="$FN_TC" \
+  "$REPO_ROOT/scripts/build-ports" --ports-dir "$FN_DIR" "$FN_WORK"
+FN_RC=$?
+set -e
+if [[ $FN_RC -eq 0 ]]; then
+  echo "FAIL: expected non-zero exit when fn-pkg-fail fails" >&2
+  exit 1
+fi
+
+python3 - "$FN_WORK/ports-report.json" "$FN_WORK/ports-report.txt" <<'PY'
+import json, sys
+rep = json.load(open(sys.argv[1]))
+txt = open(sys.argv[2]).read()
+by_name = {p["name"]: p for p in rep["ports"]}
+assert rep["tested"] == 1 and rep["failed"] == 1 and rep["failed_package"] == 1 and rep["failed_runner"] == 0, rep
+assert by_name["fn-ok"]["status"] == "tested", by_name["fn-ok"]
+assert by_name["fn-pkg-fail"]["status"] == "failed" and by_name["fn-pkg-fail"]["failed_kind"] == "package" and by_name["fn-pkg-fail"]["failed_stage"] == "test", by_name["fn-pkg-fail"]
+assert "PORTS_FAILED=1 (runner=0, package=1)" in txt, txt
+assert "failed:package(test)" in txt, txt
+print("CUSTOM RECIPE FUNCTIONS UNDER TIMEOUT & FAILED_KIND CHECKS OK")
 PY
 
 echo "ALL PORTS TESTS PASSED"

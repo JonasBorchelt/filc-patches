@@ -1,5 +1,5 @@
 Subject: Fil-C LLVM passes (KillUB, FilPizlonator, DeleteRedundantPollchecks, RegisterFilPasses)
-Upstream-Base: llvmorg-20.1.8 (87f0227cb60147a26a1eeb4fb06e3b505e9c7261)
+Upstream-Base: llvmorg-21.1.8 (2078da43e25a4623cab2d0d60decddf709aaea28)
 Fil-C-Head: cede3de02b42b58a14acc9ce39c9894ab952a915 (branch deluge)
 
 Adds the core Fil-C instrumentation and pass-registration components:
@@ -121,10 +121,15 @@ Fil-C-Origin-Commits (112):
   8681267063067472de7b1950511b3f5916cb5dfc 2025-09-01 Correctly support comdat/linkonce/odr. Specifically, drop the ODR flags since they are not safe. And, put the constellation of internal details behind a symbol in the same comdat as the pizlonated_ export for that symbol. This is a 13% reduction in the size of the cmake binary. There's probably room for further size reduction. Added a test to illustrate how this eliminates at least one known class of symbol duplication that we had before.
   d292f5dbb951d549fc9b053950d5a330d532b361 2025-08-22 Rebase Fil-C to clang/llvm 20.1.8
 
+Rebase-Notes (llvmorg-20.1.8 -> llvmorg-21.1.8):
+  - llvm/lib/Transforms/Instrumentation/CMakeLists.txt: context updated for MemProf split and InstrOrderFile removal.
+  - KillUB.cpp: removed Attribute::NoCapture (removed in LLVM 21; superseded by Attribute::Captures already present in KillUB).
+  - FilPizlonator.cpp: simplified Triple(M.getTargetTriple()).getArch() to M.getTargetTriple().getArch() for LLVM 21 Triple return type.
+
 ---
 diff --git a/llvm/include/llvm/Passes/RegisterFilPasses.h b/llvm/include/llvm/Passes/RegisterFilPasses.h
 new file mode 100644
-index 000000000000..25e989a8d3c4
+index 000000000..25e989a8d
 --- /dev/null
 +++ b/llvm/include/llvm/Passes/RegisterFilPasses.h
 @@ -0,0 +1,47 @@
@@ -177,7 +182,7 @@ index 000000000000..25e989a8d3c4
 +#endif // LLVM_PASSES_REGISTERFILPASSES_H
 diff --git a/llvm/include/llvm/Transforms/Instrumentation/DeleteRedundantPollchecks.h b/llvm/include/llvm/Transforms/Instrumentation/DeleteRedundantPollchecks.h
 new file mode 100644
-index 000000000000..f81d30025974
+index 000000000..f81d30025
 --- /dev/null
 +++ b/llvm/include/llvm/Transforms/Instrumentation/DeleteRedundantPollchecks.h
 @@ -0,0 +1,20 @@
@@ -203,7 +208,7 @@ index 000000000000..f81d30025974
 +
 diff --git a/llvm/include/llvm/Transforms/Instrumentation/FilPizlonator.h b/llvm/include/llvm/Transforms/Instrumentation/FilPizlonator.h
 new file mode 100644
-index 000000000000..941986b05e12
+index 000000000..941986b05
 --- /dev/null
 +++ b/llvm/include/llvm/Transforms/Instrumentation/FilPizlonator.h
 @@ -0,0 +1,42 @@
@@ -251,7 +256,7 @@ index 000000000000..941986b05e12
 +
 diff --git a/llvm/include/llvm/Transforms/Instrumentation/KillUB.h b/llvm/include/llvm/Transforms/Instrumentation/KillUB.h
 new file mode 100644
-index 000000000000..c3f03f8a6edd
+index 000000000..c3f03f8a6
 --- /dev/null
 +++ b/llvm/include/llvm/Transforms/Instrumentation/KillUB.h
 @@ -0,0 +1,19 @@
@@ -275,10 +280,10 @@ index 000000000000..c3f03f8a6edd
 +#endif /* LLVM_TRANSFORMS_INSTRUMENTATION_KILLUB_H */
 +
 diff --git a/llvm/lib/Passes/CMakeLists.txt b/llvm/lib/Passes/CMakeLists.txt
-index 23799ac4f98f..b72a70b95def 100644
+index 91c8c4f67..3820a3394 100644
 --- a/llvm/lib/Passes/CMakeLists.txt
 +++ b/llvm/lib/Passes/CMakeLists.txt
-@@ -6,6 +6,7 @@ add_llvm_component_library(LLVMPasses
+@@ -5,6 +5,7 @@ add_llvm_component_library(LLVMPasses
    PassBuilderBindings.cpp
    PassBuilderPipelines.cpp
    PassPlugin.cpp
@@ -288,7 +293,7 @@ index 23799ac4f98f..b72a70b95def 100644
    ADDITIONAL_HEADER_DIRS
 diff --git a/llvm/lib/Passes/RegisterFilPasses.cpp b/llvm/lib/Passes/RegisterFilPasses.cpp
 new file mode 100644
-index 000000000000..09e54975a2c6
+index 000000000..09e54975a
 --- /dev/null
 +++ b/llvm/lib/Passes/RegisterFilPasses.cpp
 @@ -0,0 +1,260 @@
@@ -553,7 +558,7 @@ index 000000000000..09e54975a2c6
 +}
 +
 diff --git a/llvm/lib/Transforms/Instrumentation/CMakeLists.txt b/llvm/lib/Transforms/Instrumentation/CMakeLists.txt
-index 5c437437fe36..6780bc9653c6 100644
+index 15fd421a4..b0f6189f1 100644
 --- a/llvm/lib/Transforms/Instrumentation/CMakeLists.txt
 +++ b/llvm/lib/Transforms/Instrumentation/CMakeLists.txt
 @@ -4,6 +4,8 @@ add_llvm_component_library(LLVMInstrumentation
@@ -564,9 +569,9 @@ index 5c437437fe36..6780bc9653c6 100644
 +  FilPizlonator.cpp
    GCOVProfiling.cpp
    BlockCoverageInference.cpp
-   MemProfiler.cpp
+   MemProfInstrumentation.cpp
 @@ -13,6 +15,7 @@ add_llvm_component_library(LLVMInstrumentation
-   InstrOrderFile.cpp
+   IndirectCallPromotion.cpp
    InstrProfiling.cpp
    KCFI.cpp
 +  KillUB.cpp
@@ -575,7 +580,7 @@ index 5c437437fe36..6780bc9653c6 100644
    PGOCtxProfLowering.cpp
 diff --git a/llvm/lib/Transforms/Instrumentation/DeleteRedundantPollchecks.cpp b/llvm/lib/Transforms/Instrumentation/DeleteRedundantPollchecks.cpp
 new file mode 100644
-index 000000000000..669af69e1e27
+index 000000000..669af69e1
 --- /dev/null
 +++ b/llvm/lib/Transforms/Instrumentation/DeleteRedundantPollchecks.cpp
 @@ -0,0 +1,156 @@
@@ -737,7 +742,7 @@ index 000000000000..669af69e1e27
 +}
 diff --git a/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp b/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp
 new file mode 100644
-index 000000000000..8370c87fe854
+index 000000000..279d28f38
 --- /dev/null
 +++ b/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp
 @@ -0,0 +1,17702 @@
@@ -17024,7 +17029,7 @@ index 000000000000..8370c87fe854
 +    assert(DL.getPointerABIAlignment(TargetAS) == 8);
 +    assert(!DL.isNonIntegralAddressSpace(TargetAS));
 +
-+    Arch = Triple(M.getTargetTriple()).getArch();
++    Arch = M.getTargetTriple().getArch();
 +    PtrBits = DL.getPointerSizeInBits(TargetAS);
 +    VoidTy = Type::getVoidTy(C);
 +    Int1Ty = Type::getInt1Ty(C);
@@ -18445,10 +18450,10 @@ index 000000000000..8370c87fe854
 +}
 diff --git a/llvm/lib/Transforms/Instrumentation/KillUB.cpp b/llvm/lib/Transforms/Instrumentation/KillUB.cpp
 new file mode 100644
-index 000000000000..fb331e8536f8
+index 000000000..2a0f489e6
 --- /dev/null
 +++ b/llvm/lib/Transforms/Instrumentation/KillUB.cpp
-@@ -0,0 +1,209 @@
+@@ -0,0 +1,208 @@
 +//===- KillUB.cpp - remove all UB flags -----------------------------------===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -18485,7 +18490,6 @@ index 000000000000..fb331e8536f8
 +  AM.addAttribute(Attribute::Memory);
 +  AM.addAttribute(Attribute::NoAlias);
 +  AM.addAttribute(Attribute::NoCallback);
-+  AM.addAttribute(Attribute::NoCapture);
 +  AM.addAttribute(Attribute::Captures);
 +  AM.addAttribute(Attribute::NoDivergenceSource);
 +  AM.addAttribute(Attribute::NoExt);

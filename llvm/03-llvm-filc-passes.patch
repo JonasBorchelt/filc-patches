@@ -1,5 +1,5 @@
 Subject: Fil-C LLVM passes (KillUB, FilPizlonator, DeleteRedundantPollchecks, RegisterFilPasses)
-Upstream-Base: llvmorg-23.1.6 (5b10d2d74929eae78912771222c9855af97496f4)
+Upstream-Base: LLVM main (1bd1774757f8fb19c0a06f84cbb53076b75eafbb)
 Fil-C-Head: cede3de02b42b58a14acc9ce39c9894ab952a915 (branch deluge)
 
 Adds the core Fil-C instrumentation and pass-registration components:
@@ -134,6 +134,10 @@ Rebase-Notes (llvmorg-21.1.8 -> llvmorg-22.1.8):
 Rebase-Notes (llvmorg-22.1.8 -> llvmorg-23.1.6):
   - RegisterFilPasses.{h,cpp}: adapted to LLVM 23 enum class OptimizationLevel (#include OptimizationLevel.h, getInlineParamsFromOptLevel(static_cast<unsigned>(Level))).
   - FilPizlonator.cpp: concatenated Module::getModuleInlineAsm() GlobalAsmFragment list into std::string for MATokenizer.
+
+
+Rebase-Notes (llvmorg-23.1.6 -> LLVM main 1bd1774757f8):
+  - llvm/lib/Passes/CMakeLists.txt & llvm/lib/Transforms/Instrumentation/CMakeLists.txt: context updated for PassesOptions.cpp, CopyProf.cpp, and InstrumentationOptions.cpp.
 
 ---
 diff --git a/llvm/include/llvm/Passes/RegisterFilPasses.h b/llvm/include/llvm/Passes/RegisterFilPasses.h
@@ -289,17 +293,17 @@ index 000000000..c3f03f8a6
 +#endif /* LLVM_TRANSFORMS_INSTRUMENTATION_KILLUB_H */
 +
 diff --git a/llvm/lib/Passes/CMakeLists.txt b/llvm/lib/Passes/CMakeLists.txt
-index eaabf60b0..859d16e00 100644
+index 668e8c7e6..14d68ad39 100644
 --- a/llvm/lib/Passes/CMakeLists.txt
 +++ b/llvm/lib/Passes/CMakeLists.txt
-@@ -3,6 +3,7 @@ add_llvm_component_library(LLVMPasses
-   PassBuilder.cpp
+@@ -9,6 +9,7 @@ add_llvm_component_library(LLVMPasses
    PassBuilderBindings.cpp
    PassBuilderPipelines.cpp
+   PassesOptions.cpp
 +  RegisterFilPasses.cpp
+   RunCodeGen.cpp
    StandardInstrumentations.cpp
- 
-   ADDITIONAL_HEADER_DIRS
+   TriggerCrashPasses.cpp
 diff --git a/llvm/lib/Passes/RegisterFilPasses.cpp b/llvm/lib/Passes/RegisterFilPasses.cpp
 new file mode 100644
 index 000000000..df6932259
@@ -567,21 +571,21 @@ index 000000000..df6932259
 +}
 +
 diff --git a/llvm/lib/Transforms/Instrumentation/CMakeLists.txt b/llvm/lib/Transforms/Instrumentation/CMakeLists.txt
-index 80576c61f..0a4155bd2 100644
+index c262f0625..9e3a4fc98 100644
 --- a/llvm/lib/Transforms/Instrumentation/CMakeLists.txt
 +++ b/llvm/lib/Transforms/Instrumentation/CMakeLists.txt
-@@ -5,6 +5,8 @@ add_llvm_component_library(LLVMInstrumentation
-   CGProfile.cpp
+@@ -11,6 +11,8 @@ add_llvm_component_library(LLVMInstrumentation
    ControlHeightReduction.cpp
+   CopyProf.cpp
    DataFlowSanitizer.cpp
 +  DeleteRedundantPollchecks.cpp
 +  FilPizlonator.cpp
    GCOVProfiling.cpp
    BlockCoverageInference.cpp
    MemProfInstrumentation.cpp
-@@ -14,6 +16,7 @@ add_llvm_component_library(LLVMInstrumentation
-   IndirectCallPromotion.cpp
+@@ -21,6 +23,7 @@ add_llvm_component_library(LLVMInstrumentation
    InstrProfiling.cpp
+   InstrumentationOptions.cpp
    KCFI.cpp
 +  KillUB.cpp
    LowerAllowCheckPass.cpp

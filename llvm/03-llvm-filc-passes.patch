@@ -1,5 +1,5 @@
 Subject: Fil-C LLVM passes (KillUB, FilPizlonator, DeleteRedundantPollchecks, RegisterFilPasses)
-Upstream-Base: LLVM main (1bd1774757f8fb19c0a06f84cbb53076b75eafbb)
+Upstream-Base: llvmorg-23.1.6 (5b10d2d74929eae78912771222c9855af97496f4)
 Fil-C-Head: cede3de02b42b58a14acc9ce39c9894ab952a915 (branch deluge)
 
 Adds the core Fil-C instrumentation and pass-registration components:
@@ -135,21 +135,13 @@ Rebase-Notes (llvmorg-22.1.8 -> llvmorg-23.1.6):
   - RegisterFilPasses.{h,cpp}: adapted to LLVM 23 enum class OptimizationLevel (#include OptimizationLevel.h, getInlineParamsFromOptLevel(static_cast<unsigned>(Level))).
   - FilPizlonator.cpp: concatenated Module::getModuleInlineAsm() GlobalAsmFragment list into std::string for MATokenizer.
 
-
-Rebase-Notes (llvmorg-23.1.6 -> LLVM main 1bd1774757f8):
-  - llvm/lib/Passes/CMakeLists.txt & llvm/lib/Transforms/Instrumentation/CMakeLists.txt: context updated for PassesOptions.cpp, CopyProf.cpp, and InstrumentationOptions.cpp.
-
-  - DeleteRedundantPollchecks.h, KillUB.h, FilPizlonator.h: migrated PassInfoMixin -> RequiredPassInfoMixin (LLVM main pass mixin split).
-  - KillUB.cpp & FilPizlonator.cpp: removed Intrinsic::strip_invariant_group (removed upstream); migrated BranchInst -> UncondBrInst / CondBrInst (updating CondBrInst::Create argument order and setCondition); replaced private I.DebugMarker->eraseFromParent() with I.dropDbgRecords() and G->getAlignment() with G->getAlign().valueOrOne().value().
-  - RegisterFilPasses.{h,cpp}: pass PB.getContext() to getInlineParamsFromOptLevel(const LLVMContext &, unsigned).
-
 ---
 diff --git a/llvm/include/llvm/Passes/RegisterFilPasses.h b/llvm/include/llvm/Passes/RegisterFilPasses.h
 new file mode 100644
-index 000000000..1ce400415
+index 000000000..c13b0f5d9
 --- /dev/null
 +++ b/llvm/include/llvm/Passes/RegisterFilPasses.h
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,47 @@
 +//===- RegisterFilPasses.h - Fil-C pass pipeline registration --------------===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -175,7 +167,6 @@ index 000000000..1ce400415
 +
 +namespace llvm {
 +
-+class LLVMContext;
 +class PassBuilder;
 +struct FilJITConfiguration;
 +
@@ -193,18 +184,17 @@ index 000000000..1ce400415
 +// frontends whose pass pipelines are not always built through a PassBuilder,
 +// e.g. rustc's -C no-prepopulate-passes modules).
 +void FilCAddPipelineStartPasses(ModulePassManager&, OptimizationLevel,
-+                                FilJITConfiguration* = nullptr,
-+                                const LLVMContext* = nullptr);
++                                FilJITConfiguration* = nullptr);
 +
 +} // namespace llvm
 +
 +#endif // LLVM_PASSES_REGISTERFILPASSES_H
 diff --git a/llvm/include/llvm/Transforms/Instrumentation/DeleteRedundantPollchecks.h b/llvm/include/llvm/Transforms/Instrumentation/DeleteRedundantPollchecks.h
 new file mode 100644
-index 000000000..458caf0df
+index 000000000..f81d30025
 --- /dev/null
 +++ b/llvm/include/llvm/Transforms/Instrumentation/DeleteRedundantPollchecks.h
-@@ -0,0 +1,19 @@
+@@ -0,0 +1,20 @@
 +#ifndef LLVM_TRANSFORMS_INSTRUMENTATION_DELETEREDUNDANTPOLLCHECKS_H
 +#define LLVM_TRANSFORMS_INSTRUMENTATION_DELETEREDUNDANTPOLLCHECKS_H
 +
@@ -215,9 +205,10 @@ index 000000000..458caf0df
 +class Module;
 +
 +class DeleteRedundantPollchecksPass
-+    : public RequiredPassInfoMixin<DeleteRedundantPollchecksPass> {
++    : public PassInfoMixin<DeleteRedundantPollchecksPass> {
 +public:
 +  PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM);
++  static bool isRequired() { return true; }
 +};
 +
 +} // namespace llvm
@@ -226,10 +217,10 @@ index 000000000..458caf0df
 +
 diff --git a/llvm/include/llvm/Transforms/Instrumentation/FilPizlonator.h b/llvm/include/llvm/Transforms/Instrumentation/FilPizlonator.h
 new file mode 100644
-index 000000000..90b09737c
+index 000000000..941986b05
 --- /dev/null
 +++ b/llvm/include/llvm/Transforms/Instrumentation/FilPizlonator.h
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,42 @@
 +#ifndef LLVM_TRANSFORMS_INSTRUMENTATION_FILPIZLONATOR_H
 +#define LLVM_TRANSFORMS_INSTRUMENTATION_FILPIZLONATOR_H
 +
@@ -260,11 +251,12 @@ index 000000000..90b09737c
 +  std::unordered_map<void*, void*> PointerMapping; // maps ptr->lower
 +};
 +
-+class FilPizlonatorPass : public RequiredPassInfoMixin<FilPizlonatorPass> {
++class FilPizlonatorPass : public PassInfoMixin<FilPizlonatorPass> {
 +  FilJITConfiguration* FJITC;
 +public:
 +  FilPizlonatorPass(FilJITConfiguration *FJITC = nullptr): FJITC(FJITC) { }
 +  PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM);
++  static bool isRequired() { return true; }
 +};
 +
 +} // namespace llvm
@@ -273,10 +265,10 @@ index 000000000..90b09737c
 +
 diff --git a/llvm/include/llvm/Transforms/Instrumentation/KillUB.h b/llvm/include/llvm/Transforms/Instrumentation/KillUB.h
 new file mode 100644
-index 000000000..16830806d
+index 000000000..c3f03f8a6
 --- /dev/null
 +++ b/llvm/include/llvm/Transforms/Instrumentation/KillUB.h
-@@ -0,0 +1,18 @@
+@@ -0,0 +1,19 @@
 +#ifndef LLVM_TRANSFORMS_INSTRUMENTATION_KILLUB_H
 +#define LLVM_TRANSFORMS_INSTRUMENTATION_KILLUB_H
 +
@@ -286,9 +278,10 @@ index 000000000..16830806d
 +
 +class Module;
 +
-+class KillUBPass : public RequiredPassInfoMixin<KillUBPass> {
++class KillUBPass : public PassInfoMixin<KillUBPass> {
 +public:
 +  PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM);
++  static bool isRequired() { return true; }
 +};
 +
 +} // namespace llvm
@@ -296,23 +289,23 @@ index 000000000..16830806d
 +#endif /* LLVM_TRANSFORMS_INSTRUMENTATION_KILLUB_H */
 +
 diff --git a/llvm/lib/Passes/CMakeLists.txt b/llvm/lib/Passes/CMakeLists.txt
-index 668e8c7e6..14d68ad39 100644
+index eaabf60b0..859d16e00 100644
 --- a/llvm/lib/Passes/CMakeLists.txt
 +++ b/llvm/lib/Passes/CMakeLists.txt
-@@ -9,6 +9,7 @@ add_llvm_component_library(LLVMPasses
+@@ -3,6 +3,7 @@ add_llvm_component_library(LLVMPasses
+   PassBuilder.cpp
    PassBuilderBindings.cpp
    PassBuilderPipelines.cpp
-   PassesOptions.cpp
 +  RegisterFilPasses.cpp
-   RunCodeGen.cpp
    StandardInstrumentations.cpp
-   TriggerCrashPasses.cpp
+ 
+   ADDITIONAL_HEADER_DIRS
 diff --git a/llvm/lib/Passes/RegisterFilPasses.cpp b/llvm/lib/Passes/RegisterFilPasses.cpp
 new file mode 100644
-index 000000000..acd6683cb
+index 000000000..df6932259
 --- /dev/null
 +++ b/llvm/lib/Passes/RegisterFilPasses.cpp
-@@ -0,0 +1,268 @@
+@@ -0,0 +1,260 @@
 +//===- RegisterFilPasses.cpp - Fil-C pass pipeline registration ------------===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -465,8 +458,7 @@ index 000000000..acd6683cb
 +
 +void llvm::FilCAddPipelineStartPasses(ModulePassManager &MPM,
 +                                      OptimizationLevel Level,
-+                                      FilJITConfiguration *jitConfig,
-+                                      const LLVMContext *Context) {
++                                      FilJITConfiguration *jitConfig) {
 +  if (FilCKillUB)
 +    MPM.addPass(KillUBPass());
 +  // Fil-C: above O0 clang also runs its "Fil-C optimization" pipeline here
@@ -491,13 +483,7 @@ index 000000000..acd6683cb
 +                  std::move(EarlyFPM), /*EagerlyInvalidate =*/ true));
 +
 +    if (FilCInline) {
-+      InlineParams IP;
-+      if (Context) {
-+        IP = getInlineParamsFromOptLevel(*Context, static_cast<unsigned>(Level));
-+      } else {
-+        LLVMContext DefaultCtx;
-+        IP = getInlineParamsFromOptLevel(DefaultCtx, static_cast<unsigned>(Level));
-+      }
++      InlineParams IP = getInlineParamsFromOptLevel(static_cast<unsigned>(Level));
 +      ModuleInlinerWrapperPass MIWP(IP, /*MandatoryFirst=*/true,
 +                                    InlineContext{
 +                                      ThinOrFullLTOPhase::None,
@@ -568,10 +554,9 @@ index 000000000..acd6683cb
 +}
 +
 +void llvm::RegisterFilPasses(PassBuilder& PB, FilJITConfiguration* jitConfig) {
-+  const LLVMContext *Context = &PB.getContext();
 +  PB.registerPipelineStartEPCallback(
-+    [jitConfig, Context](ModulePassManager &MPM, OptimizationLevel Level) {
-+      FilCAddPipelineStartPasses(MPM, Level, jitConfig, Context);
++    [jitConfig](ModulePassManager &MPM, OptimizationLevel Level) {
++      FilCAddPipelineStartPasses(MPM, Level, jitConfig);
 +    });
 +
 +  PB.registerOptimizerLastEPCallback([](ModulePassManager &MPM,
@@ -582,21 +567,21 @@ index 000000000..acd6683cb
 +}
 +
 diff --git a/llvm/lib/Transforms/Instrumentation/CMakeLists.txt b/llvm/lib/Transforms/Instrumentation/CMakeLists.txt
-index c262f0625..9e3a4fc98 100644
+index 80576c61f..0a4155bd2 100644
 --- a/llvm/lib/Transforms/Instrumentation/CMakeLists.txt
 +++ b/llvm/lib/Transforms/Instrumentation/CMakeLists.txt
-@@ -11,6 +11,8 @@ add_llvm_component_library(LLVMInstrumentation
+@@ -5,6 +5,8 @@ add_llvm_component_library(LLVMInstrumentation
+   CGProfile.cpp
    ControlHeightReduction.cpp
-   CopyProf.cpp
    DataFlowSanitizer.cpp
 +  DeleteRedundantPollchecks.cpp
 +  FilPizlonator.cpp
    GCOVProfiling.cpp
    BlockCoverageInference.cpp
    MemProfInstrumentation.cpp
-@@ -21,6 +23,7 @@ add_llvm_component_library(LLVMInstrumentation
+@@ -14,6 +16,7 @@ add_llvm_component_library(LLVMInstrumentation
+   IndirectCallPromotion.cpp
    InstrProfiling.cpp
-   InstrumentationOptions.cpp
    KCFI.cpp
 +  KillUB.cpp
    LowerAllowCheckPass.cpp
@@ -766,10 +751,10 @@ index 000000000..669af69e1
 +}
 diff --git a/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp b/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp
 new file mode 100644
-index 000000000..0eb3679cb
+index 000000000..742829f22
 --- /dev/null
 +++ b/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp
-@@ -0,0 +1,17702 @@
+@@ -0,0 +1,17705 @@
 +//===- FilPizlonator.cpp - apply GIMSO semantics to LLVM IR ---------------===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -8465,7 +8450,7 @@ index 000000000..0eb3679cb
 +        assert(DstFMAD.POD.PK == PointerKind::Escaping);
 +        assert(DstFMAD.MAD.MK == MemoryKind::Heap);
 +        (new StoreInst(SlowAuxBase, DstFMAD.POD.AuxBaseVar, SlowTerm))->setDebugLoc(I->getDebugLoc());
-+        ReplaceInstWithInst(SlowTerm, UncondBrInst::Create(StoreExtraB));
++        ReplaceInstWithInst(SlowTerm, BranchInst::Create(StoreExtraB));
 +        LoadInst* MarkingState = new LoadInst(Int32Ty, CurrentMarkingState,
 +                                              "filc_memmove_marking_state", NonNullTerm);
 +        MarkingState->setDebugLoc(I->getDebugLoc());
@@ -8721,6 +8706,7 @@ index 000000000..0eb3679cb
 +      case Intrinsic::invariant_start:
 +      case Intrinsic::invariant_end:
 +      case Intrinsic::launder_invariant_group:
++      case Intrinsic::strip_invariant_group:
 +        llvm_unreachable("Should have already been erased");
 +        return true;
 +
@@ -8875,7 +8861,7 @@ index 000000000..0eb3679cb
 +
 +        auto Erasify = [&] () {
 +          if (InvokeInst* II = dyn_cast<InvokeInst>(CI)) {
-+            UncondBrInst::Create(II->getNormalDest(), CI)->setDebugLoc(CI->getDebugLoc());
++            BranchInst::Create(II->getNormalDest(), CI)->setDebugLoc(CI->getDebugLoc());
 +            II->getUnwindDest()->removePredecessor(II->getParent(), /*KeepOneInputPHIs=*/true);
 +          }
 +          CI->eraseFromParent();
@@ -8945,7 +8931,7 @@ index 000000000..0eb3679cb
 +          RetSizePhi->addIncoming(Prepare, Prepare->getParent());
 +          BasicBlock* OriginalB = CI->getParent();
 +          SplitBlock(OriginalB, CI);
-+          cast<UncondBrInst>(OriginalB->getTerminator())->setSuccessor(0, ReallyReturnB);
++          cast<BranchInst>(OriginalB->getTerminator())->setSuccessor(0, ReallyReturnB);
 +          Erasify();
 +          return true;
 +        }
@@ -14900,8 +14886,8 @@ index 000000000..0eb3679cb
 +        SplitBlockAndInsertIfThen(
 +          expectFalse(HasException, CI), CI, false, nullptr, nullptr, nullptr, ResumeB);
 +      } else if (InvokeInst* II = dyn_cast<InvokeInst>(CI)) {
-+        CondBrInst::Create(
-+          expectFalse(HasException, II), II->getUnwindDest(), II->getNormalDest(), II)
++        BranchInst::Create(
++          II->getUnwindDest(), II->getNormalDest(), expectFalse(HasException, II), II)
 +          ->setDebugLoc(II->getDebugLoc());
 +      }
 +      
@@ -15056,7 +15042,7 @@ index 000000000..0eb3679cb
 +    }
 +
 +    if (isa<FCmpInst>(I) ||
-+        isa<UncondBrInst, CondBrInst>(I) ||
++        isa<BranchInst>(I) ||
 +        isa<SwitchInst>(I) ||
 +        isa<TruncInst>(I) ||
 +        isa<ZExtInst>(I) ||
@@ -15076,7 +15062,7 @@ index 000000000..0eb3679cb
 +    if (isa<ReturnInst>(I)) {
 +      if (OldF->getReturnType() != VoidTy)
 +        ReturnPhi->addIncoming(I->getOperand(0), I->getParent());
-+      ReplaceInstWithInst(I, UncondBrInst::Create(ReturnB));
++      ReplaceInstWithInst(I, BranchInst::Create(ReturnB));
 +      return;
 +    }
 +
@@ -15133,7 +15119,7 @@ index 000000000..0eb3679cb
 +      // NOTE: This function call is only necessary for checks. If our unwind machinery is working
 +      // correctly, then these checks should never fire. But I'm paranoid.
 +      CallInst::Create(ResumeUnwind, { MyThread, getOrigin(I->getDebugLoc()) }, "", I);
-+      UncondBrInst* BI = UncondBrInst::Create(ResumeB, I);
++      BranchInst* BI = BranchInst::Create(ResumeB, I);
 +      BI->setDebugLoc(I->getDebugLoc());
 +      I->eraseFromParent();
 +      return;
@@ -15407,7 +15393,7 @@ index 000000000..0eb3679cb
 +      // switch block and fill out the PHI operands.
 +      for (auto *IBr : IndirectBrs) {
 +        SwitchPN->addIncoming(GetSwitchValue(IBr), IBr->getParent());
-+        UncondBrInst::Create(SwitchBB, IBr);
++        BranchInst::Create(SwitchBB, IBr);
 +        IBr->eraseFromParent();
 +      }
 +    }
@@ -16576,7 +16562,8 @@ index 000000000..0eb3679cb
 +      for (BasicBlock& BB : F) {
 +        std::vector<Instruction*> ToErase;
 +        for (Instruction& I : BB) {
-+          I.dropDbgRecords();
++          if (I.DebugMarker)
++            I.DebugMarker->eraseFromParent();
 +          CallBase* CI = dyn_cast<CallBase>(&I);
 +          if (!CI)
 +            continue;
@@ -16598,6 +16585,7 @@ index 000000000..0eb3679cb
 +            ShouldErase = true;
 +            break;
 +          case Intrinsic::launder_invariant_group:
++          case Intrinsic::strip_invariant_group:
 +            CI->replaceAllUsesWith(CI->getArgOperand(0));
 +            ShouldErase = true;
 +            break;
@@ -16610,7 +16598,7 @@ index 000000000..0eb3679cb
 +          }
 +          if (ShouldErase) {
 +            if (InvokeInst* II = dyn_cast<InvokeInst>(CI))
-+              UncondBrInst::Create(II->getNormalDest(), CI)->setDebugLoc(CI->getDebugLoc());
++              BranchInst::Create(II->getNormalDest(), CI)->setDebugLoc(CI->getDebugLoc());
 +            ToErase.push_back(CI);
 +          }
 +        }
@@ -16652,7 +16640,7 @@ index 000000000..0eb3679cb
 +          }
 +          if (ShouldErase) {
 +            if (InvokeInst* II = dyn_cast<InvokeInst>(CI))
-+              UncondBrInst::Create(II->getNormalDest(), CI)->setDebugLoc(CI->getDebugLoc());
++              BranchInst::Create(II->getNormalDest(), CI)->setDebugLoc(CI->getDebugLoc());
 +            ToErase.push_back(CI);
 +          }
 +        }
@@ -17723,7 +17711,7 @@ index 000000000..0eb3679cb
 +    for (GlobalVariable* G : Globals) {
 +      size_t Alignment = 0;
 +      if (!G->isDeclaration())
-+        Alignment = std::max(G->getAlign().valueOrOne().value(), DL.getABITypeAlign(G->getValueType()).value());
++        Alignment = std::max(G->getAlignment(), DL.getABITypeAlign(G->getValueType()).value());
 +      
 +      Function* NewF = GlobalToGetter[G];
 +      assert(NewF);
@@ -17907,16 +17895,16 @@ index 000000000..0eb3679cb
 +      // raw ptr as NULL. If either are NULL, then it's either not initialized yet, or we experienced
 +      // ptr tearing. This allows us to avoid an expensive 128-bit atomic.
 +      
-+      CondBrInst* Branch = CondBrInst::Create(UndefValue::get(Int1Ty), SlowBB, OtherCheckBB, RootBB);
++      Instruction* Branch = BranchInst::Create(SlowBB, OtherCheckBB, UndefValue::get(Int1Ty), RootBB);
 +      Value* LoadPtr = loadFlightPtr(NewPtrG, Branch);
-+      Branch->setCondition(new ICmpInst(
-+        Branch, ICmpInst::ICMP_EQ, flightPtrPtr(LoadPtr, Branch), RawNull, "filc_check_global"));
++      Branch->getOperandUse(0) = new ICmpInst(
++        Branch, ICmpInst::ICMP_EQ, flightPtrPtr(LoadPtr, Branch), RawNull, "filc_check_global");
 +
-+      CondBrInst* OtherBranch = CondBrInst::Create(
-+        UndefValue::get(Int1Ty), SlowBB, FastBB, OtherCheckBB);
-+      OtherBranch->setCondition(new ICmpInst(
++      Instruction* OtherBranch = BranchInst::Create(
++        SlowBB, FastBB, UndefValue::get(Int1Ty), OtherCheckBB);
++      OtherBranch->getOperandUse(0) = new ICmpInst(
 +        OtherBranch, ICmpInst::ICMP_EQ, flightPtrLower(LoadPtr, OtherBranch), RawNull,
-+        "filc_check_global"));
++        "filc_check_global");
 +      
 +      ReturnInst::Create(C, LoadPtr, FastBB);
 +
@@ -17926,7 +17914,7 @@ index 000000000..0eb3679cb
 +                         "filc_call_getter_slow", SlowBB),
 +        SlowBB);
 +
-+      Branch = CondBrInst::Create(UndefValue::get(Int1Ty), BuildBB, RecurseBB, SlowRootBB);
++      Branch = BranchInst::Create(BuildBB, RecurseBB, UndefValue::get(Int1Ty), SlowRootBB);
 +      Value* Ptr = flightPtrForPayload(NewDataPayloadC, Branch);
 +      // NOTE: This function call is necessary even for the cases of globals with no meaningful
 +      // initializer or an initializer we could just optimize to pure data, since we have to tell the
@@ -17937,7 +17925,7 @@ index 000000000..0eb3679cb
 +        GlobalInitializationStart,
 +        { MyThread, SlowF->getArg(1), NewPtrG, NewDataObjectC },
 +        "filc_context_start", Branch);
-+      Branch->setCondition(Start);
++      Branch->getOperandUse(0) = Start;
 +
 +      ReturnInst::Create(C, Ptr, RecurseBB);
 +
@@ -18144,7 +18132,7 @@ index 000000000..0eb3679cb
 +        if (Signature == GenericSignature) {
 +          assert(ImplFuncTy == PizlonatedFuncTy);
 +          ReallyReturnB = BasicBlock::Create(C, "filc_really_return_block", NewF);
-+          UncondBrInst* ReturnBranch = UncondBrInst::Create(ReallyReturnB, ReturnB);
++          BranchInst* ReturnBranch = BranchInst::Create(ReallyReturnB, ReturnB);
 +          RetSizePhi = PHINode::Create(IntPtrTy, 1, "filc_ret_size", ReallyReturnB);
 +          Instruction* ReturnValue = InsertValueInst::Create(
 +            UndefValue::get(PizlonatedReturnValueTy), ConstantInt::getFalse(Int1Ty), { 0 },
@@ -18401,16 +18389,16 @@ index 000000000..0eb3679cb
 +      // raw ptr as NULL. If either are NULL, then it's either not initialized yet, or we experienced
 +      // ptr tearing. This allows us to avoid an expensive 128-bit atomic.
 +      
-+      CondBrInst* Branch = CondBrInst::Create(UndefValue::get(Int1Ty), SlowBB, OtherCheckBB, RootBB);
++      Instruction* Branch = BranchInst::Create(SlowBB, OtherCheckBB, UndefValue::get(Int1Ty), RootBB);
 +      Value* LoadPtr = loadFlightPtr(NewPtrG, Branch);
-+      Branch->setCondition(new ICmpInst(
-+        Branch, ICmpInst::ICMP_EQ, flightPtrPtr(LoadPtr, Branch), RawNull, "filc_check_global"));
++      Branch->getOperandUse(0) = new ICmpInst(
++        Branch, ICmpInst::ICMP_EQ, flightPtrPtr(LoadPtr, Branch), RawNull, "filc_check_global");
 +
-+      CondBrInst* OtherBranch = CondBrInst::Create(
-+        UndefValue::get(Int1Ty), SlowBB, FastBB, OtherCheckBB);
-+      OtherBranch->setCondition(new ICmpInst(
++      Instruction* OtherBranch = BranchInst::Create(
++        SlowBB, FastBB, UndefValue::get(Int1Ty), OtherCheckBB);
++      OtherBranch->getOperandUse(0) = new ICmpInst(
 +        OtherBranch, ICmpInst::ICMP_EQ, flightPtrLower(LoadPtr, OtherBranch), RawNull,
-+        "filc_check_global_func"));
++        "filc_check_global_func");
 +      
 +      ReturnInst::Create(C, LoadPtr, FastBB);
 +
@@ -18474,10 +18462,10 @@ index 000000000..0eb3679cb
 +}
 diff --git a/llvm/lib/Transforms/Instrumentation/KillUB.cpp b/llvm/lib/Transforms/Instrumentation/KillUB.cpp
 new file mode 100644
-index 000000000..bee3ea5c4
+index 000000000..2a0f489e6
 --- /dev/null
 +++ b/llvm/lib/Transforms/Instrumentation/KillUB.cpp
-@@ -0,0 +1,207 @@
+@@ -0,0 +1,208 @@
 +//===- KillUB.cpp - remove all UB flags -----------------------------------===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -18640,6 +18628,7 @@ index 000000000..bee3ea5c4
 +          ShouldErase = true;
 +          break;
 +        case Intrinsic::launder_invariant_group:
++        case Intrinsic::strip_invariant_group:
 +          CI->replaceAllUsesWith(CI->getArgOperand(0));
 +          ShouldErase = true;
 +          break;
@@ -18666,7 +18655,7 @@ index 000000000..bee3ea5c4
 +        if (ShouldErase) {
 +          assert(!MaybePoison);
 +          if (InvokeInst* II = dyn_cast<InvokeInst>(CI))
-+            UncondBrInst::Create(II->getNormalDest(), CI)->setDebugLoc(CI->getDebugLoc());
++            BranchInst::Create(II->getNormalDest(), CI)->setDebugLoc(CI->getDebugLoc());
 +          ToErase.push_back(CI);
 +        }
 +      }

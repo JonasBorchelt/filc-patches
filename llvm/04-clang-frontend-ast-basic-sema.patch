@@ -1,5 +1,5 @@
 Subject: Clang frontend support (HasUnion tracking, dual DataLayout in TargetInfo, preprocessor & cpuid)
-Upstream-Base: LLVM main (1bd1774757f8fb19c0a06f84cbb53076b75eafbb)
+Upstream-Base: llvmorg-23.1.6 (5b10d2d74929eae78912771222c9855af97496f4)
 Fil-C-Head: cede3de02b42b58a14acc9ce39c9894ab952a915 (branch deluge)
 
 Tracks union containment on RecordDecl/QualType in AST and Sema, splits
@@ -45,20 +45,15 @@ Rebase-Notes (llvmorg-21.1.8 -> llvmorg-22.1.8):
 
 Rebase-Notes (llvmorg-22.1.8 -> llvmorg-23.1.6):
   - TargetInfo.h: context updated for isProcessorName() insertion above getDataLayoutString().
-  - ASTContext.cpp -> CompilerInvocation.cpp: Before LLVM 23, Fil-C overrode ASTContext::getVTableContext() to unconditionally construct ItaniumVTableContext(*this, ItaniumVTableContext::Pointer), ignoring LangOpts.RelativeCXXABIVTables so that vtable slots always store full pointers (required by Fil-C's InvisiCap capability model instead of 32-bit relative offsets). LLVM 23 removed ItaniumVTableContext::ComponentLayout and reads LangOpts.RelativeCXXABIVTables directly in AST/CodeGen; forcing Opts.RelativeCXXABIVTables = false in CompilerInvocation.cpp preserves the exact pre-LLVM-23 pointer-vtable behavior.
+  - ASTContext.cpp -> CompilerInvocation.cpp: LLVM 23 removed ItaniumVTableContext::ComponentLayout and checks LangOpts.RelativeCXXABIVTables directly; forced Opts.RelativeCXXABIVTables = false in CompilerInvocation.cpp.
   - SPIR.cpp: updated AMDGPUTI static-initializer removal for multi-line Triple constructor and new isValidCPUName/fillValidCPUList pointer dereferences.
-
-
-Rebase-Notes (llvmorg-23.1.6 -> LLVM main 1bd1774757f8):
-  - TargetInfo.cpp: context updated around resetDataLayout() (moved below new helpers).
-  - NVPTX.cpp: simplified Triple.computeDataLayout() call (NVPTXUseShortPointers removed upstream); kept resetDataLayout() wrapper.
 
 ---
 diff --git a/clang/include/clang/AST/Decl.h b/clang/include/clang/AST/Decl.h
-index 4104ddc89..c8cd4054f 100644
+index 0a6f256af..b4ffa0bd8 100644
 --- a/clang/include/clang/AST/Decl.h
 +++ b/clang/include/clang/AST/Decl.h
-@@ -4629,6 +4629,14 @@ public:
+@@ -4492,6 +4492,14 @@ public:
      RecordDeclBits.HasNonTrivialToPrimitiveCopyCUnion = V;
    }
  
@@ -74,10 +69,10 @@ index 4104ddc89..c8cd4054f 100644
      return RecordDeclBits.HasUninitializedExplicitInitFields;
    }
 diff --git a/clang/include/clang/AST/DeclBase.h b/clang/include/clang/AST/DeclBase.h
-index 44caeae23..8e23e1bc1 100644
+index 9d233be28..c6952bf1e 100644
 --- a/clang/include/clang/AST/DeclBase.h
 +++ b/clang/include/clang/AST/DeclBase.h
-@@ -1479,7 +1479,7 @@ class DeclContext {
+@@ -1478,7 +1478,7 @@ class DeclContext {
    friend class ASTWriter;
  
  protected:
@@ -86,7 +81,7 @@ index 44caeae23..8e23e1bc1 100644
  
    // We use uint64_t in the bit-fields below since some bit-fields
    // cross the unsigned boundary and this breaks the packing.
-@@ -1688,6 +1688,8 @@ protected:
+@@ -1693,6 +1693,8 @@ protected:
      uint64_t HasNonTrivialToPrimitiveDestructCUnion : 1;
      LLVM_PREFERRED_TYPE(bool)
      uint64_t HasNonTrivialToPrimitiveCopyCUnion : 1;
@@ -113,10 +108,10 @@ index 7bd244128..2d38eaf29 100644
  
  #endif // LLVM_CLANG_AST_TYPE_H
 diff --git a/clang/include/clang/AST/TypeBase.h b/clang/include/clang/AST/TypeBase.h
-index dc376530f..0216e21c9 100644
+index c9658775f..b94c03137 100644
 --- a/clang/include/clang/AST/TypeBase.h
 +++ b/clang/include/clang/AST/TypeBase.h
-@@ -1578,6 +1578,8 @@ public:
+@@ -1577,6 +1577,8 @@ public:
    /// true, isNonTrivialToPrimitiveCopy returns PCK_Struct.
    bool hasNonTrivialToPrimitiveCopyCUnion() const;
  
@@ -125,7 +120,7 @@ index dc376530f..0216e21c9 100644
    /// Determine whether expressions of the given type are forbidden
    /// from being lvalues in C.
    ///
-@@ -1662,6 +1664,7 @@ private:
+@@ -1658,6 +1660,7 @@ private:
    static bool hasNonTrivialToPrimitiveDefaultInitializeCUnion(const RecordDecl *RD);
    static bool hasNonTrivialToPrimitiveDestructCUnion(const RecordDecl *RD);
    static bool hasNonTrivialToPrimitiveCopyCUnion(const RecordDecl *RD);
@@ -134,10 +129,10 @@ index dc376530f..0216e21c9 100644
  
  raw_ostream &operator<<(raw_ostream &OS, QualType QT);
 diff --git a/clang/include/clang/Basic/TargetInfo.h b/clang/include/clang/Basic/TargetInfo.h
-index 7c5c35a5c..896ad6057 100644
+index 3aba4d261..4c8d7ea86 100644
 --- a/clang/include/clang/Basic/TargetInfo.h
 +++ b/clang/include/clang/Basic/TargetInfo.h
-@@ -252,7 +252,8 @@ protected:
+@@ -251,7 +251,8 @@ protected:
    bool HasStrictFP;
  
    unsigned char MaxAtomicPromoteWidth, MaxAtomicInlineWidth;
@@ -147,7 +142,7 @@ index 7c5c35a5c..896ad6057 100644
    const char *UserLabelPrefix;
    const char *MCountName;
    unsigned char RegParmMax, SSERegParmMax;
-@@ -306,6 +307,7 @@ protected:
+@@ -302,6 +303,7 @@ protected:
  
    /// Set the data layout to the given string.
    void resetDataLayout(StringRef DL);
@@ -155,7 +150,7 @@ index 7c5c35a5c..896ad6057 100644
  
    /// Set the data layout based on current triple and ABI.
    void resetDataLayout();
-@@ -1329,9 +1331,13 @@ public:
+@@ -1326,9 +1328,13 @@ public:
    /// compatible processor.
    virtual bool isProcessorName(StringRef Name) const { return false; }
  
@@ -186,10 +181,10 @@ index 3680ee566..5e540804e 100644
    bool shouldVisitTemplateInstantiations() const { return true; }
  
 diff --git a/clang/lib/AST/Decl.cpp b/clang/lib/AST/Decl.cpp
-index e89938d23..d27e70073 100644
+index 5a76a726c..ef0ec6179 100644
 --- a/clang/lib/AST/Decl.cpp
 +++ b/clang/lib/AST/Decl.cpp
-@@ -5332,6 +5332,7 @@ RecordDecl::RecordDecl(Kind DK, TagKind TK, const ASTContext &C,
+@@ -5223,6 +5223,7 @@ RecordDecl::RecordDecl(Kind DK, TagKind TK, const ASTContext &C,
    setHasNonTrivialToPrimitiveDestructCUnion(false);
    setHasNonTrivialToPrimitiveCopyCUnion(false);
    setHasUninitializedExplicitInitFields(false);
@@ -198,10 +193,10 @@ index e89938d23..d27e70073 100644
    setArgPassingRestrictions(RecordArgPassingKind::CanPassInRegs);
    setIsRandomized(false);
 diff --git a/clang/lib/AST/Mangle.cpp b/clang/lib/AST/Mangle.cpp
-index a11aa0278..9020b1645 100644
+index 76c51b8d9..35c247741 100644
 --- a/clang/lib/AST/Mangle.cpp
 +++ b/clang/lib/AST/Mangle.cpp
-@@ -270,7 +270,7 @@ void MangleContext::mangleName(GlobalDecl GD, raw_ostream &Out) {
+@@ -267,7 +267,7 @@ void MangleContext::mangleName(GlobalDecl GD, raw_ostream &Out) {
          getASTContext().getTargetInfo().getUserLabelPrefix();
  #ifndef NDEBUG
      char GlobalPrefix =
@@ -210,7 +205,7 @@ index a11aa0278..9020b1645 100644
              .getGlobalPrefix();
      assert((UserLabelPrefix.empty() && !GlobalPrefix) ||
             (UserLabelPrefix.size() == 1 && UserLabelPrefix[0] == GlobalPrefix));
-@@ -532,7 +532,7 @@ class ASTNameGenerator::Implementation {
+@@ -521,7 +521,7 @@ class ASTNameGenerator::Implementation {
  public:
    explicit Implementation(ASTContext &Ctx)
        : MC(Ctx.createMangleContext()),
@@ -220,10 +215,10 @@ index a11aa0278..9020b1645 100644
    bool writeName(const Decl *D, raw_ostream &OS) {
      // First apply frontend mangling.
 diff --git a/clang/lib/AST/Type.cpp b/clang/lib/AST/Type.cpp
-index 7eafa1396..0fbb4d366 100644
+index 42d148715..542700aaf 100644
 --- a/clang/lib/AST/Type.cpp
 +++ b/clang/lib/AST/Type.cpp
-@@ -3167,6 +3167,10 @@ bool QualType::hasNonTrivialToPrimitiveCopyCUnion(const RecordDecl *RD) {
+@@ -3043,6 +3043,10 @@ bool QualType::hasNonTrivialToPrimitiveCopyCUnion(const RecordDecl *RD) {
    return RD->hasNonTrivialToPrimitiveCopyCUnion();
  }
  
@@ -235,12 +230,12 @@ index 7eafa1396..0fbb4d366 100644
    return isWebAssemblyExternrefType() || isWebAssemblyFuncrefType();
  }
 diff --git a/clang/lib/Basic/TargetInfo.cpp b/clang/lib/Basic/TargetInfo.cpp
-index 6e390226d..ba759921b 100644
+index 46b5bdecb..fd6656afe 100644
 --- a/clang/lib/Basic/TargetInfo.cpp
 +++ b/clang/lib/Basic/TargetInfo.cpp
-@@ -220,10 +220,30 @@ size_t TargetInfo::getMaxBitIntWidth() const {
-   return 128;
- }
+@@ -200,10 +200,30 @@ TargetInfo::TargetInfo(const llvm::Triple &T) : Triple(T) {
+ // Out of line virtual dtor for TargetInfo.
+ TargetInfo::~TargetInfo() {}
  
 -void TargetInfo::resetDataLayout(StringRef DL) { DataLayoutString = DL.str(); }
 +void TargetInfo::resetDataLayout(StringRef DL) {
@@ -272,15 +267,17 @@ index 6e390226d..ba759921b 100644
  
  bool
 diff --git a/clang/lib/Basic/Targets/NVPTX.cpp b/clang/lib/Basic/Targets/NVPTX.cpp
-index 61efae2cc..8af317ccc 100644
+index 2e1d9abac..7b427f43a 100644
 --- a/clang/lib/Basic/Targets/NVPTX.cpp
 +++ b/clang/lib/Basic/Targets/NVPTX.cpp
-@@ -76,7 +76,7 @@ NVPTXTargetInfo::NVPTXTargetInfo(const llvm::Triple &Triple,
-   HasFastHalfType = true;
+@@ -71,8 +71,8 @@ NVPTXTargetInfo::NVPTXTargetInfo(const llvm::Triple &Triple,
    HasFloat16 = true;
  
--  DataLayoutString = Triple.computeDataLayout();
-+  resetDataLayout(Triple.computeDataLayout());
+   // TODO: Make shortptr a proper ABI?
+-  DataLayoutString =
+-      Triple.computeDataLayout(Opts.NVPTXUseShortPointers ? "shortptr" : "");
++  resetDataLayout(
++      Triple.computeDataLayout(Opts.NVPTXUseShortPointers ? "shortptr" : ""));
  
    // If possible, get a TargetInfo for our host triple, so we can match its
    // types.
@@ -387,10 +384,10 @@ index 4823f566b..0def33723 100644
    std::string LLVMRev = getLLVMRevision();
    if (!LLVMRev.empty() && LLVMRev != Revision) {
 diff --git a/clang/lib/Frontend/CompilerInvocation.cpp b/clang/lib/Frontend/CompilerInvocation.cpp
-index 9af6f6c41..2d9731366 100644
+index 8898e63ab..dca3d5a81 100644
 --- a/clang/lib/Frontend/CompilerInvocation.cpp
 +++ b/clang/lib/Frontend/CompilerInvocation.cpp
-@@ -4613,10 +4613,8 @@ bool CompilerInvocation::ParseLangArgs(LangOptions &Opts, ArgList &Args,
+@@ -4551,10 +4551,8 @@ bool CompilerInvocation::ParseLangArgs(LangOptions &Opts, ArgList &Args,
      }
    }
  
@@ -404,10 +401,10 @@ index 9af6f6c41..2d9731366 100644
    // RTTI is on by default.
    bool HasRTTI = !Args.hasArg(options::OPT_fno_rtti);
 diff --git a/clang/lib/Frontend/InitPreprocessor.cpp b/clang/lib/Frontend/InitPreprocessor.cpp
-index 50e01327f..e521eea53 100644
+index 65b065dc8..47bb1f735 100644
 --- a/clang/lib/Frontend/InitPreprocessor.cpp
 +++ b/clang/lib/Frontend/InitPreprocessor.cpp
-@@ -862,6 +862,8 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
+@@ -857,6 +857,8 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
    // Compiler version introspection macros.
    Builder.defineMacro("__llvm__");  // LLVM Backend
    Builder.defineMacro("__clang__"); // Clang Frontend
@@ -417,10 +414,10 @@ index 50e01327f..e521eea53 100644
  #define TOSTR(X) TOSTR2(X)
    Builder.defineMacro("__clang_major__", TOSTR(CLANG_VERSION_MAJOR));
 diff --git a/clang/lib/Headers/cpuid.h b/clang/lib/Headers/cpuid.h
-index 57c6ab9ba..fae09b8f3 100644
+index 156425c75..6ff7b0ffb 100644
 --- a/clang/lib/Headers/cpuid.h
 +++ b/clang/lib/Headers/cpuid.h
-@@ -256,6 +256,23 @@
+@@ -253,6 +253,23 @@
  #define bit_RDPRU       0x00000010
  #define bit_WBNOINVD    0x00000200
  
@@ -444,7 +441,7 @@ index 57c6ab9ba..fae09b8f3 100644
  #ifdef __i386__
  #define __cpuid(__leaf, __eax, __ebx, __ecx, __edx) \
      __asm("cpuid" : "=a"(__eax), "=b" (__ebx), "=c"(__ecx), "=d"(__edx) \
-@@ -280,6 +297,7 @@
+@@ -277,6 +294,7 @@
          : "=a"(__eax), "=r"(__ebx), "=c"(__ecx), "=d"(__edx)                   \
          : "0"(__leaf), "2"(__count))
  #endif
@@ -453,10 +450,10 @@ index 57c6ab9ba..fae09b8f3 100644
  /// Queries the processor to determine the highest supported \c CPUID leaf.
  /// This intrinsic is only available on x86 and x64.
 diff --git a/clang/lib/Sema/SemaDecl.cpp b/clang/lib/Sema/SemaDecl.cpp
-index 0b7088186..0068a94cf 100644
+index 6a25a799a..6cfdb9f55 100644
 --- a/clang/lib/Sema/SemaDecl.cpp
 +++ b/clang/lib/Sema/SemaDecl.cpp
-@@ -20292,6 +20292,22 @@ void Sema::ActOnFields(Scope *S, SourceLocation RecLoc, Decl *EnclosingDecl,
+@@ -20015,6 +20015,22 @@ void Sema::ActOnFields(Scope *S, SourceLocation RecLoc, Decl *EnclosingDecl,
      }
    }
  
@@ -479,7 +476,7 @@ index 0b7088186..0068a94cf 100644
    // Verify that all the fields are okay.
    SmallVector<FieldDecl*, 32> RecFields;
    const FieldDecl *PreviousField = nullptr;
-@@ -20307,6 +20323,9 @@ void Sema::ActOnFields(Scope *S, SourceLocation RecLoc, Decl *EnclosingDecl,
+@@ -20030,6 +20046,9 @@ void Sema::ActOnFields(Scope *S, SourceLocation RecLoc, Decl *EnclosingDecl,
        RecFields.push_back(FD);
      }
  

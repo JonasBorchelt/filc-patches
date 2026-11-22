@@ -1,5 +1,5 @@
 Subject: Fil-C libc++ and libc++abi runtime adaptations
-Upstream-Base: LLVM main (1bd1774757f8fb19c0a06f84cbb53076b75eafbb)
+Upstream-Base: llvmorg-23.1.6 (5b10d2d74929eae78912771222c9855af97496f4)
 Fil-C-Head: cede3de02b42b58a14acc9ce39c9894ab952a915 (branch deluge)
 
 Adapts libc++abi exception personality to <pizlonated_eh_landing_pad.h>,
@@ -31,12 +31,6 @@ Rebase-Notes (llvmorg-22.1.8 -> llvmorg-23.1.6):
   - libcxx/src/experimental/tzdb.cpp: context updated for _LIBCPP_WEAK -> [[gnu::weak]].
   - libcxxabi/src/cxa_personality.cpp: context updated for comment typo fix.
 
-
-Rebase-Notes (llvmorg-23.1.6 -> LLVM main 1bd1774757f8):
-  - libcxx/include/__config -> __locale_dir/support/linux.h: _LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE moved to per-platform support headers in LLVM main; added _LIBCPP_HAS_COSMO_LIBC to support/linux.h.
-  - libcxx/include/__locale_dir/locale_base_api.h: context updated for removed _LIBCPP_HIDE_FROM_ABI qualifiers.
-  - libcxxabi/src/cxa_thread_atexit.cpp: context updated for pthread #pragma comment block.
-
 ---
 diff --git a/libc/include/llvm-libc-macros/cfloat16-macros.h b/libc/include/llvm-libc-macros/cfloat16-macros.h
 index 1f10adf3e..8a4408f02 100644
@@ -55,10 +49,10 @@ index 1f10adf3e..8a4408f02 100644
  #endif
  
 diff --git a/libcxx/CMakeLists.txt b/libcxx/CMakeLists.txt
-index 2c0eaf958..43305f79b 100644
+index 31aaf2977..e4f1a8a8a 100644
 --- a/libcxx/CMakeLists.txt
 +++ b/libcxx/CMakeLists.txt
-@@ -247,10 +247,16 @@ set(LIBCXX_EXTRA_SITE_DEFINES "" CACHE STRING "Extra defines to add into __confi
+@@ -254,10 +254,16 @@ set(LIBCXX_EXTRA_SITE_DEFINES "" CACHE STRING "Extra defines to add into __confi
  option(LIBCXX_USE_COMPILER_RT "Use compiler-rt instead of libgcc" OFF)
  
  # ABI Library options ---------------------------------------------------------
@@ -78,7 +72,7 @@ index 2c0eaf958..43305f79b 100644
  endif()
  
  set(LIBCXX_SUPPORTED_ABI_LIBRARIES none libcxxabi system-libcxxabi libcxxrt libstdc++ libsupc++ vcruntime)
-@@ -306,6 +312,11 @@ endif()
+@@ -313,6 +319,11 @@ endif()
  
  # Feature options -------------------------------------------------------------
  option(LIBCXX_HAS_MUSL_LIBC "Build libc++ with support for the Musl C library" OFF)
@@ -90,7 +84,7 @@ index 2c0eaf958..43305f79b 100644
  option(LIBCXX_HAS_PTHREAD_API "Ignore auto-detection and force use of pthread API" OFF)
  option(LIBCXX_HAS_WIN32_THREAD_API "Ignore auto-detection and force use of win32 thread API" OFF)
  option(LIBCXX_HAS_EXTERNAL_THREAD_API
-@@ -325,6 +336,7 @@ if (WIN32)
+@@ -338,6 +349,7 @@ if (WIN32)
  endif()
  option(LIBCXX_HERMETIC_STATIC_LIBRARY
    "Do not export any symbols from the static library." ${LIBCXX_HERMETIC_STATIC_LIBRARY_DEFAULT})
@@ -98,7 +92,7 @@ index 2c0eaf958..43305f79b 100644
  
  #===============================================================================
  # Check option configurations
-@@ -517,6 +529,8 @@ include(HandleLibcxxFlags)
+@@ -530,6 +542,8 @@ include(HandleLibcxxFlags)
  # 'config-ix' use them during feature checks. It also adds them to both
  # 'LIBCXX_COMPILE_FLAGS' and 'LIBCXX_LINK_FLAGS'
  
@@ -107,7 +101,7 @@ index 2c0eaf958..43305f79b 100644
  if ("${CMAKE_SYSTEM_NAME}" MATCHES "AIX")
    add_flags_if_supported("-mdefault-visibility-export-mapping=explicit")
    set(CMAKE_AIX_EXPORT_ALL_SYMBOLS OFF)
-@@ -737,6 +751,7 @@ config_define(${LIBCXX_HAS_EXTERNAL_THREAD_API} _LIBCPP_HAS_THREAD_API_EXTERNAL)
+@@ -809,6 +823,7 @@ config_define(${LIBCXX_HAS_EXTERNAL_THREAD_API} _LIBCPP_HAS_THREAD_API_EXTERNAL)
  config_define(${LIBCXX_HAS_WIN32_THREAD_API} _LIBCPP_HAS_THREAD_API_WIN32)
  config_define(${LIBCXX_HAS_C11_THREAD_API} _LIBCPP_HAS_THREAD_API_C11)
  config_define(${LIBCXX_HAS_MUSL_LIBC} _LIBCPP_HAS_MUSL_LIBC)
@@ -145,11 +139,24 @@ index c6d257069..c35a945e2 100644
  
  #endif // _LIBCPP_ABI_ATOMIC_WAIT_NATIVE_BY_SIZE
  
+diff --git a/libcxx/include/__config b/libcxx/include/__config
+index d76567319..1bed541f9 100644
+--- a/libcxx/include/__config
++++ b/libcxx/include/__config
+@@ -298,7 +298,7 @@ typedef __char32_t char32_t;
+ #  endif
+ 
+ #  if defined(__BIONIC__) || defined(__NuttX__) || defined(__Fuchsia__) || defined(__wasi__) ||                        \
+-      _LIBCPP_HAS_MUSL_LIBC || defined(__OpenBSD__) || _LIBCPP_LIBC_LLVM_LIBC
++      _LIBCPP_HAS_MUSL_LIBC || _LIBCPP_HAS_COSMO_LIBC || defined(__OpenBSD__) || _LIBCPP_LIBC_LLVM_LIBC
+ #    define _LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE
+ #  endif
+ 
 diff --git a/libcxx/include/__config_site.in b/libcxx/include/__config_site.in
-index 693a4b089..8e2bef739 100644
+index e6e33a2ee..fc976bc34 100644
 --- a/libcxx/include/__config_site.in
 +++ b/libcxx/include/__config_site.in
-@@ -17,6 +17,7 @@
+@@ -16,6 +16,7 @@
  #cmakedefine01 _LIBCPP_HAS_THREADS
  #cmakedefine01 _LIBCPP_HAS_MONOTONIC_CLOCK
  #cmakedefine01 _LIBCPP_HAS_MUSL_LIBC
@@ -158,13 +165,13 @@ index 693a4b089..8e2bef739 100644
  #cmakedefine01 _LIBCPP_HAS_THREAD_API_EXTERNAL
  #cmakedefine01 _LIBCPP_HAS_THREAD_API_WIN32
 diff --git a/libcxx/include/__locale_dir/locale_base_api.h b/libcxx/include/__locale_dir/locale_base_api.h
-index f76d1b161..865e4c2ea 100644
+index f973d95ef..988cfa1f1 100644
 --- a/libcxx/include/__locale_dir/locale_base_api.h
 +++ b/libcxx/include/__locale_dir/locale_base_api.h
-@@ -218,17 +218,48 @@ inline int __tolower(int __ch, __locale_t __loc) { return tolower_l(__ch, __loc)
+@@ -209,19 +209,48 @@ inline _LIBCPP_HIDE_FROM_ABI int __tolower(int __ch, __locale_t __loc) { return
  
  #      if _LIBCPP_HAS_WIDE_CHARACTERS
- inline int __wcscoll(const wchar_t* __s1, const wchar_t* __s2, __locale_t __loc) {
+ inline _LIBCPP_HIDE_FROM_ABI int __wcscoll(const wchar_t* __s1, const wchar_t* __s2, __locale_t __loc) {
 +#        if _LIBCPP_HAS_COSMO_LIBC
 +  // Cosmo declares wcscoll_l but does not implement it (and does not implement
 +  // plain wcscoll either).  Cosmo only has the "C" locale, where collation is
@@ -174,25 +181,24 @@ index f76d1b161..865e4c2ea 100644
    return wcscoll_l(__s1, __s2, __loc);
 +#        endif
  }
- inline size_t __wcsxfrm(wchar_t* __dest, const wchar_t* __src, size_t __n, __locale_t __loc) {
+ inline _LIBCPP_HIDE_FROM_ABI size_t __wcsxfrm(wchar_t* __dest, const wchar_t* __src, size_t __n, __locale_t __loc) {
    return wcsxfrm_l(__dest, __src, __n, __loc);
  }
--inline int __iswctype(wint_t __ch, wctype_t __type, __locale_t __loc) { return iswctype_l(__ch, __type, __loc); }
-+inline int __iswctype(wint_t __ch, wctype_t __type, __locale_t __loc) {
+ inline _LIBCPP_HIDE_FROM_ABI int __iswctype(wint_t __ch, wctype_t __type, __locale_t __loc) {
 +#        if _LIBCPP_HAS_COSMO_LIBC
 +  // Cosmo declares iswctype_l but does not implement it.  Cosmo only has the
 +  // "C" locale, where iswctype_l is iswctype.
 +  return iswctype(__ch, __type);
 +#        else
-+  return iswctype_l(__ch, __type, __loc);
+   return iswctype_l(__ch, __type, __loc);
 +#        endif
-+}
- inline int __iswspace(wint_t __ch, __locale_t __loc) { return iswspace_l(__ch, __loc); }
- inline int __iswprint(wint_t __ch, __locale_t __loc) { return iswprint_l(__ch, __loc); }
- inline int __iswcntrl(wint_t __ch, __locale_t __loc) { return iswcntrl_l(__ch, __loc); }
--inline int __iswupper(wint_t __ch, __locale_t __loc) { return iswupper_l(__ch, __loc); }
--inline int __iswlower(wint_t __ch, __locale_t __loc) { return iswlower_l(__ch, __loc); }
-+inline int __iswupper(wint_t __ch, __locale_t __loc) {
+ }
+ inline _LIBCPP_HIDE_FROM_ABI int __iswspace(wint_t __ch, __locale_t __loc) { return iswspace_l(__ch, __loc); }
+ inline _LIBCPP_HIDE_FROM_ABI int __iswprint(wint_t __ch, __locale_t __loc) { return iswprint_l(__ch, __loc); }
+ inline _LIBCPP_HIDE_FROM_ABI int __iswcntrl(wint_t __ch, __locale_t __loc) { return iswcntrl_l(__ch, __loc); }
+-inline _LIBCPP_HIDE_FROM_ABI int __iswupper(wint_t __ch, __locale_t __loc) { return iswupper_l(__ch, __loc); }
+-inline _LIBCPP_HIDE_FROM_ABI int __iswlower(wint_t __ch, __locale_t __loc) { return iswlower_l(__ch, __loc); }
++inline _LIBCPP_HIDE_FROM_ABI int __iswupper(wint_t __ch, __locale_t __loc) {
 +#        if _LIBCPP_HAS_COSMO_LIBC
 +  // Cosmo declares iswupper_l but does not implement it.  Cosmo only has the
 +  // "C" locale, where iswupper_l is iswupper.
@@ -201,7 +207,7 @@ index f76d1b161..865e4c2ea 100644
 +  return iswupper_l(__ch, __loc);
 +#        endif
 +}
-+inline int __iswlower(wint_t __ch, __locale_t __loc) {
++inline _LIBCPP_HIDE_FROM_ABI int __iswlower(wint_t __ch, __locale_t __loc) {
 +#        if _LIBCPP_HAS_COSMO_LIBC
 +  // Cosmo declares iswlower_l but does not implement it.  Cosmo only has the
 +  // "C" locale, where iswlower_l is iswlower.
@@ -210,22 +216,9 @@ index f76d1b161..865e4c2ea 100644
 +  return iswlower_l(__ch, __loc);
 +#        endif
 +}
- inline int __iswalpha(wint_t __ch, __locale_t __loc) { return iswalpha_l(__ch, __loc); }
- inline int __iswblank(wint_t __ch, __locale_t __loc) { return iswblank_l(__ch, __loc); }
- inline int __iswdigit(wint_t __ch, __locale_t __loc) { return iswdigit_l(__ch, __loc); }
-diff --git a/libcxx/include/__locale_dir/support/linux.h b/libcxx/include/__locale_dir/support/linux.h
-index c0402e552..059220e3d 100644
---- a/libcxx/include/__locale_dir/support/linux.h
-+++ b/libcxx/include/__locale_dir/support/linux.h
-@@ -259,7 +259,7 @@ inline _LIBCPP_ATTRIBUTE_FORMAT(__printf__, 3, 4) int __asprintf(
- } // namespace __locale
- _LIBCPP_END_NAMESPACE_STD
- 
--#if defined(__BIONIC__) || _LIBCPP_HAS_MUSL_LIBC
-+#if defined(__BIONIC__) || _LIBCPP_HAS_MUSL_LIBC || _LIBCPP_HAS_COSMO_LIBC
- #  define _LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE 1
- #else
- #  define _LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE 0
+ inline _LIBCPP_HIDE_FROM_ABI int __iswalpha(wint_t __ch, __locale_t __loc) { return iswalpha_l(__ch, __loc); }
+ inline _LIBCPP_HIDE_FROM_ABI int __iswblank(wint_t __ch, __locale_t __loc) { return iswblank_l(__ch, __loc); }
+ inline _LIBCPP_HIDE_FROM_ABI int __iswdigit(wint_t __ch, __locale_t __loc) { return iswdigit_l(__ch, __loc); }
 diff --git a/libcxx/lib/notweak.exp b/libcxx/lib/notweak.exp
 index fafde1c84..b1e1981f7 100644
 --- a/libcxx/lib/notweak.exp
@@ -277,7 +270,7 @@ index 6bdcc0578..a43e416fd 100644
 +_pizlonated__ZTISt9bad_alloc
 +_pizlonated__ZTISt9exception
 diff --git a/libcxx/src/atomic.cpp b/libcxx/src/atomic.cpp
-index c05940fb7..903f936e6 100644
+index 15e069210..85d081547 100644
 --- a/libcxx/src/atomic.cpp
 +++ b/libcxx/src/atomic.cpp
 @@ -33,16 +33,20 @@
@@ -331,7 +324,7 @@ index c05940fb7..903f936e6 100644
  
  #elif defined(__APPLE__)
 diff --git a/libcxx/src/chrono.cpp b/libcxx/src/chrono.cpp
-index 30c1a1f11..9f0fbd4a2 100644
+index af5fe7c01..05231fafb 100644
 --- a/libcxx/src/chrono.cpp
 +++ b/libcxx/src/chrono.cpp
 @@ -36,8 +36,10 @@
@@ -362,7 +355,7 @@ index ca4aa1cab..72880f773 100644
  #else
  #  error "unknown path to the IANA Time Zone Database"
 diff --git a/libcxx/src/include/config_elast.h b/libcxx/src/include/config_elast.h
-index 8aa9355c4..b76df6005 100644
+index daec2429d..c906c2450 100644
 --- a/libcxx/src/include/config_elast.h
 +++ b/libcxx/src/include/config_elast.h
 @@ -33,7 +33,7 @@
@@ -375,10 +368,10 @@ index 8aa9355c4..b76df6005 100644
  #elif defined(__APPLE__)
  // No _LIBCPP_ELAST needed on Apple
 diff --git a/libcxxabi/CMakeLists.txt b/libcxxabi/CMakeLists.txt
-index 5fed474e0..4d84ecc28 100644
+index d9ab9c494..2e0f510f6 100644
 --- a/libcxxabi/CMakeLists.txt
 +++ b/libcxxabi/CMakeLists.txt
-@@ -405,6 +405,8 @@ if (LIBCXXABI_HAS_UNDEFINED_SYMBOLS)
+@@ -444,6 +444,8 @@ if (LIBCXXABI_HAS_UNDEFINED_SYMBOLS)
    endif()
  endif()
  
@@ -388,7 +381,7 @@ index 5fed474e0..4d84ecc28 100644
    add_definitions(-D_LIBCPP_HAS_THREAD_API_PTHREAD)
  endif()
 diff --git a/libcxxabi/include/__cxxabi_config.h b/libcxxabi/include/__cxxabi_config.h
-index 7dafa976d..3649df185 100644
+index 6ec10e469..308085a72 100644
 --- a/libcxxabi/include/__cxxabi_config.h
 +++ b/libcxxabi/include/__cxxabi_config.h
 @@ -10,7 +10,7 @@
@@ -1243,7 +1236,7 @@ index fa4c4dc55..238d9ba16 100644
      void *__ptrauth_cxxabi_adjusted_ptr adjustedPtr;
  #endif
 diff --git a/libcxxabi/src/cxa_guard_impl.h b/libcxxabi/src/cxa_guard_impl.h
-index 890076b80..7a8237e88 100644
+index 5f51e81c5..9efbafbf1 100644
 --- a/libcxxabi/src/cxa_guard_impl.h
 +++ b/libcxxabi/src/cxa_guard_impl.h
 @@ -63,6 +63,8 @@
@@ -1282,7 +1275,7 @@ index 890076b80..7a8237e88 100644
  #else
  constexpr void (*PlatformFutexWait)(int*, int) = nullptr;
 diff --git a/libcxxabi/src/cxa_personality.cpp b/libcxxabi/src/cxa_personality.cpp
-index da2d8b259..c990c0494 100644
+index c5050e46c..c3465c6b7 100644
 --- a/libcxxabi/src/cxa_personality.cpp
 +++ b/libcxxabi/src/cxa_personality.cpp
 @@ -21,6 +21,10 @@
@@ -1508,7 +1501,7 @@ index da2d8b259..c990c0494 100644
  }
  
  // public API
-@@ -1298,7 +1446,11 @@ __cxa_call_unexpected(void* arg)
+@@ -1284,7 +1432,11 @@ __cxa_call_unexpected(void* arg)
      std::terminate_handler t_handler;
      __cxa_exception* old_exception_header = 0;
      int64_t ttypeIndex;
@@ -1520,7 +1513,7 @@ index da2d8b259..c990c0494 100644
      uintptr_t base = 0;
  
      if (native_old_exception)
-@@ -1335,6 +1487,7 @@ __cxa_call_unexpected(void* arg)
+@@ -1321,6 +1473,7 @@ __cxa_call_unexpected(void* arg)
          //   from here.
          if (native_old_exception)
          {
@@ -1528,7 +1521,7 @@ index da2d8b259..c990c0494 100644
              // Have:
              //   old_exception_header->languageSpecificData
              //   old_exception_header->actionRecord
-@@ -1351,6 +1504,7 @@ __cxa_call_unexpected(void* arg)
+@@ -1337,6 +1490,7 @@ __cxa_call_unexpected(void* arg)
                  std::__terminate(t_handler);
              uintptr_t classInfoOffset = readULEB128(&lsda);
              const uint8_t* classInfo = lsda + classInfoOffset;
@@ -1536,7 +1529,7 @@ index da2d8b259..c990c0494 100644
              // Is this new exception catchable by the exception spec at ttypeIndex?
              // The answer is obviously yes if the new and old exceptions are the same exception
              // If no
-@@ -1370,9 +1524,17 @@ __cxa_call_unexpected(void* arg)
+@@ -1356,9 +1510,17 @@ __cxa_call_unexpected(void* arg)
                      __getExceptionClass(&new_exception_header->unwindHeader) == kOurDependentExceptionClass ?
                          ((__cxa_dependent_exception*)new_exception_header)->primaryException :
                          new_exception_header + 1;
@@ -1556,7 +1549,7 @@ index da2d8b259..c990c0494 100644
                  {
                      // We need to __cxa_end_catch, but for the old exception,
                      //   not the new one.  This is a little tricky ...
-@@ -1400,9 +1562,17 @@ __cxa_call_unexpected(void* arg)
+@@ -1386,9 +1548,17 @@ __cxa_call_unexpected(void* arg)
                  static_cast<const __shim_type_info*>(&typeid(std::bad_exception));
              std::bad_exception be;
              adjustedPtr = &be;
@@ -1577,12 +1570,12 @@ index da2d8b259..c990c0494 100644
                  // We need to __cxa_end_catch for both the old exception and the
                  //   new exception.  Technically we should do it in that order.
 diff --git a/libcxxabi/src/cxa_thread_atexit.cpp b/libcxxabi/src/cxa_thread_atexit.cpp
-index 366480f94..521ae9ccc 100644
+index 402a52c74..df79ab520 100644
 --- a/libcxxabi/src/cxa_thread_atexit.cpp
 +++ b/libcxxabi/src/cxa_thread_atexit.cpp
-@@ -19,6 +19,8 @@
- #pragma comment(lib, "pthread")
- #endif
+@@ -17,6 +17,8 @@
+ 
+ #include <stdlib.h>
  
 +#undef HAVE___CXA_THREAD_ATEXIT_IMPL
 +

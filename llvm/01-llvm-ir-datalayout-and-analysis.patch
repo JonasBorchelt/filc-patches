@@ -1,5 +1,5 @@
 Subject: LLVM IR dual DataLayout, relaxed RAUW type assert, and non-integral pointer analysis guards
-Upstream-Base: LLVM main (1bd1774757f8fb19c0a06f84cbb53076b75eafbb)
+Upstream-Base: llvmorg-23.1.6 (5b10d2d74929eae78912771222c9855af97496f4)
 Fil-C-Head: cede3de02b42b58a14acc9ce39c9894ab952a915 (branch deluge)
 
 Adds Module::DLAfterFilC and AsmParser/AsmWriter support for pre-/post-Fil-C
@@ -30,14 +30,9 @@ Rebase-Notes (llvmorg-22.1.8 -> llvmorg-23.1.6):
   - LLToken.h & LLLexer.cpp: context updated for kw_elementwise.
   - ConstantFolding.cpp: context updated for isByteTy() check and OrigLoadTy parameter.
 
-
-Rebase-Notes (llvmorg-23.1.6 -> LLVM main 1bd1774757f8):
-  - Instruction.{h,cpp}: upstream removed deprecated InsertPosition(Instruction*) and Instruction::insertBefore(Instruction*); restored both overloads for Fil-C passes.
-  - ConstantFolding.cpp, InstructionSimplify.cpp, ValueTracking.cpp: updated context around FoldReinterpretLoadFromConst, simplifyGEPInst, and isKnownNonZero.
-
 ---
 diff --git a/llvm/include/llvm/AsmParser/LLToken.h b/llvm/include/llvm/AsmParser/LLToken.h
-index 1adb04d13..aab2ce723 100644
+index d2766a05c..d8968e6ed 100644
 --- a/llvm/include/llvm/AsmParser/LLToken.h
 +++ b/llvm/include/llvm/AsmParser/LLToken.h
 @@ -90,6 +90,7 @@ enum Kind {
@@ -49,10 +44,10 @@ index 1adb04d13..aab2ce723 100644
    kw_elementwise,
    kw_atomic,
 diff --git a/llvm/include/llvm/IR/DataLayout.h b/llvm/include/llvm/IR/DataLayout.h
-index b81255bb8..0983ae635 100644
+index 934c83878..06b818386 100644
 --- a/llvm/include/llvm/IR/DataLayout.h
 +++ b/llvm/include/llvm/IR/DataLayout.h
-@@ -418,6 +418,8 @@ public:
+@@ -415,6 +415,8 @@ public:
             PS.HasExternalState;
    }
  
@@ -62,30 +57,35 @@ index b81255bb8..0983ae635 100644
    /// representation. The bitwise pattern of such pointers is allowed to change
    /// in a target-specific way. For example, this could be used for copying
 diff --git a/llvm/include/llvm/IR/Instruction.h b/llvm/include/llvm/IR/Instruction.h
-index 4ab75eba2..ca2e54dff 100644
+index 86843b339..8196c493b 100644
 --- a/llvm/include/llvm/IR/Instruction.h
 +++ b/llvm/include/llvm/IR/Instruction.h
-@@ -53,6 +53,7 @@ class InsertPosition {
+@@ -54,9 +54,7 @@ class InsertPosition {
  
  public:
    InsertPosition(std::nullptr_t) : InsertAt() {}
+-  LLVM_ABI LLVM_DEPRECATED("Use BasicBlock::iterators for insertion instead",
+-                           "BasicBlock::iterator")
+-      InsertPosition(Instruction *InsertBefore);
 +  LLVM_ABI InsertPosition(Instruction *InsertBefore);
    LLVM_ABI InsertPosition(BasicBlock *InsertAtEnd);
    InsertPosition(InstListType::iterator InsertAt) : InsertAt(InsertAt) {}
    operator InstListType::iterator() const { return InsertAt; }
-@@ -273,6 +274,7 @@ public:
+@@ -245,8 +243,7 @@ public:
+   /// start of a block such as BasicBlock::getFirstNonPHIIt must be passed into
+   /// insertBefore without unwrapping/rewrapping. For all other positions, call
+   /// getIterator to fetch the instruction iterator.
+-  LLVM_ABI LLVM_DEPRECATED("Use iterators as instruction positions",
+-                           "") void insertBefore(Instruction *InsertPos);
++  LLVM_ABI void insertBefore(Instruction *InsertPos);
  
    /// Insert an unlinked instruction into a basic block immediately before
    /// the specified position.
-+  LLVM_ABI void insertBefore(Instruction *InsertPos);
-   LLVM_ABI void insertBefore(InstListType::iterator InsertPos);
- 
-   /// Insert an unlinked instruction into a basic block immediately after the
 diff --git a/llvm/include/llvm/IR/Instructions.h b/llvm/include/llvm/IR/Instructions.h
-index 5a9f02a3b..b484031ff 100644
+index 8ceb4cf06..1a2f5e413 100644
 --- a/llvm/include/llvm/IR/Instructions.h
 +++ b/llvm/include/llvm/IR/Instructions.h
-@@ -2520,6 +2520,11 @@ class ExtractValueInst : public UnaryInstruction {
+@@ -2500,6 +2500,11 @@ class ExtractValueInst : public UnaryInstruction {
  
    ExtractValueInst(const ExtractValueInst &EVI);
  
@@ -97,7 +97,7 @@ index 5a9f02a3b..b484031ff 100644
    /// Constructors - Create a extractvalue instruction with a base aggregate
    /// value and a list of indices. The first and second ctor can optionally
    /// insert before an existing instruction, the third appends the new
-@@ -2536,6 +2541,14 @@ protected:
+@@ -2516,6 +2521,14 @@ protected:
    LLVM_ABI ExtractValueInst *cloneImpl() const;
  
  public:
@@ -112,7 +112,7 @@ index 5a9f02a3b..b484031ff 100644
    static ExtractValueInst *Create(Value *Agg, ArrayRef<unsigned> Idxs,
                                    const Twine &NameStr = "",
                                    InsertPosition InsertBefore = nullptr) {
-@@ -2588,6 +2601,15 @@ public:
+@@ -2568,6 +2581,15 @@ public:
    }
  };
  
@@ -129,10 +129,10 @@ index 5a9f02a3b..b484031ff 100644
                                     const Twine &NameStr,
                                     InsertPosition InsertBefore)
 diff --git a/llvm/include/llvm/IR/Module.h b/llvm/include/llvm/IR/Module.h
-index 3d405430c..a235904bf 100644
+index 3c6c2ccbd..47dea24b5 100644
 --- a/llvm/include/llvm/IR/Module.h
 +++ b/llvm/include/llvm/IR/Module.h
-@@ -238,6 +238,7 @@ private:
+@@ -237,6 +237,7 @@ private:
    Triple TargetTriple = Triple("");
    NamedMDSymTabType NamedMDSymTab;  ///< NamedMDNode names.
    DataLayout DL;                  ///< DataLayout associated with the module
@@ -140,7 +140,7 @@ index 3d405430c..a235904bf 100644
    StringMap<unsigned>
        CurrentIntrinsicIds; ///< Keep track of the current unique id count for
                             ///< the specified intrinsic basename.
-@@ -320,10 +321,15 @@ public:
+@@ -315,10 +316,15 @@ public:
    const std::string &getDataLayoutStr() const {
      return DL.getStringRepresentation();
    }
@@ -156,7 +156,7 @@ index 3d405430c..a235904bf 100644
    /// Get the target triple which is a string describing the target host.
    const Triple &getTargetTriple() const { return TargetTriple; }
  
-@@ -376,6 +382,9 @@ public:
+@@ -371,6 +377,9 @@ public:
    void setDataLayout(StringRef Desc);
    void setDataLayout(const DataLayout &Other);
  
@@ -167,12 +167,12 @@ index 3d405430c..a235904bf 100644
    void setTargetTriple(Triple T) { TargetTriple = std::move(T); }
  
 diff --git a/llvm/lib/Analysis/ConstantFolding.cpp b/llvm/lib/Analysis/ConstantFolding.cpp
-index cdb7d7959..b390ed5be 100644
+index 1d17f6a6c..3ec09f92a 100644
 --- a/llvm/lib/Analysis/ConstantFolding.cpp
 +++ b/llvm/lib/Analysis/ConstantFolding.cpp
-@@ -743,6 +743,10 @@ Constant *FoldReinterpretLoadFromConst(Constant *C, Type *LoadTy,
-         return ConstantFoldCastOperand(Instruction::BitCast, Res, LoadTy, DL);
-     }
+@@ -703,6 +703,10 @@ Constant *FoldReinterpretLoadFromConst(Constant *C, Type *LoadTy,
+         !LoadTy->isByteTy() && !LoadTy->isVectorTy())
+       return nullptr;
  
 +    PointerType* PtrTy = dyn_cast<PointerType>(LoadTy);
 +    if (PtrTy && DL.isNonIntegralPointerType(PtrTy))
@@ -181,7 +181,7 @@ index cdb7d7959..b390ed5be 100644
      Type *MapTy = Type::getIntNTy(C->getContext(),
                                    DL.getTypeSizeInBits(LoadTy).getFixedValue());
      if (Constant *Res =
-@@ -893,8 +897,11 @@ Constant *llvm::ConstantFoldLoadFromConst(Constant *C, Type *Ty,
+@@ -853,8 +857,11 @@ Constant *llvm::ConstantFoldLoadFromConst(Constant *C, Type *Ty,
    // Explicitly check for out-of-bounds access, so we return poison even if the
    // constant is a uniform value.
    TypeSize Size = DL.getTypeAllocSize(C->getType());
@@ -195,13 +195,13 @@ index cdb7d7959..b390ed5be 100644
    // Try an offset-independent fold of a uniform value.
    if (Constant *Result = ConstantFoldLoadFromUniformValue(C, Ty, DL))
 diff --git a/llvm/lib/Analysis/InstructionSimplify.cpp b/llvm/lib/Analysis/InstructionSimplify.cpp
-index e287e0e7d..cb11f0604 100644
+index ddaa44f43..e11336c2f 100644
 --- a/llvm/lib/Analysis/InstructionSimplify.cpp
 +++ b/llvm/lib/Analysis/InstructionSimplify.cpp
-@@ -5404,7 +5404,8 @@ static Value *simplifyGEPInst(Type *SrcTy, Value *Ptr,
-   bool IsNeg = match(Indices.back(), m_Neg(m_PtrToInt(m_Value(PtrOp))));
-   if ((IsNeg || match(Indices.back(), m_Not(m_PtrToInt(m_Value(PtrOp))))) &&
-       !IsScalableVec && Q.DL.getTypeAllocSize(LastType) == 1 &&
+@@ -5356,7 +5356,8 @@ static Value *simplifyGEPInst(Type *SrcTy, Value *Ptr,
+   }
+ 
+   if (!IsScalableVec && Q.DL.getTypeAllocSize(LastType) == 1 &&
 -      all_of(Indices.drop_back(1), match_fn(m_Zero()))) {
 +      all_of(Indices.drop_back(1), match_fn(m_Zero())) &&
 +      !Q.DL.isNonIntegralPointerType(Ptr->getType())) {
@@ -209,10 +209,10 @@ index e287e0e7d..cb11f0604 100644
          Q.DL.getIndexSizeInBits(Ptr->getType()->getPointerAddressSpace());
      if (Q.DL.getTypeSizeInBits(Indices.back()->getType()) == IdxWidth) {
 diff --git a/llvm/lib/Analysis/MemoryDependenceAnalysis.cpp b/llvm/lib/Analysis/MemoryDependenceAnalysis.cpp
-index d4fd7250b..e1cf52dde 100644
+index 6fda89af4..420493e0d 100644
 --- a/llvm/lib/Analysis/MemoryDependenceAnalysis.cpp
 +++ b/llvm/lib/Analysis/MemoryDependenceAnalysis.cpp
-@@ -561,8 +561,18 @@ MemDepResult MemoryDependenceResults::getSimplePointerDependencyFrom(
+@@ -607,8 +607,18 @@ MemDepResult MemoryDependenceResults::getSimplePointerDependencyFrom(
      // handled by BasicAA.
      if (isa<AllocaInst>(Inst) || isNoAliasCall(Inst)) {
        const Value *AccessPtr = getUnderlyingObject(MemLoc.Ptr);
@@ -233,21 +233,21 @@ index d4fd7250b..e1cf52dde 100644
  
      // If we found a select instruction for MemLoc pointer, return it as Def
 diff --git a/llvm/lib/Analysis/ValueTracking.cpp b/llvm/lib/Analysis/ValueTracking.cpp
-index 65881dec7..efbb787e7 100644
+index efc14f9a6..99c17a3da 100644
 --- a/llvm/lib/Analysis/ValueTracking.cpp
 +++ b/llvm/lib/Analysis/ValueTracking.cpp
-@@ -4063,7 +4063,8 @@ bool isKnownNonZero(const Value *V, const APInt &DemandedElts,
-       if (!NullPointerIsDefined(Q.getFunction(),
-                                 GV->getType()->getAddressSpace()) &&
-           !GV->isAbsoluteSymbolRef() && !GV->hasExternalWeakLinkage() &&
--          !isa<GlobalAlias>(GV))
-+          !isa<GlobalAlias>(GV) &&
+@@ -3776,7 +3776,8 @@ bool isKnownNonZero(const Value *V, const APInt &DemandedElts,
+     // valid address for a global, so we can't assume anything.
+     if (const GlobalValue *GV = dyn_cast<GlobalValue>(V)) {
+       if (!GV->isAbsoluteSymbolRef() && !GV->hasExternalWeakLinkage() &&
+-          GV->getType()->getAddressSpace() == 0)
++          GV->getType()->getAddressSpace() == 0 &&
 +          (!GV->hasComdat() || (!GV->hasLinkOnceLinkage() && !GV->hasWeakLinkage())))
          return true;
      }
  
 diff --git a/llvm/lib/AsmParser/LLLexer.cpp b/llvm/lib/AsmParser/LLLexer.cpp
-index 6678269c8..c9c7f9397 100644
+index 069a18005..793c9d626 100644
 --- a/llvm/lib/AsmParser/LLLexer.cpp
 +++ b/llvm/lib/AsmParser/LLLexer.cpp
 @@ -600,6 +600,7 @@ lltok::Kind LLLexer::LexIdentifier() {
@@ -259,10 +259,10 @@ index 6678269c8..c9c7f9397 100644
    KEYWORD(elementwise);
    KEYWORD(atomic);
 diff --git a/llvm/lib/AsmParser/LLParser.cpp b/llvm/lib/AsmParser/LLParser.cpp
-index 3a21ad056..610f0ce12 100644
+index 618abb1bd..63e5951a9 100644
 --- a/llvm/lib/AsmParser/LLParser.cpp
 +++ b/llvm/lib/AsmParser/LLParser.cpp
-@@ -784,6 +784,13 @@ bool LLParser::parseTargetDefinition(std::string &TentativeDLStr,
+@@ -712,6 +712,13 @@ bool LLParser::parseTargetDefinition(std::string &TentativeDLStr,
      if (parseStringConstant(TentativeDLStr))
        return true;
      return false;
@@ -277,10 +277,10 @@ index 3a21ad056..610f0ce12 100644
  }
  
 diff --git a/llvm/lib/IR/AsmWriter.cpp b/llvm/lib/IR/AsmWriter.cpp
-index d3f1bbfc4..d3980ed91 100644
+index 6752d6aa3..3b2402afd 100644
 --- a/llvm/lib/IR/AsmWriter.cpp
 +++ b/llvm/lib/IR/AsmWriter.cpp
-@@ -3211,6 +3211,9 @@ void AssemblyWriter::printModule(const Module *M) {
+@@ -3123,6 +3123,9 @@ void AssemblyWriter::printModule(const Module *M) {
    const std::string &DL = M->getDataLayoutStr();
    if (!DL.empty())
      Out << "target datalayout = \"" << DL << "\"\n";
@@ -290,7 +290,7 @@ index d3f1bbfc4..d3980ed91 100644
    if (!M->getTargetTriple().empty())
      Out << "target triple = \"" << M->getTargetTriple().str() << "\"\n";
  
-@@ -4552,7 +4555,9 @@ static void maybePrintCallAddrSpace(const Value *Operand, const Instruction *I,
+@@ -4425,7 +4428,9 @@ static void maybePrintCallAddrSpace(const Value *Operand, const Instruction *I,
    // We also print it if it is zero but not equal to the program address space
    // or if we can't find a valid Module* to make it possible to parse
    // the resulting file even without a datalayout string.
@@ -302,10 +302,10 @@ index d3f1bbfc4..d3980ed91 100644
    bool ForcePrintAddrSpace =
        !Mod || Mod->getDataLayout().getProgramAddressSpace() != 0;
 diff --git a/llvm/lib/IR/ConstantFold.cpp b/llvm/lib/IR/ConstantFold.cpp
-index 287a7a8eb..b0ea624e3 100644
+index f8abd576f..729ecd886 100644
 --- a/llvm/lib/IR/ConstantFold.cpp
 +++ b/llvm/lib/IR/ConstantFold.cpp
-@@ -1081,7 +1081,8 @@ static ICmpInst::Predicate evaluateICmpRelation(Constant *V1, Constant *V2) {
+@@ -1078,7 +1078,8 @@ static ICmpInst::Predicate evaluateICmpRelation(Constant *V1, Constant *V2) {
        // query it from the Constant type.
        if (!GV->hasExternalWeakLinkage() && !isa<GlobalAlias>(GV) &&
            !NullPointerIsDefined(nullptr /* F */,
@@ -316,7 +316,7 @@ index 287a7a8eb..b0ea624e3 100644
      }
    } else if (auto *CE1 = dyn_cast<ConstantExpr>(V1)) {
 diff --git a/llvm/lib/IR/DataLayout.cpp b/llvm/lib/IR/DataLayout.cpp
-index 6430333c1..48cde1767 100644
+index 82b33887b..300254a4b 100644
 --- a/llvm/lib/IR/DataLayout.cpp
 +++ b/llvm/lib/IR/DataLayout.cpp
 @@ -543,8 +543,6 @@ Error DataLayout::parseSpecification(
@@ -328,37 +328,11 @@ index 6430333c1..48cde1767 100644
        NonIntegralAddressSpaces.push_back(AddrSpace);
      }
      return Error::success();
-diff --git a/llvm/lib/IR/Instruction.cpp b/llvm/lib/IR/Instruction.cpp
-index 21381258a..41be8d345 100644
---- a/llvm/lib/IR/Instruction.cpp
-+++ b/llvm/lib/IR/Instruction.cpp
-@@ -42,6 +42,10 @@ cl::opt<bool> ProfcheckDisableMetadataFixes(
- 
- } // end namespace llvm
- 
-+InsertPosition::InsertPosition(Instruction *InsertBefore)
-+    : InsertAt(InsertBefore ? InsertBefore->getIterator()
-+                            : InstListType::iterator()) {}
-+
- InsertPosition::InsertPosition(BasicBlock *InsertAtEnd)
-     : InsertAt(InsertAtEnd ? InsertAtEnd->end() : InstListType::iterator()) {}
- 
-@@ -113,6 +117,10 @@ BasicBlock::iterator Instruction::eraseFromParent() {
- 
- /// Insert an unlinked instruction into a basic block immediately before the
- /// specified instruction.
-+void Instruction::insertBefore(Instruction *InsertPos) {
-+  insertBefore(InsertPos->getIterator());
-+}
-+
- void Instruction::insertBefore(BasicBlock::iterator InsertPos) {
-   insertBefore(*InsertPos->getParent(), InsertPos);
- }
 diff --git a/llvm/lib/IR/Instructions.cpp b/llvm/lib/IR/Instructions.cpp
-index ce1fa8080..879e06ee5 100644
+index 993bf82b9..69b1ca7b8 100644
 --- a/llvm/lib/IR/Instructions.cpp
 +++ b/llvm/lib/IR/Instructions.cpp
-@@ -800,10 +800,10 @@ void CallInst::init(FunctionType *FTy, Value *Func, ArrayRef<Value *> Args,
+@@ -775,10 +775,10 @@ void CallInst::init(FunctionType *FTy, Value *Func, ArrayRef<Value *> Args,
            (FTy->isVarArg() && Args.size() > FTy->getNumParams())) &&
           "Calling a function with bad signature!");
  
@@ -373,7 +347,7 @@ index ce1fa8080..879e06ee5 100644
  #endif
  
    // Set operands in order of their index to match use-list-order
-@@ -2581,8 +2581,8 @@ void InsertValueInst::init(Value *Agg, Value *Val, ArrayRef<unsigned> Idxs,
+@@ -2560,8 +2560,8 @@ void InsertValueInst::init(Value *Agg, Value *Val, ArrayRef<unsigned> Idxs,
    // present need to support it.
    assert(!Idxs.empty() && "InsertValueInst must have at least one index");
  
@@ -384,7 +358,7 @@ index ce1fa8080..879e06ee5 100644
    Op<0>() = Agg;
    Op<1>() = Val;
  
-@@ -2947,10 +2947,12 @@ bool CastInst::isNoopCast(Instruction::CastOps Opcode,
+@@ -2860,10 +2860,12 @@ bool CastInst::isNoopCast(Instruction::CastOps Opcode,
      case Instruction::PtrToAddr:
      case Instruction::PtrToInt:
        return DL.getIntPtrType(SrcTy)->getScalarSizeInBits() ==
@@ -400,10 +374,10 @@ index ce1fa8080..879e06ee5 100644
  }
  
 diff --git a/llvm/lib/IR/Module.cpp b/llvm/lib/IR/Module.cpp
-index 4447c9153..25cd85877 100644
+index 34e44e26d..4743ae137 100644
 --- a/llvm/lib/IR/Module.cpp
 +++ b/llvm/lib/IR/Module.cpp
-@@ -464,6 +464,10 @@ void Module::setDataLayout(StringRef Desc) { DL = DataLayout(Desc); }
+@@ -435,6 +435,10 @@ void Module::setDataLayout(StringRef Desc) { DL = DataLayout(Desc); }
  
  void Module::setDataLayout(const DataLayout &Other) { DL = Other; }
  
@@ -415,10 +389,10 @@ index 4447c9153..25cd85877 100644
    return cast<DICompileUnit>(CUs->getOperand(Idx));
  }
 diff --git a/llvm/lib/IR/Value.cpp b/llvm/lib/IR/Value.cpp
-index d25c8873d..d0c1099e5 100644
+index 6d0170dd2..3eb06eebb 100644
 --- a/llvm/lib/IR/Value.cpp
 +++ b/llvm/lib/IR/Value.cpp
-@@ -515,8 +515,8 @@ void Value::doRAUW(Value *New, ReplaceMetadataUses ReplaceMetaUses) {
+@@ -520,8 +520,8 @@ void Value::doRAUW(Value *New, ReplaceMetadataUses ReplaceMetaUses) {
    assert(New && "Value::replaceAllUsesWith(<null>) is invalid!");
    assert(!contains(New, this) &&
           "this->replaceAllUsesWith(expr(this)) is NOT valid!");
@@ -429,7 +403,7 @@ index d25c8873d..d0c1099e5 100644
  
    // Notify all ValueHandles (if present) that this value is going away.
    if (HasValueHandle)
-@@ -1274,8 +1274,8 @@ void ValueHandleBase::ValueIsDeleted(Value *V) {
+@@ -1316,8 +1316,8 @@ void ValueHandleBase::ValueIsDeleted(Value *V) {
  void ValueHandleBase::ValueIsRAUWd(Value *Old, Value *New) {
    assert(Old->HasValueHandle &&"Should only be called if ValueHandles present");
    assert(Old != New && "Changing value into itself!");

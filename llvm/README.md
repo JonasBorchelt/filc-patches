@@ -1,7 +1,7 @@
 # llvm
 
 Fil-C LLVM/Clang patch series against the pinned upstream LLVM commit in
-`UPSTREAM` (currently `LLVM main @ 1bd1774757f8`).
+`UPSTREAM` (currently `llvmorg-23.1.6`).
 
 ## Series (`llvm/series`)
 

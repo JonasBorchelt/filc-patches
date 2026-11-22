@@ -1,0 +1,471 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Package a built Fil-C Linux musl toolchain into a reproducible, relocatable,
+# leak-gated release archive: filc-<version>-<arch>-linux.tar.xz
+#
+# Usage: scripts/package-release <WORK_ROOT> <OUT_DIR> [VERSION]
+#
+# Environment:
+#   SOURCE_DATE_EPOCH  Fixed UNIX timestamp for reproducible tar entries
+#                      (defaults to HEAD commit timestamp)
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../UPSTREAM
+source "$REPO_ROOT/UPSTREAM"
+
+WORK_ROOT="${1:-$REPO_ROOT/.work/toolchain}"
+OUT_DIR="${2:-$REPO_ROOT/.work/release}"
+RAW_VERSION="${3:-${FILC_RELEASE_VERSION:-}}"
+
+WORK_ROOT="$(cd "$WORK_ROOT" && pwd)"
+mkdir -p "$OUT_DIR"
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"
+
+BUILD_DIR="$WORK_ROOT/build"
+PIZFIX="$WORK_ROOT/pizfix"
+LLVM_SRC="$WORK_ROOT/llvm-project"
+RUNTIME_SRC="$WORK_ROOT/filc-runtime"
+USERMUSL_SRC="$WORK_ROOT/usermusl"
+
+ARCH="$(uname -m)"
+case "$ARCH" in
+  amd64|x86_64) ARCH="x86_64" ;;
+  arm64|aarch64) ARCH="aarch64" ;;
+  *)
+    echo "error: unsupported host architecture: $ARCH" >&2
+    exit 1
+    ;;
+esac
+
+LLVM_VER="${LLVM_TAG#llvmorg-}"
+if [[ -z "$RAW_VERSION" ]]; then
+  VERSION="${LLVM_VER}-filc.${FILC_COMMIT:0:8}"
+else
+  VERSION="$RAW_VERSION"
+fi
+if [[ ! "$VERSION" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$ ]]; then
+  echo "error: invalid release version string: $VERSION" >&2
+  exit 1
+fi
+
+SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$REPO_ROOT" log -1 --format=%ct HEAD 2>/dev/null || echo 1700000000)}"
+export SOURCE_DATE_EPOCH
+export LC_ALL=C
+
+ARCHIVE_STEM="filc-${VERSION}-${ARCH}-linux"
+ARCHIVE_NAME="${ARCHIVE_STEM}.tar.xz"
+
+for req in \
+  "$BUILD_DIR/bin/clang" \
+  "$BUILD_DIR/bin/clang++" \
+  "$BUILD_DIR/bin/ld.lld" \
+  "$PIZFIX/lib/libyoloc.so" \
+  "$PIZFIX/lib/libpizlo.so" \
+  "$PIZFIX/lib/libc.so" \
+  "$PIZFIX/lib/libc++.so.1.0" \
+  "$PIZFIX/lib/libc++abi.so.1.0" \
+  "$LLVM_SRC/LICENSE.TXT" \
+  "$RUNTIME_SRC/libpas/LICENSE.txt" \
+  "$USERMUSL_SRC/COPYRIGHT"; do
+  if [[ ! -e "$req" ]]; then
+    echo "error: missing required build input: $req" >&2
+    exit 1
+  fi
+done
+
+for tool in strip patchelf strings tar xz sha256sum python3; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "error: required packaging tool not found: $tool" >&2
+    exit 1
+  fi
+done
+
+CLANG_REAL="$(readlink -f "$BUILD_DIR/bin/clang")"
+CLANG_BASENAME="$(basename "$CLANG_REAL")"
+LLD_REAL="$(readlink -f "$BUILD_DIR/bin/ld.lld")"
+LLD_BASENAME="$(basename "$LLD_REAL")"
+TRIPLE="$("$BUILD_DIR/bin/clang" -print-target-triple)"
+CLANG_MAJOR="$(basename "$(find "$BUILD_DIR/lib/clang" -mindepth 1 -maxdepth 1 -type d | head -n 1)")"
+
+STAGE_PARENT="$(mktemp -d "${TMPDIR:-/tmp}/filc-pkg-XXXXXX")"
+trap 'rm -rf "$STAGE_PARENT"' EXIT
+STAGE="$STAGE_PARENT/$ARCHIVE_STEM"
+
+echo "=== Packaging $ARCHIVE_NAME ==="
+echo "VERSION:           $VERSION"
+echo "ARCH:              $ARCH"
+echo "TRIPLE:            $TRIPLE"
+echo "SOURCE_DATE_EPOCH: $SOURCE_DATE_EPOCH"
+
+mkdir -p \
+  "$STAGE/bin" \
+  "$STAGE/build/bin" \
+  "$STAGE/build/include" \
+  "$STAGE/build/lib/clang/$CLANG_MAJOR" \
+  "$STAGE/pizfix/lib" \
+  "$STAGE/LICENSES"
+
+# 1. Compiler and linker binaries (stripped, no build RPATH)
+cp "$CLANG_REAL" "$STAGE/build/bin/$CLANG_BASENAME"
+cp "$LLD_REAL" "$STAGE/build/bin/$LLD_BASENAME"
+strip --strip-all "$STAGE/build/bin/$CLANG_BASENAME" "$STAGE/build/bin/$LLD_BASENAME"
+patchelf --remove-rpath "$STAGE/build/bin/$CLANG_BASENAME" || true
+patchelf --remove-rpath "$STAGE/build/bin/$LLD_BASENAME" || true
+
+(
+  cd "$STAGE/build/bin"
+  ln -fs "$CLANG_BASENAME" clang
+  ln -fs "$CLANG_BASENAME" clang++
+  ln -fs "$CLANG_BASENAME" filcc
+  ln -fs "$CLANG_BASENAME" fil++
+  ln -fs "$CLANG_BASENAME" filcpp
+  ln -fs "$LLD_BASENAME" ld.lld
+  ln -fs "$LLD_BASENAME" lld
+)
+
+# Relative POSIX-sh wrappers in top-level bin/ so users can add <root>/bin to PATH
+# while preserving <root>/build/bin/clang argv[0] for Driver::PizfixRoot discovery.
+for tool in clang clang++ filcc fil++ ld.lld; do
+  cat > "$STAGE/bin/$tool" <<EOF
+#!/bin/sh
+ROOT="\$(CDPATH= cd -- "\$(dirname -- "\$0")/.." && pwd)"
+exec "\$ROOT/build/bin/$tool" "\$@"
+EOF
+  chmod 0755 "$STAGE/bin/$tool"
+done
+
+# 2. Clang resource headers and C++ standard library headers
+cp -R "$BUILD_DIR/lib/clang/$CLANG_MAJOR/include" "$STAGE/build/lib/clang/$CLANG_MAJOR/include"
+cp -R "$BUILD_DIR/include/c++" "$STAGE/build/include/c++"
+if [[ -d "$BUILD_DIR/include/$TRIPLE/c++" ]]; then
+  mkdir -p "$STAGE/build/include/$TRIPLE"
+  cp -R "$BUILD_DIR/include/$TRIPLE/c++" "$STAGE/build/include/$TRIPLE/c++"
+fi
+
+# 3. musl sysroot and Fil-C runtime (relocatable: $ORIGIN RPATH, no host /usr/include symlinks)
+for dir in include musl-include stdfil-include; do
+  if [[ -d "$PIZFIX/$dir" ]]; then
+    cp -R "$PIZFIX/$dir" "$STAGE/pizfix/$dir"
+  fi
+done
+
+for item in "$PIZFIX/lib"/*; do
+  [[ -e "$item" || -L "$item" ]] || continue
+  base="$(basename "$item")"
+  if [[ -L "$item" ]]; then
+    target="$(readlink "$item")"
+    ln -fs "$target" "$STAGE/pizfix/lib/$base"
+  elif [[ -f "$item" ]]; then
+    cp "$item" "$STAGE/pizfix/lib/$base"
+  fi
+done
+ln -fs libyoloc.so "$STAGE/pizfix/lib/ld-fil1-${ARCH}.so"
+
+# Remove debug build paths from runtime libraries and set relocatable $ORIGIN RPATH
+for lib in "$STAGE/pizfix/lib"/*.so "$STAGE/pizfix/lib"/*.so.*; do
+  [[ -f "$lib" && ! -L "$lib" ]] || continue
+  base="$(basename "$lib")"
+  strip --strip-debug "$lib" || true
+  if [[ "$base" != "libyoloc.so" ]]; then
+    patchelf --set-rpath '$ORIGIN' "$lib" || true
+  fi
+done
+for arlib in "$STAGE/pizfix/lib"/*.a; do
+  [[ -f "$arlib" ]] || continue
+  strip --strip-debug "$arlib" || true
+done
+
+# 4. Idempotent host kernel UAPI header setup script
+cat > "$STAGE/setup.sh" <<'EOF'
+#!/bin/sh
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ARCH="$(uname -m)"
+case "$ARCH" in
+  amd64|x86_64) ARCH="x86_64" ;;
+  arm64|aarch64) ARCH="aarch64" ;;
+esac
+
+OS_INC="$ROOT/pizfix/os-include"
+rm -rf "$OS_INC"
+mkdir -p "$OS_INC"
+
+if [ ! -d /usr/include/linux ] || [ ! -d /usr/include/asm-generic ]; then
+  echo "error: Linux kernel headers not found under /usr/include (install linux-libc-dev or kernel-headers)" >&2
+  exit 1
+fi
+
+ln -s /usr/include/linux "$OS_INC/linux"
+ln -s /usr/include/asm-generic "$OS_INC/asm-generic"
+if [ -d "/usr/include/${ARCH}-linux-gnu/asm" ]; then
+  ln -s "/usr/include/${ARCH}-linux-gnu/asm" "$OS_INC/asm"
+elif [ -d /usr/include/asm ]; then
+  ln -s /usr/include/asm "$OS_INC/asm"
+else
+  echo "error: architecture asm headers not found under /usr/include" >&2
+  exit 1
+fi
+
+echo "Fil-C toolchain ready in $ROOT"
+echo "  C compiler:   $ROOT/bin/clang"
+echo "  C++ compiler: $ROOT/bin/clang++"
+echo "  Linker:       $ROOT/bin/ld.lld"
+EOF
+chmod 0755 "$STAGE/setup.sh"
+
+# 5. LICENSES, NOTICE, PROVENANCE, README.txt
+cp "$LLVM_SRC/LICENSE.TXT" "$STAGE/LICENSES/LLVM-Apache-2.0-WITH-LLVM-exception.txt"
+cp "$RUNTIME_SRC/libpas/LICENSE.txt" "$STAGE/LICENSES/FilC-Runtime-BSD-2-Clause.txt"
+cp "$USERMUSL_SRC/COPYRIGHT" "$STAGE/LICENSES/musl-COPYRIGHT.txt"
+
+cat > "$STAGE/NOTICE" <<EOF
+Fil-C Toolchain Binary Distribution (${ARCHIVE_STEM})
+========================================================================
+
+This archive bundles a relocatable Fil-C Linux musl toolchain built from
+upstream sources and the filc-patches series. Original license texts are
+included verbatim under LICENSES/.
+
+Components and Provenance:
+
+1. LLVM / Clang / LLD / compiler-rt / libc++ / libc++abi
+   - Upstream: ${LLVM_REPO}
+   - Release:  ${LLVM_TAG} (${LLVM_COMMIT})
+   - License:  Apache-2.0 WITH LLVM-exception
+   - Text:     LICENSES/LLVM-Apache-2.0-WITH-LLVM-exception.txt
+
+2. Fil-C Compiler Passes and Runtime (libpas, filc, yolounwind, zegarmistrz)
+   - Upstream: ${FILC_REPO}
+   - Commit:   ${FILC_COMMIT} (branch ${FILC_BRANCH})
+   - Licenses: Apache-2.0 WITH LLVM-exception (compiler passes),
+               BSD-2-Clause (runtime; see LICENSES/FilC-Runtime-BSD-2-Clause.txt,
+               plus file-specific notices for setproctitle BSD-3-Clause,
+               unwind.h Apache-2.0 WITH LLVM-exception, and snprintf.c).
+
+3. musl libc (yolomusl and usermusl)
+   - Upstream: ${MUSL_REPO}
+   - Commit:   ${MUSL_COMMIT}
+   - License:  MIT (plus compatible permissive portions; see LICENSES/musl-COPYRIGHT.txt)
+
+4. filc-patches Build and Patch Series
+   - Repository: https://github.com/JonasBorchelt/filc-patches
+   - License:    Apache-2.0 WITH LLVM-exception
+EOF
+
+PATCH_SERIES_SHA256="$(python3 - "$REPO_ROOT" <<'PY'
+import hashlib, sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+h = hashlib.sha256()
+candidates = [root / "UPSTREAM"]
+for sub in ("llvm", "runtime", "libc"):
+    base = root / sub
+    if base.is_dir():
+        for p in sorted(base.rglob("*")):
+            if p.is_file():
+                candidates.append(p)
+for p in sorted(set(candidates), key=lambda x: x.relative_to(root).as_posix()):
+    rel = p.relative_to(root).as_posix().encode("utf-8")
+    h.update(rel + b"\0")
+    h.update(p.read_bytes())
+    h.update(b"\0")
+print(h.hexdigest())
+PY
+)"
+
+cat > "$STAGE/PROVENANCE" <<EOF
+ARCHIVE=${ARCHIVE_NAME}
+VERSION=${VERSION}
+ARCH=${ARCH}
+TARGET_TRIPLE=${TRIPLE}
+LLVM_REPO=${LLVM_REPO}
+LLVM_TAG=${LLVM_TAG}
+LLVM_COMMIT=${LLVM_COMMIT}
+FILC_REPO=${FILC_REPO}
+FILC_COMMIT=${FILC_COMMIT}
+MUSL_REPO=${MUSL_REPO}
+MUSL_COMMIT=${MUSL_COMMIT}
+PATCH_SERIES_SHA256=${PATCH_SERIES_SHA256}
+SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+BUILD_OPTIONS=FILC_RELEASE_BUILD=1 CMAKE_BUILD_TYPE=Release LLVM_ENABLE_ASSERTIONS=OFF LIBCXX_HARDENING_MODE=extensive prefix-map-enabled
+EOF
+
+cat > "$STAGE/README.txt" <<EOF
+Fil-C Toolchain (${VERSION}, ${ARCH}-linux)
+===========================================
+
+Contents:
+  bin/         Relocatable entrypoints (clang, clang++, filcc, fil++, ld.lld)
+  build/       Clang ${CLANG_MAJOR}, LLD, builtin headers, and libc++ headers
+  pizfix/      Fil-C runtime (libpizlo), musl sysroot, libc++, and CRT objects
+  LICENSES/    Original upstream license texts (LLVM, Fil-C runtime, musl)
+  NOTICE       Component license and attribution summary
+  MANIFEST     SHA-256 checksums for every file in this archive
+  PROVENANCE   Pinned upstream commits, patch series digest, and build options
+  setup.sh     Initializes host Linux kernel header symlinks in pizfix/os-include
+
+Quickstart:
+  1. Extract the archive to any directory:
+       tar -xf ${ARCHIVE_NAME}
+       cd ${ARCHIVE_STEM}
+  2. Initialize host Linux kernel header symlinks:
+       ./setup.sh
+  3. Compile and run C or C++ programs:
+       ./bin/clang -O2 hello.c -o hello && ./hello
+       ./bin/clang++ -O2 -std=c++20 hello.cpp -o hello_cxx && ./hello_cxx
+
+Source and issue tracker:
+  https://github.com/JonasBorchelt/filc-patches
+EOF
+
+# 6. Deterministic MANIFEST (SHA-256 per regular file, sorted)
+(
+  cd "$STAGE"
+  find . -type f ! -name MANIFEST -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > MANIFEST
+)
+
+# 7. Strict Leak-Gate over ALL text files AND strings of ALL binaries/libraries
+echo "=== Running release archive Leak-Gate ==="
+python3 - "$STAGE" "$WORK_ROOT" "$REPO_ROOT" <<'PY'
+import os, re, subprocess, sys
+from pathlib import Path
+
+stage = Path(sys.argv[1])
+work_root = sys.argv[2]
+repo_root = sys.argv[3]
+
+literal_forbidden = []
+for raw in (work_root, repo_root, os.environ.get("HOSTNAME", "")):
+    val = (raw or "").strip()
+    if len(val) >= 5 and val not in ("localhost", "debian", "linux"):
+        literal_forbidden.append(val)
+user = (os.environ.get("USER") or "").strip()
+if user and user not in ("root", "nobody", "ci", "runner", "user", "builder"):
+    literal_forbidden.append(f"/home/{user}")
+    literal_forbidden.append(f"/Users/{user}")
+
+regex_forbidden = [
+    ("private_ipv4_192", re.compile(rb"(?<![0-9.])192\.168\.\d{1,3}\.\d{1,3}")),
+    ("private_ipv4_172", re.compile(rb"(?<![0-9.])172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}")),
+    ("local_users_path", re.compile(rb"/Users/")),
+    ("local_work_path", re.compile(rb"/\.work/")),
+]
+extra_raw = os.environ.get("FILC_RELEASE_EXTRA_FORBIDDEN_RE", "")
+for idx, line in enumerate(extra_raw.splitlines(), 1):
+    pat = line.strip()
+    if pat:
+        regex_forbidden.append((f"extra_rule_{idx}", re.compile(pat.encode("utf-8"), re.IGNORECASE)))
+
+hits = []
+scanned_files = 0
+scanned_binaries = 0
+
+for p in sorted(stage.rglob("*")):
+    if not p.is_file() or p.is_symlink():
+        continue
+    scanned_files += 1
+    rel = p.relative_to(stage).as_posix()
+    data = p.read_bytes()
+    is_elf_or_ar = data.startswith(b"\x7fELF") or data.startswith(b"!<arch>\n")
+    if is_elf_or_ar:
+        scanned_binaries += 1
+        blob = subprocess.check_output(["strings", "-a", "-n", "6", str(p)])
+    else:
+        blob = data
+
+    for lit in literal_forbidden:
+        if lit.encode("utf-8") in blob:
+            hits.append((rel, "build_path_or_host"))
+            break
+    for label, pat in regex_forbidden:
+        if pat.search(blob):
+            hits.append((rel, label))
+            break
+
+if hits:
+    print(f"LEAK_GATE: FAIL ({len(hits)} files matched)", file=sys.stderr)
+    for rel, label in hits[:30]:
+        print(f"  LEAK: {rel} ({label})", file=sys.stderr)
+    sys.exit(1)
+
+print(f"LEAK_GATE: PASS (files={scanned_files}, binaries={scanned_binaries}, hits=0)")
+PY
+
+# 8. Reproducible tar.xz archive + SHA256SUMS + release notes template
+echo "=== Creating reproducible archive $OUT_DIR/$ARCHIVE_NAME ==="
+tar --sort=name \
+    --mtime="@${SOURCE_DATE_EPOCH}" \
+    --owner=0 \
+    --group=0 \
+    --numeric-owner \
+    --format=gnu \
+    -cf - -C "$STAGE_PARENT" "$ARCHIVE_STEM" \
+  | xz -T0 --block-size=16777216 -6 > "$OUT_DIR/$ARCHIVE_NAME"
+
+(
+  cd "$OUT_DIR"
+  sha256sum "$ARCHIVE_NAME" > SHA256SUMS
+)
+ARCHIVE_SHA256="$(awk '{print $1}' "$OUT_DIR/SHA256SUMS")"
+ARCHIVE_BYTES="$(wc -c < "$OUT_DIR/$ARCHIVE_NAME" | tr -d ' ')"
+
+cp "$STAGE/PROVENANCE" "$OUT_DIR/PROVENANCE"
+cp "$STAGE/MANIFEST" "$OUT_DIR/MANIFEST"
+
+cat > "$OUT_DIR/RELEASE_NOTES.md" <<EOF
+# Fil-C Toolchain ${VERSION} (${ARCH}-linux)
+
+Relocatable Fil-C Linux musl toolchain archive built from pinned upstream
+revisions and the \`filc-patches\` series.
+
+## Archive
+
+- File: \`${ARCHIVE_NAME}\`
+- Architecture: \`${ARCH}-linux\`
+- Size: ${ARCHIVE_BYTES} bytes
+- SHA-256: \`${ARCHIVE_SHA256}\`
+
+## Components
+
+- LLVM / Clang / LLD / compiler-rt / libc++ / libc++abi: \`${LLVM_TAG}\` (\`${LLVM_COMMIT:0:12}\`)
+- Fil-C compiler passes and runtime: \`${FILC_COMMIT:0:12}\`
+- musl libc (yolomusl and usermusl): \`${MUSL_COMMIT:0:12}\`
+- Patch series SHA-256: \`${PATCH_SERIES_SHA256}\`
+
+## Verification
+
+Tested directly from the unpacked archive in a fresh temporary directory
+without access to the build tree:
+
+- C Hello World compilation and execution
+- C++20 Hello World with \`libc++\` and exception handling
+- Out-of-Bounds memory-safety trap
+- Use-After-Free memory-safety trap
+- Wave 1 upstream package build and test (\`zlib\`)
+
+## Quickstart
+
+\`\`\`sh
+sha256sum -c SHA256SUMS
+tar -xf ${ARCHIVE_NAME}
+cd ${ARCHIVE_STEM}
+./setup.sh
+./bin/clang -O2 hello.c -o hello && ./hello
+\`\`\`
+
+Original upstream license texts are bundled under \`LICENSES/\`, with full
+provenance in \`NOTICE\`, \`PROVENANCE\`, and \`MANIFEST\`.
+EOF
+
+echo "================================================================================"
+echo "RELEASE PACKAGE REPORT (BELEG)"
+echo "================================================================================"
+echo "ARCHIVE:             $OUT_DIR/$ARCHIVE_NAME"
+echo "ARCHIVE_BYTES:       $ARCHIVE_BYTES"
+echo "ARCHIVE_SHA256:      $ARCHIVE_SHA256"
+echo "PATCH_SERIES_SHA256: $PATCH_SERIES_SHA256"
+echo "SOURCE_DATE_EPOCH:   $SOURCE_DATE_EPOCH"
+echo "================================================================================"

@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Verify a packaged Fil-C release archive in a fresh random directory with zero
+# access to the original build tree:
+#   1. Integrity: MANIFEST sha256sum, LICENSES, NOTICE, PROVENANCE
+#   2. Setup:     ./setup.sh host kernel header symlinks
+#   3. C Hello World
+#   4. C++ Hello World (libc++ + exceptions)
+#   5. Out-of-Bounds safety trap
+#   6. Use-After-Free safety trap
+#   7. Wave 1 package build and test (zlib)
+#
+# Usage: scripts/test-release-archive <ARCHIVE.tar.xz> [REPO_ROOT]
+
+ARCHIVE="${1:-}"
+REPO_ROOT="${2:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+
+if [[ -z "$ARCHIVE" || ! -f "$ARCHIVE" ]]; then
+  echo "usage: $0 <ARCHIVE.tar.xz> [REPO_ROOT]" >&2
+  exit 2
+fi
+ARCHIVE="$(cd "$(dirname "$ARCHIVE")" && pwd)/$(basename "$ARCHIVE")"
+REPO_ROOT="$(cd "$REPO_ROOT" && pwd)"
+
+TMP_BASE="$(mktemp -d "${TMPDIR:-/tmp}/filc-reltest-XXXXXX")"
+trap 'rm -rf "$TMP_BASE"' EXIT
+
+echo "=== Extracting $ARCHIVE into $TMP_BASE ==="
+tar -xf "$ARCHIVE" -C "$TMP_BASE"
+ROOT_DIR="$(find "$TMP_BASE" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+if [[ -z "$ROOT_DIR" || ! -d "$ROOT_DIR" ]]; then
+  echo "error: archive did not extract a top-level directory" >&2
+  exit 1
+fi
+echo "Extracted root: $ROOT_DIR"
+
+echo "=== [1/6] Verifying LICENSES, NOTICE, PROVENANCE, and MANIFEST ==="
+for req in \
+  LICENSES/LLVM-Apache-2.0-WITH-LLVM-exception.txt \
+  LICENSES/FilC-Runtime-BSD-2-Clause.txt \
+  LICENSES/musl-COPYRIGHT.txt \
+  NOTICE \
+  PROVENANCE \
+  MANIFEST \
+  setup.sh \
+  bin/clang \
+  bin/clang++ \
+  bin/ld.lld; do
+  if [[ ! -s "$ROOT_DIR/$req" ]]; then
+    echo "error: missing or empty archive file: $req" >&2
+    exit 1
+  fi
+done
+(cd "$ROOT_DIR" && sha256sum -c MANIFEST >/dev/null)
+echo "MANIFEST OK"
+
+echo "=== [2/6] Running setup.sh ==="
+"$ROOT_DIR/setup.sh"
+
+CLANG="$ROOT_DIR/bin/clang"
+CLANGXX="$ROOT_DIR/bin/clang++"
+WORK="$TMP_BASE/tests"
+mkdir -p "$WORK"
+
+echo "=== [3/6] C Hello World ==="
+cat > "$WORK/hello.c" <<'EOF'
+#include <stdio.h>
+int main(void) {
+    puts("Hello from Fil-C release!");
+    return 0;
+}
+EOF
+"$CLANG" -O2 -Wall -Wextra -Werror "$WORK/hello.c" -o "$WORK/hello"
+"$WORK/hello" | grep -Fxq "Hello from Fil-C release!"
+echo "C HELLO OK"
+
+echo "=== [4/6] C++ Hello World (libc++ + exceptions) ==="
+cat > "$WORK/hello.cpp" <<'EOF'
+#include <iostream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+int main() {
+    std::vector<int> v{1, 2, 3};
+    std::string caught;
+    try {
+        if (v.size() == 3) throw std::runtime_error("release-ok");
+    } catch (const std::exception& e) {
+        caught = e.what();
+    }
+    std::cout << "CXX_RELEASE_OK:" << caught << "\n";
+    return caught == "release-ok" ? 0 : 1;
+}
+EOF
+"$CLANGXX" -O2 -std=c++20 -Wall -Wextra -Werror "$WORK/hello.cpp" -o "$WORK/hello_cxx"
+"$WORK/hello_cxx" | grep -Fxq "CXX_RELEASE_OK:release-ok"
+echo "C++ HELLO OK"
+
+echo "=== [5/6] Memory-Safety Traps (OOB + UAF) ==="
+cat > "$WORK/oob.c" <<'EOF'
+#include <stdio.h>
+#include <stdlib.h>
+int main(void) {
+    volatile int *p = malloc(4 * sizeof(int));
+    if (!p) return 2;
+    p[0] = 7;
+    int x = p[16];
+    printf("UNEXPECTED_OOB:%d\n", x);
+    return 0;
+}
+EOF
+"$CLANG" -O2 -g "$WORK/oob.c" -o "$WORK/oob"
+set +e
+"$WORK/oob" >"$WORK/oob.out" 2>"$WORK/oob.err"
+OOB_RC=$?
+set -e
+if [[ "$OOB_RC" -eq 0 ]] || ! grep -qi "filc safety error" "$WORK/oob.err"; then
+  echo "error: OOB trap did not trigger (rc=$OOB_RC)" >&2
+  cat "$WORK/oob.err" >&2
+  exit 1
+fi
+
+cat > "$WORK/uaf.c" <<'EOF'
+#include <stdio.h>
+#include <stdlib.h>
+int main(void) {
+    volatile int *p = malloc(4 * sizeof(int));
+    if (!p) return 2;
+    p[0] = 9;
+    free((void *)p);
+    int x = p[0];
+    printf("UNEXPECTED_UAF:%d\n", x);
+    return 0;
+}
+EOF
+"$CLANG" -O2 -g "$WORK/uaf.c" -o "$WORK/uaf"
+set +e
+"$WORK/uaf" >"$WORK/uaf.out" 2>"$WORK/uaf.err"
+UAF_RC=$?
+set -e
+if [[ "$UAF_RC" -eq 0 ]] || ! grep -qi "filc safety error" "$WORK/uaf.err"; then
+  echo "error: UAF trap did not trigger (rc=$UAF_RC)" >&2
+  cat "$WORK/uaf.err" >&2
+  exit 1
+fi
+echo "OOB + UAF TRAPS OK"
+
+echo "=== [6/6] Wave 1 Package Build & Test (zlib) ==="
+ZLIB_WORK="$TMP_BASE/zlib-work"
+mkdir -p "$ZLIB_WORK"
+FILC_TOOLCHAIN_ROOT="$ROOT_DIR" "$REPO_ROOT/scripts/build-port" zlib "$ZLIB_WORK"
+echo "ZLIB PACKAGE OK"
+
+echo "=== RELEASE ARCHIVE VERIFICATION PASSED ==="

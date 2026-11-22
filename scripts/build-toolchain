@@ -62,6 +62,12 @@ LINK_JOBS="${FILC_LINK_JOBS:-$DEFAULT_LINK_JOBS}"
 
 HOST_CC="${HOST_CC:-clang}"
 HOST_CXX="${HOST_CXX:-clang++}"
+RELEASE_BUILD="${FILC_RELEASE_BUILD:-0}"
+
+PREFIX_MAP_FLAGS=""
+if [[ "$RELEASE_BUILD" == "1" ]]; then
+  PREFIX_MAP_FLAGS="-ffile-prefix-map=${WORK_ROOT}=/filc-build -ffile-prefix-map=${REPO_ROOT}=/filc-src -fdebug-prefix-map=${WORK_ROOT}=/filc-build -fdebug-prefix-map=${REPO_ROOT}=/filc-src -fmacro-prefix-map=${WORK_ROOT}=/filc-build -fmacro-prefix-map=${REPO_ROOT}=/filc-src"
+fi
 
 echo "=== Fil-C Full Toolchain Build ==="
 echo "WORK_ROOT:    $WORK_ROOT"
@@ -153,6 +159,15 @@ fi
 if command -v ccache >/dev/null 2>&1; then
   LLVM_CMAKE_ARGS+=(-DLLVM_CCACHE_BUILD=ON)
 fi
+if [[ "$RELEASE_BUILD" == "1" ]]; then
+  LLVM_CMAKE_ARGS+=(
+    -DCMAKE_C_FLAGS="$PREFIX_MAP_FLAGS"
+    -DCMAKE_CXX_FLAGS="$PREFIX_MAP_FLAGS"
+    -DCMAKE_EXE_LINKER_FLAGS="-Wl,--build-id=none"
+    -DCMAKE_SHARED_LINKER_FLAGS="-Wl,--build-id=none"
+    -DCMAKE_SKIP_RPATH=ON
+  )
+fi
 
 T_CFG="$(date +%s)"
 echo "FILC_PHASE configure running"
@@ -195,7 +210,8 @@ cmake -S "$LLVM_SRC/runtimes" -B "$CRT_BUILD_DIR" -G Ninja \
   -DCOMPILER_RT_BUILD_ORC=OFF \
   -DCOMPILER_RT_BUILD_GWP_ASAN=OFF \
   -DCOMPILER_RT_DEFAULT_TARGET_TRIPLE="${ARCH}-linux-gnu" \
-  -DLLVM_INCLUDE_TESTS=OFF
+  -DLLVM_INCLUDE_TESTS=OFF \
+  ${PREFIX_MAP_FLAGS:+-DCMAKE_C_FLAGS="$PREFIX_MAP_FLAGS" -DCMAKE_CXX_FLAGS="$PREFIX_MAP_FLAGS"}
 
 ninja -C "$CRT_BUILD_DIR" -j"$COMPILE_JOBS" builtins crt
 
@@ -222,7 +238,7 @@ echo "=== [3/8] Building yolounwind ==="
 T_S3="$(date +%s)"
 echo "FILC_PHASE yolounwind running"
 make -C "$RUNTIME_SRC/yolounwind" clean || true
-make -C "$RUNTIME_SRC/yolounwind" -j"$COMPILE_JOBS"
+make -C "$RUNTIME_SRC/yolounwind" -j"$COMPILE_JOBS" ${PREFIX_MAP_FLAGS:+EXTRA_CFLAGS="$PREFIX_MAP_FLAGS"}
 cp "$RUNTIME_SRC/yolounwind/libyolounwind.a" "$PIZFIX/lib/libyolounwind.a"
 echo "FILC_PHASE yolounwind success $(( $(date +%s) - T_S3 ))"
 echo "STAGE3_YOLOUNWIND_SECONDS=$(( $(date +%s) - T_S3 ))"
@@ -254,7 +270,7 @@ T_S5="$(date +%s)"
 echo "FILC_PHASE yolomusl running"
 (
   cd "$YOLOMUSL_SRC"
-  CC="$HOST_CC" ./configure \
+  CC="$HOST_CC" CFLAGS="${PREFIX_MAP_FLAGS}" ./configure \
     --prefix="$PIZFIX/yolo" \
     --syslibdir="$PIZFIX/yolo/lib" \
     LIBCC="$PIZFIX/lib/libyolort.a"
@@ -297,7 +313,8 @@ ln -sfn "$BUILD_DIR" "$RUNTIME_SRC/build"
   make -f Makefile -j"$COMPILE_JOBS" \
     FILC_OUTPUT_ROOT="$PIZFIX" \
     FILC_CLANG="$BUILD_DIR/bin/clang" \
-    HOST_CLANG="$HOST_CC"
+    HOST_CLANG="$HOST_CC" \
+    ${PREFIX_MAP_FLAGS:+CROSS_TARGET_FLAGS="$PREFIX_MAP_FLAGS"}
 )
 echo "FILC_PHASE runtime success $(( $(date +%s) - T_S6 ))"
 echo "STAGE6_RUNTIME_SECONDS=$(( $(date +%s) - T_S6 ))"
@@ -310,7 +327,7 @@ T_S7="$(date +%s)"
 echo "FILC_PHASE usermusl running"
 (
   cd "$USERMUSL_SRC"
-  CC="$BUILD_DIR/bin/clang -yolo-assembler" ./configure \
+  CC="$BUILD_DIR/bin/clang -yolo-assembler" CFLAGS="${PREFIX_MAP_FLAGS}" ./configure \
     --prefix="$PIZFIX" \
     LIBCC=-lyolort
   make clean || true
@@ -332,11 +349,17 @@ echo "Target triple: $TRIPLE"
 rm -rf "$RUNTIMES_BUILD_DIR" "$BUILD_DIR/include/c++" "$BUILD_DIR/include/$TRIPLE/c++"
 mkdir -p "$RUNTIMES_BUILD_DIR"
 
+LIBCXX_BUILD_TYPE="RelWithDebInfo"
+if [[ "$RELEASE_BUILD" == "1" ]]; then
+  LIBCXX_BUILD_TYPE="Release"
+fi
+
 cmake -S "$LLVM_SRC/runtimes" -B "$RUNTIMES_BUILD_DIR" -G Ninja \
-  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DCMAKE_BUILD_TYPE="$LIBCXX_BUILD_TYPE" \
   -DCMAKE_C_COMPILER="$BUILD_DIR/bin/clang" \
   -DCMAKE_CXX_COMPILER="$BUILD_DIR/bin/clang++" \
   -DCMAKE_ASM_COMPILER="$BUILD_DIR/bin/clang" \
+  ${PREFIX_MAP_FLAGS:+-DCMAKE_C_FLAGS="$PREFIX_MAP_FLAGS" -DCMAKE_CXX_FLAGS="$PREFIX_MAP_FLAGS" -DCMAKE_SHARED_LINKER_FLAGS="-Wl,--build-id=none"} \
   -DCMAKE_C_COMPILER_WORKS=ON \
   -DCMAKE_CXX_COMPILER_WORKS=ON \
   -DCMAKE_ASM_COMPILER_WORKS=ON \

@@ -11,6 +11,8 @@ Fil-C toolchain, and run verification suites:
 - `scripts/build-and-smoke [LLVM_SRC_DIR] [BUILD_DIR]`: Builds Fil-C Clang + LLD and runs freestanding X86_64/AArch64 compiler pipeline smoke tests.
 - `scripts/build-toolchain [WORK_ROOT]`: Builds the complete Fil-C Linux musl toolchain (`clang`, `lld`, `compiler-rt`, `yolounwind`, `yolomusl`, `libpizlo`, `usermusl`, `libc++`/`libc++abi`).
 - `scripts/test-toolchain [WORK_ROOT] [REPORT_FILE]`: Runs end-to-end runtime tests (Hello World, Out-of-Bounds & Use-After-Free safety traps, C++ with `libc++`) and emits a SHA-256 evidence report.
+- `scripts/package-release <WORK_ROOT> <OUT_DIR> [VERSION]`: Packages a built toolchain into a reproducible, relocatable, leak-gated `filc-<version>-<arch>-linux.tar.xz` archive with `LICENSES/`, `NOTICE`, `MANIFEST`, `PROVENANCE`, `SHA256SUMS`, and `setup.sh`.
+- `scripts/test-release-archive <ARCHIVE.tar.xz> [REPO_ROOT]`: Unpacks a release archive into a fresh temporary directory and verifies `MANIFEST`, C/C++ Hello World, OOB/UAF traps, and building `ports/zlib`.
 - `scripts/nightly-check [LLVM_SRC_DIR] [BUILD_DIR] [REPORT_FILE]`: Automated latest-LLVM-release patch and smoke-test check used by nightly CI.
 - `scripts/verify-identical [--filc-dir <path>] [--work-dir <path>]`: Applies the full LLVM series against `UPSTREAM`'s `LLVM_COMMIT` and verifies bit-for-bit identity against `UPSTREAM`'s `FILC_COMMIT`.
 - `scripts/verify-pins [--check-metadata-only] [--all|--verifiable-direct|--changed [ref]|<port>...]`: Verifies `ports/*/PORT` `UPSTREAM_SHA256` pins against official upstream checksum files, GitHub release digests, or detached PGP signatures using pinned keys in `ports/pgp-keys/`.

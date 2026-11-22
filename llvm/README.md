@@ -13,6 +13,8 @@ Applied by default via `scripts/apply`:
 4. `04-clang-frontend-ast-basic-sema.patch`: `RecordDecl::HasUnion` tracking, `TargetInfo` dual `DataLayout`, preprocessor defines, `cpuid.h`.
 5. `05-clang-codegen-abi-and-pipeline.patch`: `BackendUtil` pass registration, X86/AArch64 ABI & `va_arg`, record layout, constants, atomics, builtins, Itanium C++ ABI.
 6. `06a-clang-driver-filc-core.patch`: Fil-C Linux Clang driver (`pizfix`/`optfil`, SARCASM assembler, `-enable-filc-jit`, version scripts, static-PIE).
+7. `06b-clang-driver-wl-version-script.patch`: Rewrites `-Wl,--version-script=` and `-Wl,--version-script,` through `PizlonateVersionScript()` in the Linux Clang driver.
+8. `06c-clang-driver-sarcasm-safe-wa-flags.patch`: Accepts safe no-op assembler metadata flags (`-Wa,--noexecstack`, `-Wa,--generate-missing-build-notes={yes,no}`, `-Wa,-mrelax-relocations={yes,no}`, `-Wa,--compress-debug-sections[=...]`) in `SarcasmAs` while still rejecting unsafe flags.
 
 ## Optional (`llvm/series.optional`)
 

@@ -181,6 +181,9 @@ echo "FILC_PHASE tests running"
   -lvertest_eq -o "$TEST_DIR/vertest_eq"
 "$CLANG" -O2 "$TEST_DIR/vertest_main.c" -L"$TEST_DIR" -Wl,-rpath,"$TEST_DIR" \
   -lvertest_comma -o "$TEST_DIR/vertest_comma"
+"$CLANG" -O2 -Wa,--noexecstack -Wa,--noexecstack,--compress-debug-sections=zlib \
+  "$TEST_DIR/hello_world.c" -o "$TEST_DIR/hello_wa"
+printf '/* empty asm for -Wa driver check */\n' > "$TEST_DIR/wa_test.S"
 
 # ---------------------------------------------------------------------------
 # Execute tests and verify expectations
@@ -291,6 +294,58 @@ else
   FAILURES=$((FAILURES + 1))
 fi
 
+echo "=== Running (e) Safe -Wa Assembler Flag Regression ==="
+run_and_capture hello_wa "$TEST_DIR/hello_wa"
+RC_WA_C="$(cat "$TEST_DIR/hello_wa.rc")"
+WA_OK=1
+if [[ "$RC_WA_C" -ne 0 ]] || ! grep -Fxq "Hello from Fil-C!" "$TEST_DIR/hello_wa.stdout"; then
+  echo "error: hello_wa binary failed under -Wa,--noexecstack" >&2
+  WA_OK=0
+fi
+
+set +e
+"$CLANG" -c \
+  -Wa,--noexecstack \
+  -Wa,--noexecstack,--compress-debug-sections=zlib \
+  -Wa,--generate-missing-build-notes=yes,-mrelax-relocations=no \
+  -Xassembler --noexecstack \
+  "$TEST_DIR/wa_test.S" -o "$TEST_DIR/wa_ok.o" \
+  >"$TEST_DIR/wa_safe.stdout" 2>"$TEST_DIR/wa_safe.stderr"
+set -e
+if grep -q "is not supported by the sarcasm assembler" "$TEST_DIR/wa_safe.stderr"; then
+  echo "error: safe -Wa flags were rejected by SarcasmAs" >&2
+  cat "$TEST_DIR/wa_safe.stderr" >&2
+  WA_OK=0
+fi
+
+for bad_case in "execstack:-Wa,--execstack" "mixed:-Wa,--noexecstack,--execstack" "xasm:-Xassembler:--execstack"; do
+  case_id="${bad_case%%:*}"
+  case_rest="${bad_case#*:}"
+  set +e
+  if [[ "$case_id" == "xasm" ]]; then
+    "$CLANG" -c -Xassembler --execstack "$TEST_DIR/wa_test.S" -o "$TEST_DIR/wa_${case_id}.o" \
+      >"$TEST_DIR/wa_${case_id}.stdout" 2>"$TEST_DIR/wa_${case_id}.stderr"
+    bad_rc=$?
+  else
+    "$CLANG" -c "$case_rest" "$TEST_DIR/wa_test.S" -o "$TEST_DIR/wa_${case_id}.o" \
+      >"$TEST_DIR/wa_${case_id}.stdout" 2>"$TEST_DIR/wa_${case_id}.stderr"
+    bad_rc=$?
+  fi
+  set -e
+  if [[ "$bad_rc" -eq 0 ]] || ! grep -q "is not supported by the sarcasm assembler" "$TEST_DIR/wa_${case_id}.stderr"; then
+    echo "error: unsafe assembler flag case '$case_id' was not rejected by SarcasmAs (rc=$bad_rc)" >&2
+    cat "$TEST_DIR/wa_${case_id}.stderr" >&2
+    WA_OK=0
+  fi
+done
+
+if [[ "$WA_OK" -eq 1 ]]; then
+  STATUS_WAFLAGS="PASS"
+else
+  STATUS_WAFLAGS="FAIL"
+  FAILURES=$((FAILURES + 1))
+fi
+
 OVERALL_STATUS="PASS"
 if (( FAILURES > 0 )); then
   OVERALL_STATUS="FAIL"
@@ -380,6 +435,9 @@ ARCH="$(uname -m)"
     echo "EXPORTS:"
     sed 's/^/  | /' "$TEST_DIR/vertest.nm"
   fi
+  echo ""
+  echo "--- TEST (e) SAFE -Wa ASSEMBLER FLAGS [$STATUS_WAFLAGS] ---"
+  echo "EXIT_CODE_WA_C: $RC_WA_C  WA_OK: $WA_OK"
   echo "================================================================================"
 } > "$REPORT_FILE"
 

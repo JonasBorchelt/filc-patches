@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Sparse-fetch the Fil-C runtime subdirectories (libpas, filc/{include,src,main},
+# yolounwind, projects/zegarmistrz/include) at the exact FILC_COMMIT pinned in
+# UPSTREAM, then apply any patches listed in runtime/filc/series.
+#
+# Usage: scripts/fetch-runtime [--reference <git-repo>] [TARGET_DIR]
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../UPSTREAM
+source "$REPO_ROOT/UPSTREAM"
+
+REFERENCE=""
+TARGET_DIR=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --reference)
+      REFERENCE="${2:?--reference requires a path}"
+      shift 2
+      ;;
+    -h|--help)
+      echo "Usage: $0 [--reference <git-repo>] [TARGET_DIR]"
+      exit 0
+      ;;
+    -*)
+      echo "error: unknown option: $1" >&2
+      exit 2
+      ;;
+    *)
+      TARGET_DIR="$1"
+      shift
+      ;;
+  esac
+done
+
+TARGET_DIR="${TARGET_DIR:-${FILC_RUNTIME_DIR:-$REPO_ROOT/.work/filc-runtime}}"
+mkdir -p "$(dirname "$TARGET_DIR")"
+
+if [[ ! -d "$TARGET_DIR/.git" ]]; then
+  git init -q "$TARGET_DIR"
+  git -C "$TARGET_DIR" remote add origin "$FILC_REPO"
+fi
+
+if [[ -n "$REFERENCE" ]]; then
+  if git -C "$REFERENCE" config --get-regexp '^(extensions\.partialclone|remote\..*\.promisor)$' >/dev/null 2>&1; then
+    echo "note: skipping --reference $REFERENCE (partial/promisor clone); fetching from $FILC_REPO" >&2
+  else
+    OBJ_DIR="$(git -C "$REFERENCE" rev-parse --git-path objects)"
+    if [[ "$OBJ_DIR" != /* ]]; then
+      OBJ_DIR="$(cd "$REFERENCE" && cd "$OBJ_DIR" && pwd)"
+    fi
+    ALT_FILE="$TARGET_DIR/.git/objects/info/alternates"
+    if [[ ! -f "$ALT_FILE" ]] || ! grep -Fxq "$OBJ_DIR" "$ALT_FILE"; then
+      echo "$OBJ_DIR" >> "$ALT_FILE"
+    fi
+  fi
+fi
+
+if ! git -C "$TARGET_DIR" cat-file -e "${FILC_COMMIT}^{commit}" 2>/dev/null; then
+  git -C "$TARGET_DIR" config remote.origin.promisor true
+  git -C "$TARGET_DIR" config remote.origin.partialclonefilter blob:none
+  git -C "$TARGET_DIR" fetch --depth=1 --no-tags --filter=blob:none origin "$FILC_COMMIT"
+fi
+
+git -C "$TARGET_DIR" sparse-checkout init --cone
+git -C "$TARGET_DIR" sparse-checkout set \
+  libpas \
+  filc/include \
+  filc/src \
+  filc/main \
+  yolounwind \
+  projects/zegarmistrz/include
+
+git -C "$TARGET_DIR" checkout -q --force --detach "$FILC_COMMIT"
+git -C "$TARGET_DIR" clean -fdx -q
+
+ACTUAL="$(git -C "$TARGET_DIR" rev-parse HEAD)"
+if [[ "$ACTUAL" != "$FILC_COMMIT" ]]; then
+  echo "error: checked-out Fil-C commit $ACTUAL != pinned $FILC_COMMIT" >&2
+  exit 1
+fi
+
+SERIES_FILE="$REPO_ROOT/runtime/filc/series"
+if [[ -f "$SERIES_FILE" ]]; then
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"
+    line="$(echo "$line" | xargs)"
+    [[ -z "$line" ]] && continue
+    patch_path="$REPO_ROOT/runtime/filc/$line"
+    if [[ ! -f "$patch_path" ]]; then
+      echo "error: missing patch $patch_path" >&2
+      exit 1
+    fi
+    echo "Applying ${patch_path#"$REPO_ROOT"/} ..."
+    git -C "$TARGET_DIR" apply --check --whitespace=nowarn "$patch_path"
+    git -C "$TARGET_DIR" apply --whitespace=nowarn "$patch_path"
+  done < "$SERIES_FILE"
+fi
+
+echo "Fetched Fil-C runtime ($ACTUAL) into $TARGET_DIR"

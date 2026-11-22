@@ -3,6 +3,7 @@ VERSION="2.3.8"
 LICENSE="LGPL-3.0-or-later OR GPL-2.0-or-later"
 UPSTREAM_URL="https://ftpmirror.gnu.org/gnu/libidn/libidn2-2.3.8.tar.gz"
 UPSTREAM_SHA256="f557911bf6171621e1f72ff35f5b1825bb35b52ed45325dcdee931e5d3c0787a"
+UPSTREAM_SHA256_SOURCE="upstream-sig-unpinned:https://ftpmirror.gnu.org/gnu/libidn/libidn2-2.3.8.tar.gz.sig"
 EXTRACT_DIR="libidn2-2.3.8"
 TIER=1
 DEPS="libunistring"

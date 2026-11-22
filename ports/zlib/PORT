@@ -3,6 +3,7 @@ VERSION="1.4"
 LICENSE="Zlib"
 UPSTREAM_URL="https://github.com/madler/zlib/releases/download/v1.4/zlib-1.4.tar.gz"
 UPSTREAM_SHA256="02dd159783677a749c04adbdd02b55b8a2bcc7e054f51b76b549199a916ad584"
+UPSTREAM_SHA256_SOURCE="github-release-digest:https://api.github.com/repos/madler/zlib/releases/tags/v1.4"
 EXTRACT_DIR="zlib-1.4"
 TIER=0
 DEPS=""

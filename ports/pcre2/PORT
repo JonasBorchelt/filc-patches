@@ -3,6 +3,7 @@ VERSION="10.49"
 LICENSE="BSD-3-Clause"
 UPSTREAM_URL="https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.49/pcre2-10.49.tar.bz2"
 UPSTREAM_SHA256="53c156e1ba416a20da8e65395daa132da0d80e76910424caca3fcdae7831d384"
+UPSTREAM_SHA256_SOURCE="github-release-digest:https://api.github.com/repos/PCRE2Project/pcre2/releases/tags/pcre2-10.49"
 EXTRACT_DIR="pcre2-10.49"
 TIER=1
 DEPS="zlib"

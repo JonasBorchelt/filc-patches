@@ -3,6 +3,7 @@ VERSION="0.2.6"
 LICENSE="MIT"
 UPSTREAM_URL="https://github.com/yaml/libyaml/releases/download/0.2.6/yaml-0.2.6.tar.gz"
 UPSTREAM_SHA256="43b393a117bd4fe39812fddc94e3d654359a3ae05653dcf0110a1122d1747e61"
+UPSTREAM_SHA256_SOURCE="github-release-digest:https://api.github.com/repos/yaml/libyaml/releases/tags/0.2.6"
 EXTRACT_DIR="yaml-0.2.6"
 TIER=1
 DEPS=""

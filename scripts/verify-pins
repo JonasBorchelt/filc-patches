@@ -1,0 +1,583 @@
+#!/usr/bin/env python3
+"""
+Verify upstream tarball SHA-256 pins in ports/*/PORT against official upstream
+checksum files, GitHub release asset digests, or detached PGP signatures using
+pinned keys in ports/pgp-keys/.
+
+Supported UPSTREAM_SHA256_SOURCE formats:
+  - sha256:<url>
+      Official upstream SHA-256 checksum file (.sha256, .sha256sum, checksums.txt).
+  - pgp:<sig-url> key:<repo-rel-key> fpr:<40-hex-fpr> [sha256_b64:<url>]
+      Detached OpenPGP signature verified via gpg against the pinned key and
+      fingerprint (plus optional base64 SHA-256 release announcement check).
+  - github-release-digest:<api-url>
+      GitHub Releases API asset digest (sha256:...).
+  - upstream-sha512-only:<url>
+      Upstream publishes only SHA-512; verified against cached/fetched tarball.
+  - upstream-sha3-256:<url>
+      Upstream publishes SHA3-256 (e.g. SQLite download table).
+  - upstream-sig-unpinned:<url>
+      Upstream publishes a detached signature whose key is not yet pinned.
+  - unverified-github-tag-archive:<url>
+      GitHub tag archive with no upstream checksum or signature.
+  - unverified-upstream-no-checksum:<url>
+      Upstream site publishes neither checksum nor signature.
+"""
+
+import argparse
+import base64
+import hashlib
+import json
+import os
+import re
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+FPR_RE = re.compile(r"^[0-9A-F]{40}$")
+DIRECT_SCHEMES = ("sha256:", "pgp:")
+VERIFIABLE_SCHEMES = (
+    "sha256:",
+    "pgp:",
+    "github-release-digest:",
+    "upstream-sha512-only:",
+    "upstream-sha3-256:",
+)
+KNOWN_PREFIXES = VERIFIABLE_SCHEMES + (
+    "upstream-sig-unpinned:",
+    "unverified-github-tag-archive:",
+    "unverified-upstream-no-checksum:",
+)
+
+
+def parse_port_file(port_file: str) -> dict:
+    data = {}
+    with open(port_file, "r", encoding="utf-8") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("port_") and "()" in line:
+                break
+            m = re.match(r"^([A-Z0-9_]+)=(.*)$", line)
+            if not m:
+                continue
+            key, val = m.group(1), m.group(2).strip()
+            if len(val) >= 2 and (
+                (val[0] == '"' and val[-1] == '"')
+                or (val[0] == "'" and val[-1] == "'")
+            ):
+                val = val[1:-1]
+            data[key] = val
+    return data
+
+
+def parse_openpgp_v4_fingerprints(armored_bytes: bytes) -> set:
+    """Extract RFC 4880 v4 public key and subkey fingerprints without requiring gpg."""
+    text = armored_bytes.decode("ascii", errors="replace").replace("\r\n", "\n")
+    blocks = re.findall(
+        r"-----BEGIN PGP PUBLIC KEY BLOCK-----\n(.*?)\n-----END PGP PUBLIC KEY BLOCK-----",
+        text,
+        re.S,
+    )
+    fprs = set()
+    for blk in blocks:
+        lines = blk.splitlines()
+        i = 0
+        while i < len(lines) and lines[i].strip() != "":
+            i += 1
+        b64 = [
+            l.strip()
+            for l in lines[i + 1 :]
+            if l.strip() and not l.strip().startswith("=")
+        ]
+        raw = base64.b64decode("".join(b64))
+        pos = 0
+        while pos < len(raw):
+            b0 = raw[pos]
+            pos += 1
+            if not (b0 & 0x80):
+                break
+            if b0 & 0x40:
+                tag = b0 & 0x3F
+                body = bytearray()
+                while True:
+                    l0 = raw[pos]
+                    pos += 1
+                    if l0 < 192:
+                        plen = l0
+                        body.extend(raw[pos : pos + plen])
+                        pos += plen
+                        break
+                    elif l0 < 224:
+                        l1 = raw[pos]
+                        pos += 1
+                        plen = ((l0 - 192) << 8) + l1 + 192
+                        body.extend(raw[pos : pos + plen])
+                        pos += plen
+                        break
+                    elif l0 == 255:
+                        plen = struct.unpack(">I", raw[pos : pos + 4])[0]
+                        pos += 4
+                        body.extend(raw[pos : pos + plen])
+                        pos += plen
+                        break
+                    else:
+                        plen = 1 << (l0 & 0x1F)
+                        body.extend(raw[pos : pos + plen])
+                        pos += plen
+                pkt = bytes(body)
+            else:
+                tag = (b0 >> 2) & 0x0F
+                ltype = b0 & 0x03
+                if ltype == 0:
+                    plen = raw[pos]
+                    pos += 1
+                elif ltype == 1:
+                    plen = struct.unpack(">H", raw[pos : pos + 2])[0]
+                    pos += 2
+                elif ltype == 2:
+                    plen = struct.unpack(">I", raw[pos : pos + 4])[0]
+                    pos += 4
+                else:
+                    plen = len(raw) - pos
+                pkt = raw[pos : pos + plen]
+                pos += plen
+            if tag in (6, 14) and pkt and pkt[0] == 4:
+                h = hashlib.sha1(b"\x99" + struct.pack(">H", len(pkt)) + pkt).hexdigest().upper()
+                fprs.add(h)
+    return fprs
+
+
+def parse_pgp_source(source: str) -> dict:
+    tokens = source.split()
+    out = {}
+    for tok in tokens:
+        if ":" not in tok:
+            raise ValueError(f"malformed pgp source token: {tok!r}")
+        k, v = tok.split(":", 1)
+        out[k] = v
+    for req in ("pgp", "key", "fpr"):
+        if not out.get(req):
+            raise ValueError(f"pgp source missing '{req}:' field: {source!r}")
+    if not FPR_RE.match(out["fpr"]):
+        raise ValueError(f"invalid 40-char uppercase hex fingerprint: {out['fpr']!r}")
+    return out
+
+
+def validate_metadata(name: str, meta: dict, repo_root: str) -> list:
+    errors = []
+    sha = meta.get("UPSTREAM_SHA256", "")
+    if not SHA256_RE.match(sha):
+        errors.append(f"{name}: invalid UPSTREAM_SHA256={sha!r}")
+
+    src = meta.get("UPSTREAM_SHA256_SOURCE", "")
+    if not src:
+        errors.append(f"{name}: missing UPSTREAM_SHA256_SOURCE")
+        return errors
+
+    if not src.startswith(KNOWN_PREFIXES):
+        errors.append(f"{name}: unrecognized UPSTREAM_SHA256_SOURCE prefix: {src!r}")
+        return errors
+
+    if src.startswith("pgp:"):
+        try:
+            spec = parse_pgp_source(src)
+        except ValueError as exc:
+            errors.append(f"{name}: {exc}")
+            return errors
+
+        if meta.get("UPSTREAM_SIG_URL") and meta["UPSTREAM_SIG_URL"] != spec["pgp"]:
+            errors.append(f"{name}: UPSTREAM_SIG_URL does not match UPSTREAM_SHA256_SOURCE")
+        if meta.get("UPSTREAM_PGP_KEY") and meta["UPSTREAM_PGP_KEY"] != spec["key"]:
+            errors.append(f"{name}: UPSTREAM_PGP_KEY does not match UPSTREAM_SHA256_SOURCE")
+        if meta.get("UPSTREAM_PGP_FPR") and meta["UPSTREAM_PGP_FPR"] != spec["fpr"]:
+            errors.append(f"{name}: UPSTREAM_PGP_FPR does not match UPSTREAM_SHA256_SOURCE")
+
+        key_abs = os.path.join(repo_root, spec["key"])
+        if not os.path.isfile(key_abs):
+            errors.append(f"{name}: pinned PGP key file not found: {spec['key']}")
+        else:
+            with open(key_abs, "rb") as kf:
+                fprs = parse_openpgp_v4_fingerprints(kf.read())
+            if spec["fpr"] not in fprs:
+                errors.append(
+                    f"{name}: fingerprint {spec['fpr']} not found in {spec['key']} "
+                    f"(found: {sorted(fprs)})"
+                )
+    return errors
+
+
+def curl_bytes(url: str, extra_headers=None) -> bytes:
+    cmd = ["curl", "-fsSL", "--retry", "3", "--retry-delay", "2", "--max-time", "60"]
+    if extra_headers:
+        for h in extra_headers:
+            cmd.extend(["-H", h])
+    cmd.append(url)
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"curl failed ({proc.returncode}) for {url}: "
+            f"{proc.stderr.decode('utf-8', errors='replace').strip()}"
+        )
+    return proc.stdout
+
+
+def file_hash(path: str, algo: str) -> str:
+    h = hashlib.new(algo)
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def ensure_cached_tarball(meta: dict, cache_dir: str) -> str:
+    os.makedirs(cache_dir, exist_ok=True)
+    name = meta["NAME"]
+    version = meta["VERSION"]
+    expected = meta["UPSTREAM_SHA256"]
+    url = meta["UPSTREAM_URL"]
+    tarball_name = os.path.basename(url.split("?", 1)[0])
+    tarball_path = os.path.join(cache_dir, f"{name}-{version}-{expected[:12]}-{tarball_name}")
+
+    if not os.path.isfile(tarball_path):
+        tmp_path = f"{tarball_path}.part.{os.getpid()}"
+        try:
+            subprocess.run(
+                [
+                    "curl",
+                    "-fsSL",
+                    "--retry",
+                    "3",
+                    "--retry-delay",
+                    "2",
+                    "-o",
+                    tmp_path,
+                    url,
+                ],
+                check=True,
+            )
+            os.replace(tmp_path, tarball_path)
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+    actual = file_hash(tarball_path, "sha256")
+    if actual != expected:
+        os.unlink(tarball_path)
+        raise RuntimeError(
+            f"tarball SHA-256 mismatch for {tarball_name}: expected {expected}, got {actual}"
+        )
+    return tarball_path
+
+
+def extract_sha256_from_checksum_text(text: str, filename: str) -> str:
+    lines = [l.strip() for l in text.splitlines() if l.strip() and not l.strip().startswith("#")]
+    # First look for a line mentioning the exact filename
+    for line in lines:
+        m = re.match(r"^([0-9a-fA-F]{64})\s+\*?(.+)$", line)
+        if m:
+            h, fname = m.group(1).lower(), os.path.basename(m.group(2).strip())
+            if fname == filename:
+                return h
+        m_bsd = re.match(r"^SHA256\s*\(([^)]+)\)\s*=\s*([0-9a-fA-F]{64})$", line)
+        if m_bsd and os.path.basename(m_bsd.group(1).strip()) == filename:
+            return m_bsd.group(2).lower()
+    # Fallback: single-hash file containing only one 64-hex digest
+    if len(lines) == 1:
+        tok = lines[0].split()[0].lower()
+        if SHA256_RE.match(tok):
+            return tok
+    raise RuntimeError(f"could not find SHA-256 entry for {filename!r} in upstream checksum file")
+
+
+def extract_sha256_b64_from_text(text: str, filename: str) -> str:
+    pat = re.compile(rf"SHA256\s*\({re.escape(filename)}\)\s*=\s*([A-Za-z0-9+/=]+)")
+    m = pat.search(text)
+    if not m:
+        raise RuntimeError(f"could not find base64 SHA256({filename}) entry in release announcement")
+    raw = base64.b64decode(m.group(1))
+    if len(raw) != 32:
+        raise RuntimeError(f"decoded base64 SHA256 has unexpected length {len(raw)}")
+    return raw.hex()
+
+
+def verify_pgp_signature(tarball_path: str, sig_url: str, key_abs: str, expected_fpr: str) -> None:
+    gpg_bin = shutil.which("gpg")
+    if not gpg_bin:
+        raise RuntimeError("gpg is required for PGP signature verification but is not installed")
+
+    sig_bytes = curl_bytes(sig_url)
+    with tempfile.TemporaryDirectory(prefix="filc-verify-gpg-") as td:
+        gnupg_home = os.path.join(td, "gnupg")
+        os.makedirs(gnupg_home, mode=0o700)
+        sig_path = os.path.join(td, "tarball.sig")
+        with open(sig_path, "wb") as f:
+            f.write(sig_bytes)
+
+        env = os.environ.copy()
+        env["GNUPGHOME"] = gnupg_home
+
+        imp = subprocess.run(
+            [gpg_bin, "--batch", "--quiet", "--import", key_abs],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if imp.returncode != 0:
+            raise RuntimeError(f"gpg --import failed: {imp.stderr.decode('utf-8', errors='replace').strip()}")
+
+        fpr_out = subprocess.run(
+            [gpg_bin, "--batch", "--with-colons", "--fingerprint"],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        ).stdout.decode("utf-8", errors="replace")
+        imported_fprs = {
+            line.split(":")[9].upper()
+            for line in fpr_out.splitlines()
+            if line.startswith("fpr:") and len(line.split(":")) > 9
+        }
+        if expected_fpr not in imported_fprs:
+            raise RuntimeError(f"pinned fingerprint {expected_fpr} missing after gpg --import")
+
+        ver = subprocess.run(
+            [gpg_bin, "--batch", "--status-fd", "1", "--verify", sig_path, tarball_path],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        status_txt = ver.stdout.decode("utf-8", errors="replace")
+        if ver.returncode != 0:
+            raise RuntimeError(
+                f"gpg --verify failed ({ver.returncode}): "
+                f"{ver.stderr.decode('utf-8', errors='replace').strip()}"
+            )
+
+        matched = False
+        for line in status_txt.splitlines():
+            if line.startswith("[GNUPG:] VALIDSIG "):
+                fields = line.split()
+                # VALIDSIG <signing-fpr> <date> <ts> <exp> <sig-ver> <res> <pubkey-alg> <hash-alg> <sig-class> [<primary-fpr>]
+                sig_fpr = fields[2].upper() if len(fields) > 2 else ""
+                primary_fpr = fields[11].upper() if len(fields) > 11 else ""
+                if expected_fpr in (sig_fpr, primary_fpr):
+                    matched = True
+                    break
+        if not matched:
+            raise RuntimeError(
+                f"gpg verified signature but VALIDSIG did not match pinned fingerprint {expected_fpr}"
+            )
+
+
+def verify_port_online(name: str, meta: dict, repo_root: str, cache_dir: str, strict: bool) -> str:
+    src = meta["UPSTREAM_SHA256_SOURCE"]
+    expected = meta["UPSTREAM_SHA256"]
+    filename = os.path.basename(meta["UPSTREAM_URL"].split("?", 1)[0])
+
+    if src.startswith("sha256:"):
+        url = src[len("sha256:") :]
+        txt = curl_bytes(url).decode("utf-8", errors="replace")
+        got = extract_sha256_from_checksum_text(txt, filename)
+        if got != expected:
+            raise RuntimeError(
+                f"upstream checksum mismatch from {url}: PORT={expected}, upstream={got}"
+            )
+        return f"OK [sha256] {name} {meta['VERSION']} ({expected[:12]}...)"
+
+    if src.startswith("pgp:"):
+        spec = parse_pgp_source(src)
+        details = ["pgp"]
+        if "sha256_b64" in spec:
+            ann_txt = curl_bytes(spec["sha256_b64"]).decode("utf-8", errors="replace")
+            got_b64 = extract_sha256_b64_from_text(ann_txt, filename)
+            if got_b64 != expected:
+                raise RuntimeError(
+                    f"release announcement SHA256 mismatch: PORT={expected}, upstream={got_b64}"
+                )
+            details.append("sha256_b64")
+        tarball_path = ensure_cached_tarball(meta, cache_dir)
+        key_abs = os.path.join(repo_root, spec["key"])
+        verify_pgp_signature(tarball_path, spec["pgp"], key_abs, spec["fpr"])
+        return f"OK [{'+'.join(details)}] {name} {meta['VERSION']} (fpr={spec['fpr'][:12]}..., sha256={expected[:12]}...)"
+
+    if src.startswith("github-release-digest:"):
+        api_url = src[len("github-release-digest:") :]
+        raw = curl_bytes(api_url, extra_headers=["Accept: application/vnd.github+json"])
+        rel = json.loads(raw.decode("utf-8"))
+        assets = {a["name"]: a for a in rel.get("assets", [])}
+        asset = assets.get(filename)
+        if not asset:
+            raise RuntimeError(f"asset {filename!r} not found in GitHub release {api_url}")
+        digest = asset.get("digest") or ""
+        if digest != f"sha256:{expected}":
+            raise RuntimeError(
+                f"GitHub release digest mismatch for {filename}: PORT=sha256:{expected}, api={digest!r}"
+            )
+        return f"OK [github-release-digest] {name} {meta['VERSION']} ({expected[:12]}...)"
+
+    if src.startswith("upstream-sha512-only:"):
+        url = src[len("upstream-sha512-only:") :]
+        txt = curl_bytes(url).decode("utf-8", errors="replace")
+        upstream_sha512 = None
+        for line in txt.splitlines():
+            m = re.match(r"^([0-9a-fA-F]{128})\s+\*?(.+)$", line.strip())
+            if m and os.path.basename(m.group(2).strip()) == filename:
+                upstream_sha512 = m.group(1).lower()
+                break
+        if not upstream_sha512:
+            raise RuntimeError(f"could not find SHA-512 for {filename!r} at {url}")
+        tarball_path = ensure_cached_tarball(meta, cache_dir)
+        got512 = file_hash(tarball_path, "sha512")
+        if got512 != upstream_sha512:
+            raise RuntimeError(f"SHA-512 mismatch for {filename}: expected {upstream_sha512}, got {got512}")
+        return f"OK [upstream-sha512] {name} {meta['VERSION']} ({expected[:12]}...)"
+
+    if src.startswith("upstream-sha3-256:"):
+        url = src[len("upstream-sha3-256:") :]
+        txt = curl_bytes(url).decode("utf-8", errors="replace")
+        upstream_sha3 = None
+        for line in txt.splitlines():
+            if filename in line and line.strip().startswith("PRODUCT,"):
+                parts = line.strip().split(",")
+                if len(parts) >= 5 and re.match(r"^[0-9a-fA-F]{64}$", parts[4]):
+                    upstream_sha3 = parts[4].lower()
+                    break
+        if not upstream_sha3:
+            raise RuntimeError(f"could not find SHA3-256 for {filename!r} at {url}")
+        tarball_path = ensure_cached_tarball(meta, cache_dir)
+        got3 = file_hash(tarball_path, "sha3_256")
+        if got3 != upstream_sha3:
+            raise RuntimeError(f"SHA3-256 mismatch for {filename}: expected {upstream_sha3}, got {got3}")
+        return f"OK [upstream-sha3-256] {name} {meta['VERSION']} ({expected[:12]}...)"
+
+    if strict:
+        raise RuntimeError(f"{name}: non-verifiable UPSTREAM_SHA256_SOURCE under --strict: {src}")
+    return f"NOTE [unverified-source] {name} {meta['VERSION']} ({src.split(':', 1)[0]})"
+
+
+def detect_changed_ports(repo_root: str, base_ref: str) -> list:
+    candidates = [base_ref] if base_ref else ["origin/main", "main", "HEAD~1"]
+    chosen = None
+    for ref in candidates:
+        p = subprocess.run(
+            ["git", "-C", repo_root, "rev-parse", "--verify", f"{ref}^{{commit}}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if p.returncode == 0:
+            chosen = ref
+            break
+    if not chosen:
+        return []
+    out = subprocess.check_output(
+        ["git", "-C", repo_root, "diff", "--name-only", f"{chosen}...HEAD"],
+        text=True,
+    )
+    changed = set()
+    for path in out.splitlines():
+        m = re.match(r"^ports/([^/]+)/PORT$", path.strip())
+        if m:
+            changed.add(m.group(1))
+    return sorted(changed)
+
+
+def main() -> int:
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    parser = argparse.ArgumentParser(description="Verify ports/*/PORT upstream SHA-256 pins and PGP signatures")
+    parser.add_argument("ports", nargs="*", help="Specific port names to verify")
+    parser.add_argument("--all", action="store_true", help="Verify all ports in ports/")
+    parser.add_argument("--verifiable-direct", action="store_true", help="Verify all ports with direct sha256: or pgp: sources")
+    parser.add_argument("--changed", nargs="?", const="", default=None, help="Verify ports whose PORT file changed relative to BASE_REF (default: origin/main)")
+    parser.add_argument("--check-metadata-only", action="store_true", help="Offline check: validate UPSTREAM_SHA256_SOURCE metadata and pinned PGP key fingerprints only")
+    parser.add_argument("--strict", action="store_true", help="Fail if any selected port has an unverified/unpinned source")
+    parser.add_argument("--ports-dir", default=os.path.join(repo_root, "ports"))
+    parser.add_argument(
+        "--cache-dir",
+        default=os.environ.get("FILC_PORTS_CACHE_DIR", os.path.join(repo_root, ".work", "ports", "ports-cache")),
+    )
+    args = parser.parse_args()
+
+    all_ports = {}
+    for entry in sorted(os.listdir(args.ports_dir)):
+        pfile = os.path.join(args.ports_dir, entry, "PORT")
+        if os.path.isfile(pfile):
+            all_ports[entry] = parse_port_file(pfile)
+
+    if not all_ports:
+        print("error: no PORT recipes found", file=sys.stderr)
+        return 1
+
+    if args.ports:
+        selected = args.ports
+        for p in selected:
+            if p not in all_ports:
+                print(f"error: unknown port: {p}", file=sys.stderr)
+                return 1
+    elif args.verifiable_direct:
+        selected = [
+            n
+            for n, m in sorted(all_ports.items())
+            if m.get("UPSTREAM_SHA256_SOURCE", "").startswith(DIRECT_SCHEMES)
+        ]
+    elif args.changed is not None:
+        selected = detect_changed_ports(repo_root, args.changed)
+        if not selected:
+            print("verify-pins: no changed PORT files detected; falling back to --verifiable-direct")
+            selected = [
+                n
+                for n, m in sorted(all_ports.items())
+                if m.get("UPSTREAM_SHA256_SOURCE", "").startswith(DIRECT_SCHEMES)
+            ]
+    else:
+        selected = sorted(all_ports.keys())
+
+    meta_errors = []
+    for name in selected:
+        meta_errors.extend(validate_metadata(name, all_ports[name], repo_root))
+    if meta_errors:
+        for e in meta_errors:
+            print(f"FAIL [metadata] {e}", file=sys.stderr)
+        return 1
+
+    if args.check_metadata_only:
+        verifiable = sum(
+            1
+            for n in selected
+            if all_ports[n].get("UPSTREAM_SHA256_SOURCE", "").startswith(VERIFIABLE_SCHEMES)
+        )
+        print(
+            f"PIN METADATA OK (checked={len(selected)}, verifiable={verifiable}, "
+            f"unverified={len(selected) - verifiable})"
+        )
+        return 0
+
+    failures = []
+    for name in selected:
+        try:
+            msg = verify_port_online(name, all_ports[name], repo_root, args.cache_dir, args.strict)
+            print(msg, flush=True)
+        except Exception as exc:
+            print(f"FAIL [{name}] {exc}", file=sys.stderr, flush=True)
+            failures.append((name, str(exc)))
+
+    if failures:
+        print(f"VERIFY_PINS: FAILED ({len(failures)}/{len(selected)})", file=sys.stderr)
+        return 1
+
+    print(f"VERIFY_PINS: PASS ({len(selected)} ports checked)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

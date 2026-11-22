@@ -2,7 +2,8 @@ NAME="openssl"
 VERSION="3.6.5"
 LICENSE="Apache-2.0"
 UPSTREAM_URL="https://github.com/openssl/openssl/releases/download/openssl-3.6.5/openssl-3.6.5.tar.gz"
-UPSTREAM_SHA256="1f7fe0f6b2d9c46f70eee94d4e8700cf754623e9764af424e3eb9a9127d77999"
+UPSTREAM_SHA256="a2157c2830efdec3788939b00c9b0638306d3f0bbb76dc4832ee503bb397df98"
+UPSTREAM_SHA256_SOURCE="sha256:https://github.com/openssl/openssl/releases/download/openssl-3.6.5/openssl-3.6.5.tar.gz.sha256"
 EXTRACT_DIR="openssl-3.6.5"
 TIER=3
 DEPS="zlib zstd"
@@ -12,7 +13,16 @@ MAKE_ARGS=""
 INSTALL_ARGS="install_sw install_ssldirs"
 TEST_CMD=""
 POLICY_CLASS="P2-Package"
-POLICY_RATIONALE="Audited down from Fil-C zunsafe-openssl3 (78 files, +2367/-756) to 1 file (+2/-1): pure-C no-asm build removes all -yolo-assembler/zunsafe wrappers, P1 llvm/06b eliminates shared-info.pl, and -DOPENSSL_NO_SECURE_MEMORY disables raw-arena secure malloc."
+POLICY_RATIONALE="Audited down from Fil-C zunsafe-openssl3 (78 files, +2367/-756) to 1 file (+2/-1): pure-C no-asm build removes all -yolo-assembler/zunsafe wrappers, P1 llvm/06b eliminates shared-info.pl, and -DOPENSSL_NO_SECURE_MEMORY disables OpenSSL's raw-arena secure heap."
+# P4-Audit note (-DOPENSSL_NO_SECURE_MEMORY functional tradeoff):
+# OpenSSL's CRYPTO_secure_malloc() manages a custom raw mmap() arena with
+# mlock() and guard pages using raw pointer arithmetic that is incompatible
+# with Fil-C's capability heap allocator. Building with
+# -DOPENSSL_NO_SECURE_MEMORY routes secure heap allocations through standard
+# malloc/OPENSSL_cleanse. Users retain full Fil-C spatial/temporal memory
+# safety (bounds, type, and use-after-free checks) and explicit zeroing on
+# free, but give up mlock() swap prevention and guard pages around private
+# key buffers (matching OpenSSL's behavior on platforms without mlock).
 FILC_ORIGIN_REF="cede3de02b42:projects/zunsafe-openssl3.projeny"
 
 port_configure() {

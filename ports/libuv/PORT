@@ -3,6 +3,7 @@ VERSION="1.53.0"
 LICENSE="MIT"
 UPSTREAM_URL="https://dist.libuv.org/dist/v1.53.0/libuv-v1.53.0-dist.tar.gz"
 UPSTREAM_SHA256="21425fa398be98b51181a1885df31428092d5435c4373a396351e427322e5f1b"
+UPSTREAM_SHA256_SOURCE="upstream-sig-unpinned:https://dist.libuv.org/dist/v1.53.0/libuv-v1.53.0-dist.tar.gz.sign"
 EXTRACT_DIR="libuv-1.53.0"
 TIER=2
 DEPS=""

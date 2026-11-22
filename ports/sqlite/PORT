@@ -3,6 +3,7 @@ VERSION="3.54.1"
 LICENSE="blessing"
 UPSTREAM_URL="https://www.sqlite.org/2026/sqlite-autoconf-3540100.tar.gz"
 UPSTREAM_SHA256="926ef8d3eab93fbf6e06011901273eec076b25594a4e1cdadd50c987f4f6d64e"
+UPSTREAM_SHA256_SOURCE="upstream-sha3-256:https://www.sqlite.org/download.html"
 EXTRACT_DIR="sqlite-autoconf-3540100"
 TIER=2
 DEPS="zlib libedit"

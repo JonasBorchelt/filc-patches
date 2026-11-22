@@ -238,7 +238,7 @@ echo "=== [3/8] Building yolounwind ==="
 T_S3="$(date +%s)"
 echo "FILC_PHASE yolounwind running"
 make -C "$RUNTIME_SRC/yolounwind" clean || true
-make -C "$RUNTIME_SRC/yolounwind" -j"$COMPILE_JOBS" ${PREFIX_MAP_FLAGS:+EXTRA_CFLAGS="$PREFIX_MAP_FLAGS"}
+make -C "$RUNTIME_SRC/yolounwind" -j"$COMPILE_JOBS" ${PREFIX_MAP_FLAGS:+CROSS_TARGET_FLAGS="$PREFIX_MAP_FLAGS"}
 cp "$RUNTIME_SRC/yolounwind/libyolounwind.a" "$PIZFIX/lib/libyolounwind.a"
 echo "FILC_PHASE yolounwind success $(( $(date +%s) - T_S3 ))"
 echo "STAGE3_YOLOUNWIND_SECONDS=$(( $(date +%s) - T_S3 ))"

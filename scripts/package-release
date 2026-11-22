@@ -171,7 +171,7 @@ for lib in "$STAGE/pizfix/lib"/*.so "$STAGE/pizfix/lib"/*.so.*; do
     patchelf --set-rpath '$ORIGIN' "$lib" || true
   fi
 done
-for arlib in "$STAGE/pizfix/lib"/*.a; do
+for arlib in "$STAGE/pizfix/lib"/*.a "$STAGE/pizfix/lib"/*.o; do
   [[ -f "$arlib" ]] || continue
   strip --strip-debug "$arlib" || true
 done

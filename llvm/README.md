@@ -1,7 +1,7 @@
 # llvm
 
 Fil-C LLVM/Clang patch series against the pinned upstream LLVM commit in
-`UPSTREAM` (currently `llvmorg-20.1.8`).
+`UPSTREAM` (currently `llvmorg-21.1.8`).
 
 ## Series (`llvm/series`)
 
@@ -16,7 +16,7 @@ Applied by default via `scripts/apply`:
 
 ## Optional (`llvm/series.optional`)
 
-- `optional/06b-clang-driver-cosmo-fat-ape.patch` — Cosmopolitan libc & Fat-APE driver support. Not required for Linux/Unikraft builds; applied only with `scripts/apply --with-optional` (and by `scripts/verify-identical` to prove lossless decomposition).
+- `optional/06b-clang-driver-cosmo-fat-ape.patch` — Cosmopolitan libc & Fat-APE driver support. Still at `llvmorg-20.1.8` (not required for Linux/Unikraft builds; scheduled to be ported last).
 
 ## Intentionally Dropped Changes (Audited Exceptions)
 

@@ -1,5 +1,5 @@
 Subject: LLVM optimizer safety guards (InstCombine, SROA, PassBuilderPipelines)
-Upstream-Base: llvmorg-21.1.8 (2078da43e25a4623cab2d0d60decddf709aaea28)
+Upstream-Base: llvmorg-22.1.8 (ca7933e47d3a3451d81e72ac174dcb5aa28b59d1)
 Fil-C-Head: cede3de02b42b58a14acc9ce39c9894ab952a915 (branch deluge)
 
 Disables or restricts InstCombine pointer/integer folds and PassBuilder
@@ -24,12 +24,18 @@ Rebase-Notes (llvmorg-20.1.8 -> llvmorg-21.1.8):
   - InstCombineAndOrXor.cpp & InstCombineMulDivRem.cpp: adapted removed fold blocks to LLVM 21's 2-argument computeKnownBits().
   - InstructionCombining.cpp: adapted isAllocSiteRemovable Fil-C early exit from `return false` to `return std::nullopt` (return type changed to std::optional<ModRefInfo> in LLVM 21).
 
+Rebase-Notes (llvmorg-21.1.8 -> llvmorg-22.1.8):
+  - PassBuilderPipelines.cpp: context updated for simplified createFunctionToLoopPassAdaptor() and LTOPhase parameter on addVectorPasses().
+  - InstCombineAndOrXor.cpp & InstCombineShifts.cpp: adapted removed fold blocks to LLVM 22's createSelectInstWithUnknownProfile() helper.
+  - InstCombineCalls.cpp: context updated for MI->setLength((uint64_t)0).
+  - SROA.cpp: adapted to LLVM 22's extracted selectPartitionType() and IsIntegerWideningViable/ProtectedFieldDisc parameters.
+
 ---
 diff --git a/llvm/lib/Passes/PassBuilderPipelines.cpp b/llvm/lib/Passes/PassBuilderPipelines.cpp
-index 98821bb14..9d34b9251 100644
+index 1584d3087..0a79ffbe1 100644
 --- a/llvm/lib/Passes/PassBuilderPipelines.cpp
 +++ b/llvm/lib/Passes/PassBuilderPipelines.cpp
-@@ -447,7 +447,7 @@ PassBuilder::buildO1FunctionSimplificationPipeline(OptimizationLevel Level,
+@@ -468,7 +468,7 @@ PassBuilder::buildO1FunctionSimplificationPipeline(OptimizationLevel Level,
        SimplifyCFGPass(SimplifyCFGOptions().convertSwitchRangeToICmp(true)));
    FPM.addPass(InstCombinePass());
  
@@ -38,7 +44,7 @@ index 98821bb14..9d34b9251 100644
  
    invokePeepholeEPCallbacks(FPM, Level);
  
-@@ -459,6 +459,7 @@ PassBuilder::buildO1FunctionSimplificationPipeline(OptimizationLevel Level,
+@@ -480,6 +480,7 @@ PassBuilder::buildO1FunctionSimplificationPipeline(OptimizationLevel Level,
    // minimal multiplication trees.
    FPM.addPass(ReassociatePass());
  
@@ -46,15 +52,15 @@ index 98821bb14..9d34b9251 100644
    // Add the primary loop simplification pipeline.
    // FIXME: Currently this is split into two loop pass pipelines because we run
    // some function passes in between them. These can and should be removed
-@@ -525,6 +526,7 @@ PassBuilder::buildO1FunctionSimplificationPipeline(OptimizationLevel Level,
+@@ -544,6 +545,7 @@ PassBuilder::buildO1FunctionSimplificationPipeline(OptimizationLevel Level,
+   // *All* loop passes must preserve it, in order to be able to use it.
    FPM.addPass(createFunctionToLoopPassAdaptor(std::move(LPM2),
-                                               /*UseMemorySSA=*/false,
-                                               /*UseBlockFrequencyInfo=*/false));
+                                               /*UseMemorySSA=*/false));
 +  }
  
    // Delete small array after loop unroll.
    FPM.addPass(SROAPass(SROAOptions::ModifyCFG));
-@@ -599,7 +601,7 @@ PassBuilder::buildFunctionSimplificationPipeline(OptimizationLevel Level,
+@@ -618,7 +620,7 @@ PassBuilder::buildFunctionSimplificationPipeline(OptimizationLevel Level,
    }
  
    // Speculative execution if the target has divergent branches; otherwise nop.
@@ -63,7 +69,7 @@ index 98821bb14..9d34b9251 100644
  
    // Optimize based on known information about branches, and cleanup afterward.
    FPM.addPass(JumpThreadingPass());
-@@ -614,16 +616,16 @@ PassBuilder::buildFunctionSimplificationPipeline(OptimizationLevel Level,
+@@ -635,16 +637,16 @@ PassBuilder::buildFunctionSimplificationPipeline(OptimizationLevel Level,
    FPM.addPass(InstCombinePass());
    FPM.addPass(AggressiveInstCombinePass());
  
@@ -85,7 +91,7 @@ index 98821bb14..9d34b9251 100644
  
    FPM.addPass(TailCallElimPass(/*UpdateFunctionEntryCount=*/
                                 isInstrumentedPGOUse()));
-@@ -638,6 +640,7 @@ PassBuilder::buildFunctionSimplificationPipeline(OptimizationLevel Level,
+@@ -659,6 +661,7 @@ PassBuilder::buildFunctionSimplificationPipeline(OptimizationLevel Level,
    if (EnableConstraintElimination)
      FPM.addPass(ConstraintEliminationPass());
  
@@ -93,52 +99,52 @@ index 98821bb14..9d34b9251 100644
    // Add the primary loop simplification pipeline.
    // FIXME: Currently this is split into two loop pass pipelines because we run
    // some function passes in between them. These can and should be removed
-@@ -715,6 +718,7 @@ PassBuilder::buildFunctionSimplificationPipeline(OptimizationLevel Level,
+@@ -734,6 +737,7 @@ PassBuilder::buildFunctionSimplificationPipeline(OptimizationLevel Level,
+   // *All* loop passes must preserve it, in order to be able to use it.
    FPM.addPass(createFunctionToLoopPassAdaptor(std::move(LPM2),
-                                               /*UseMemorySSA=*/false,
-                                               /*UseBlockFrequencyInfo=*/false));
+                                               /*UseMemorySSA=*/false));
 +  }
  
    // Delete small array after loop unroll.
    FPM.addPass(SROAPass(SROAOptions::ModifyCFG));
-@@ -764,10 +768,10 @@ PassBuilder::buildFunctionSimplificationPipeline(OptimizationLevel Level,
+@@ -783,10 +787,10 @@ PassBuilder::buildFunctionSimplificationPipeline(OptimizationLevel Level,
    FPM.addPass(DSEPass());
    FPM.addPass(MoveAutoInitPass());
  
 -  FPM.addPass(createFunctionToLoopPassAdaptor(
 -      LICMPass(PTO.LicmMssaOptCap, PTO.LicmMssaNoAccForPromotionCap,
 -               /*AllowSpeculation=*/true),
--      /*UseMemorySSA=*/true, /*UseBlockFrequencyInfo=*/false));
+-      /*UseMemorySSA=*/true));
 +  //FPM.addPass(createFunctionToLoopPassAdaptor(
 +  //    LICMPass(PTO.LicmMssaOptCap, PTO.LicmMssaNoAccForPromotionCap,
 +  //             /*AllowSpeculation=*/true),
-+  //    /*UseMemorySSA=*/true, /*UseBlockFrequencyInfo=*/false));
++  //    /*UseMemorySSA=*/true));
  
    FPM.addPass(CoroElidePass());
  
-@@ -1561,7 +1565,7 @@ PassBuilder::buildModuleOptimizationPipeline(OptimizationLevel Level,
+@@ -1597,7 +1601,7 @@ PassBuilder::buildModuleOptimizationPipeline(OptimizationLevel Level,
    // from the TargetLibraryInfo.
    OptimizePM.addPass(InjectTLIMappings());
  
--  addVectorPasses(Level, OptimizePM, /* IsFullLTO */ false);
-+  //addVectorPasses(Level, OptimizePM, /* IsFullLTO */ false);
+-  addVectorPasses(Level, OptimizePM, LTOPhase);
++  //addVectorPasses(Level, OptimizePM, LTOPhase);
  
    invokeVectorizerEndEPCallbacks(OptimizePM, Level);
  
-@@ -2128,7 +2132,7 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
+@@ -2233,7 +2237,7 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
  
    MainFPM.addPass(LoopDistributePass());
  
--  addVectorPasses(Level, MainFPM, /* IsFullLTO */ true);
-+  //addVectorPasses(Level, MainFPM, /* IsFullLTO */ true);
+-  addVectorPasses(Level, MainFPM, ThinOrFullLTOPhase::FullLTOPostLink);
++  //addVectorPasses(Level, MainFPM, ThinOrFullLTOPhase::FullLTOPostLink);
  
    invokeVectorizerEndEPCallbacks(MainFPM, Level);
  
 diff --git a/llvm/lib/Transforms/InstCombine/InstCombineAddSub.cpp b/llvm/lib/Transforms/InstCombine/InstCombineAddSub.cpp
-index 981c5271f..5449c138c 100644
+index 72a6e64cc..edaa101da 100644
 --- a/llvm/lib/Transforms/InstCombine/InstCombineAddSub.cpp
 +++ b/llvm/lib/Transforms/InstCombine/InstCombineAddSub.cpp
-@@ -2742,19 +2742,6 @@ Instruction *InstCombinerImpl::visitSub(BinaryOperator &I) {
+@@ -2815,19 +2815,6 @@ Instruction *InstCombinerImpl::visitSub(BinaryOperator &I) {
    const APInt *ShAmt;
    Type *Ty = I.getType();
    unsigned BitWidth = Ty->getScalarSizeInBits();
@@ -159,10 +165,10 @@ index 981c5271f..5449c138c 100644
    // If we are subtracting a low-bit masked subset of some value from an add
    // of that same value with no low bits changed, that is clearing some low bits
 diff --git a/llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp b/llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp
-index 3beda6bc5..908b7a496 100644
+index b4961105c..8e54c2845 100644
 --- a/llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp
 +++ b/llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp
-@@ -1636,16 +1636,7 @@ Instruction *InstCombinerImpl::foldLogicOfIsFPClass(BinaryOperator &BO,
+@@ -1663,16 +1663,7 @@ Instruction *InstCombinerImpl::foldLogicOfIsFPClass(BinaryOperator &BO,
  ///   cond = select i1 neg, value.neg, value
  Instruction *InstCombinerImpl::canonicalizeConditionalNegationViaMathToSelect(
      BinaryOperator &I) {
@@ -174,30 +180,30 @@ index 3beda6bc5..908b7a496 100644
 -      !Cond->getType()->isIntOrIntVectorTy(1) ||
 -      !match(I.getOperand(0), m_c_Add(m_SExt(m_Specific(Cond)), m_Value(X))))
 -    return nullptr;
--  return SelectInst::Create(Cond, Builder.CreateNeg(X, X->getName() + ".neg"),
--                            X);
+-  return createSelectInstWithUnknownProfile(
+-      Cond, Builder.CreateNeg(X, X->getName() + ".neg"), X);
 +  return nullptr;
  }
  
  /// This a limited reassociation for a special case (see above) where we are
-@@ -2431,16 +2422,6 @@ Instruction *InstCombinerImpl::visitAnd(BinaryOperator &I) {
+@@ -2461,16 +2452,6 @@ Instruction *InstCombinerImpl::visitAnd(BinaryOperator &I) {
      return new ZExtInst(IsZero, Ty);
    }
  
 -  // (-(X & 1)) & Y --> (X & 1) == 0 ? 0 : Y
 -  Value *Neg;
 -  if (match(&I,
--            m_c_And(m_CombineAnd(m_Value(Neg),
--                                 m_OneUse(m_Neg(m_And(m_Value(), m_One())))),
+-            m_c_And(m_Value(Neg, m_OneUse(m_Neg(m_And(m_Value(), m_One())))),
 -                    m_Value(Y)))) {
 -    Value *Cmp = Builder.CreateIsNull(Neg);
--    return SelectInst::Create(Cmp, ConstantInt::getNullValue(Ty), Y);
+-    return createSelectInstWithUnknownProfile(Cmp,
+-                                              ConstantInt::getNullValue(Ty), Y);
 -  }
 -
    // Canonicalize:
    // (X +/- Y) & Y --> ~X & Y when Y is a power of 2.
    if (match(&I, m_c_And(m_Value(Y), m_OneUse(m_CombineOr(
-@@ -2585,61 +2566,6 @@ Instruction *InstCombinerImpl::visitAnd(BinaryOperator &I) {
+@@ -2615,61 +2596,6 @@ Instruction *InstCombinerImpl::visitAnd(BinaryOperator &I) {
        }
      }
  
@@ -214,8 +220,8 @@ index 3beda6bc5..908b7a496 100644
 -      int BitNum = IsShiftLeft ? Log2C - Log2ShiftC : Log2ShiftC - Log2C;
 -      assert(BitNum >= 0 && "Expected demanded bits to handle impossible mask");
 -      Value *Cmp = Builder.CreateICmpEQ(X, ConstantInt::get(Ty, BitNum));
--      return SelectInst::Create(Cmp, ConstantInt::get(Ty, *C),
--                                ConstantInt::getNullValue(Ty));
+-      return createSelectInstWithUnknownProfile(Cmp, ConstantInt::get(Ty, *C),
+-                                                ConstantInt::getNullValue(Ty));
 -    }
 -
 -    Constant *C1, *C2;
@@ -234,8 +240,8 @@ index 3beda6bc5..908b7a496 100644
 -          // ((C1 << X) >> C2) & C3 -> X == (cttz(C3)+C2-cttz(C1)) ? C3 : 0
 -          Constant *CmpC = ConstantExpr::getSub(LshrC, Log2C1);
 -          Value *Cmp = Builder.CreateICmpEQ(X, CmpC);
--          return SelectInst::Create(Cmp, ConstantInt::get(Ty, *C3),
--                                    ConstantInt::getNullValue(Ty));
+-          return createSelectInstWithUnknownProfile(
+-              Cmp, ConstantInt::get(Ty, *C3), ConstantInt::getNullValue(Ty));
 -        }
 -      }
 -
@@ -251,15 +257,15 @@ index 3beda6bc5..908b7a496 100644
 -          Constant *ShlC = ConstantExpr::getAdd(C2, Log2C1);
 -          Constant *CmpC = ConstantExpr::getSub(ShlC, Log2C3);
 -          Value *Cmp = Builder.CreateICmpEQ(X, CmpC);
--          return SelectInst::Create(Cmp, ConstantInt::get(Ty, *C3),
--                                    ConstantInt::getNullValue(Ty));
+-          return createSelectInstWithUnknownProfile(
+-              Cmp, ConstantInt::get(Ty, *C3), ConstantInt::getNullValue(Ty));
 -        }
 -      }
 -    }
    }
  
    // If we are clearing the sign bit of a floating-point value, convert this to
-@@ -2786,58 +2712,6 @@ Instruction *InstCombinerImpl::visitAnd(BinaryOperator &I) {
+@@ -2816,62 +2742,6 @@ Instruction *InstCombinerImpl::visitAnd(BinaryOperator &I) {
    if (Instruction *Sel = foldBinopOfSextBoolToSelect(I))
      return Sel;
  
@@ -271,27 +277,29 @@ index 3beda6bc5..908b7a496 100644
 -  Value *A, *B;
 -  if (match(&I, m_c_And(m_SExt(m_Value(A)), m_Value(B))) &&
 -      A->getType()->isIntOrIntVectorTy(1))
--    return SelectInst::Create(A, B, Constant::getNullValue(Ty));
+-    return createSelectInstWithUnknownProfile(A, B, Constant::getNullValue(Ty));
 -
 -  // Similarly, a 'not' of the bool translates to a swap of the select arms:
 -  // ~sext(A) & B / B & ~sext(A) --> A ? 0 : B
 -  if (match(&I, m_c_And(m_Not(m_SExt(m_Value(A))), m_Value(B))) &&
 -      A->getType()->isIntOrIntVectorTy(1))
--    return SelectInst::Create(A, Constant::getNullValue(Ty), B);
+-    return createSelectInstWithUnknownProfile(A, Constant::getNullValue(Ty), B);
 -
 -  // and(zext(A), B) -> A ? (B & 1) : 0
 -  if (match(&I, m_c_And(m_OneUse(m_ZExt(m_Value(A))), m_Value(B))) &&
 -      A->getType()->isIntOrIntVectorTy(1))
--    return SelectInst::Create(A, Builder.CreateAnd(B, ConstantInt::get(Ty, 1)),
--                              Constant::getNullValue(Ty));
+-    return createSelectInstWithUnknownProfile(
+-        A, Builder.CreateAnd(B, ConstantInt::get(Ty, 1)),
+-        Constant::getNullValue(Ty));
 -
 -  // (-1 + A) & B --> A ? 0 : B where A is 0/1.
 -  if (match(&I, m_c_And(m_OneUse(m_Add(m_ZExtOrSelf(m_Value(A)), m_AllOnes())),
 -                        m_Value(B)))) {
 -    if (A->getType()->isIntOrIntVectorTy(1))
--      return SelectInst::Create(A, Constant::getNullValue(Ty), B);
+-      return createSelectInstWithUnknownProfile(A, Constant::getNullValue(Ty),
+-                                                B);
 -    if (computeKnownBits(A, &I).countMaxActiveBits() <= 1) {
--      return SelectInst::Create(
+-      return createSelectInstWithUnknownProfile(
 -          Builder.CreateICmpEQ(A, Constant::getNullValue(A->getType())), B,
 -          Constant::getNullValue(Ty));
 -    }
@@ -303,7 +311,8 @@ index 3beda6bc5..908b7a496 100644
 -                        m_Value(Y))) &&
 -      *C == X->getType()->getScalarSizeInBits() - 1) {
 -    Value *IsNeg = Builder.CreateIsNeg(X, "isneg");
--    return SelectInst::Create(IsNeg, Y, ConstantInt::getNullValue(Ty));
+-    return createSelectInstWithUnknownProfile(IsNeg, Y,
+-                                              ConstantInt::getNullValue(Ty));
 -  }
 -  // If there's a 'not' of the shifted value, swap the select operands:
 -  // ~(iN X s>> (N-1)) & Y --> (X s< 0) ? 0 : Y -- with optional sext
@@ -312,13 +321,14 @@ index 3beda6bc5..908b7a496 100644
 -                        m_Value(Y))) &&
 -      *C == X->getType()->getScalarSizeInBits() - 1) {
 -    Value *IsNeg = Builder.CreateIsNeg(X, "isneg");
--    return SelectInst::Create(IsNeg, ConstantInt::getNullValue(Ty), Y);
+-    return createSelectInstWithUnknownProfile(IsNeg,
+-                                              ConstantInt::getNullValue(Ty), Y);
 -  }
 -
    // (~x) & y  -->  ~(x | (~y))  iff that gets rid of inversions
    if (sinkNotIntoOtherHandOfLogicalOp(I))
      return &I;
-@@ -4035,15 +3909,6 @@ Instruction *InstCombinerImpl::visitOr(BinaryOperator &I) {
+@@ -4323,16 +4193,6 @@ Instruction *InstCombinerImpl::visitOr(BinaryOperator &I) {
    if (Instruction *Sel = foldBinopOfSextBoolToSelect(I))
      return Sel;
  
@@ -329,12 +339,13 @@ index 3beda6bc5..908b7a496 100644
 -  //       canonicalization?
 -  if (match(&I, m_c_Or(m_OneUse(m_SExt(m_Value(A))), m_Value(B))) &&
 -      A->getType()->isIntOrIntVectorTy(1))
--    return SelectInst::Create(A, ConstantInt::getAllOnesValue(Ty), B);
+-    return createSelectInstWithUnknownProfile(
+-        A, ConstantInt::getAllOnesValue(Ty), B);
 -
    // Note: If we've gotten to the point of visiting the outer OR, then the
    // inner one couldn't be simplified.  If it was a constant, then it won't
    // be simplified by a later pass either, so we try swapping the inner/outer
-@@ -4082,19 +3947,6 @@ Instruction *InstCombinerImpl::visitOr(BinaryOperator &I) {
+@@ -4371,19 +4231,6 @@ Instruction *InstCombinerImpl::visitOr(BinaryOperator &I) {
      }
    }
  
@@ -347,14 +358,14 @@ index 3beda6bc5..908b7a496 100644
 -                         m_Deferred(X)))) {
 -      Value *NewICmpInst = Builder.CreateICmpSGT(X, Y);
 -      Value *AllOnes = ConstantInt::getAllOnesValue(Ty);
--      return SelectInst::Create(NewICmpInst, AllOnes, X);
+-      return createSelectInstWithUnknownProfile(NewICmpInst, AllOnes, X);
 -    }
 -  }
 -
    {
      // ((A & B) ^ A) | ((A & B) ^ B) -> A ^ B
      // (A ^ (A & B)) | (B ^ (A & B)) -> A ^ B
-@@ -4574,23 +4426,6 @@ static Instruction *canonicalizeAbs(BinaryOperator &Xor,
+@@ -4861,23 +4708,6 @@ static Instruction *canonicalizeAbs(BinaryOperator &Xor,
    if (Op0->hasNUses(2))
      std::swap(Op0, Op1);
  
@@ -378,7 +389,7 @@ index 3beda6bc5..908b7a496 100644
    return nullptr;
  }
  
-@@ -4730,10 +4565,6 @@ Instruction *InstCombinerImpl::foldNot(BinaryOperator &I) {
+@@ -5017,10 +4847,6 @@ Instruction *InstCombinerImpl::foldNot(BinaryOperator &I) {
      Value *NotY = Builder.CreateNot(Y, Y->getName() + ".not");
      return BinaryOperator::CreateOr(X, NotY);
    }
@@ -389,7 +400,7 @@ index 3beda6bc5..908b7a496 100644
  
    // ~(~X | Y) --> (X & ~Y)
    // ~(Y | ~X) --> (X & ~Y)
-@@ -4741,10 +4572,6 @@ Instruction *InstCombinerImpl::foldNot(BinaryOperator &I) {
+@@ -5028,10 +4854,6 @@ Instruction *InstCombinerImpl::foldNot(BinaryOperator &I) {
      Value *NotY = Builder.CreateNot(Y, Y->getName() + ".not");
      return BinaryOperator::CreateAnd(X, NotY);
    }
@@ -400,7 +411,7 @@ index 3beda6bc5..908b7a496 100644
  
    // Is this a 'not' (~) fed by a binary operator?
    BinaryOperator *NotVal;
-@@ -4984,19 +4811,6 @@ Instruction *InstCombinerImpl::visitXor(BinaryOperator &I) {
+@@ -5279,20 +5101,6 @@ Instruction *InstCombinerImpl::visitXor(BinaryOperator &I) {
        return BinaryOperator::CreateXor(Or, ConstantExpr::getNot(C1));
      }
  
@@ -415,12 +426,13 @@ index 3beda6bc5..908b7a496 100644
 -        !match(C1, m_AllOnes())) {
 -      assert(!C1->isZeroValue() && "Unexpected xor with 0");
 -      Value *IsNotNeg = Builder.CreateIsNotNeg(X);
--      return SelectInst::Create(IsNotNeg, Op1, Builder.CreateNot(Op1));
+-      return createSelectInstWithUnknownProfile(IsNotNeg, Op1,
+-                                                Builder.CreateNot(Op1));
 -    }
    }
  
    Type *Ty = I.getType();
-@@ -5174,23 +4988,6 @@ Instruction *InstCombinerImpl::visitXor(BinaryOperator &I) {
+@@ -5473,23 +5281,6 @@ Instruction *InstCombinerImpl::visitXor(BinaryOperator &I) {
      }
    }
  
@@ -445,19 +457,19 @@ index 3beda6bc5..908b7a496 100644
      if (auto *RHS = dyn_cast<ICmpInst>(I.getOperand(1)))
        if (Value *V = foldXorOfICmps(LHS, RHS, I))
 diff --git a/llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp b/llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp
-index e521c9d70..cd03ef399 100644
+index d7d38bf71..09ce179c8 100644
 --- a/llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp
 +++ b/llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp
-@@ -132,6 +132,8 @@ Instruction *InstCombinerImpl::SimplifyAnyMemTransfer(AnyMemTransferInst *MI) {
+@@ -134,6 +134,8 @@ Instruction *InstCombinerImpl::SimplifyAnyMemTransfer(AnyMemTransferInst *MI) {
    // that the store must be storing the constant value (else the memory
    // wouldn't be constant), and this must be a noop.
    if (!isModSet(AA->getModRefInfoMask(MI->getDest()))) {
 +    if (DL.isFilC())
 +      return nullptr;
      // Set the size of the copy to 0, it will be deleted on the next iteration.
-     MI->setLength(Constant::getNullValue(MI->getLength()->getType()));
+     MI->setLength((uint64_t)0);
      return MI;
-@@ -160,6 +162,9 @@ Instruction *InstCombinerImpl::SimplifyAnyMemTransfer(AnyMemTransferInst *MI) {
+@@ -162,6 +164,9 @@ Instruction *InstCombinerImpl::SimplifyAnyMemTransfer(AnyMemTransferInst *MI) {
    if (Size > 8 || (Size&(Size-1)))
      return nullptr;  // If not 1/2/4/8 bytes, exit.
  
@@ -467,7 +479,16 @@ index e521c9d70..cd03ef399 100644
    // If it is an atomic and alignment is less than the size then we will
    // introduce the unaligned memory access which will be later transformed
    // into libcall in CodeGen. This is not evident performance gain so disable
-@@ -1239,40 +1244,7 @@ Instruction *InstCombinerImpl::matchSAddSubSat(IntrinsicInst &MinMax1) {
+@@ -230,6 +235,8 @@ Instruction *InstCombinerImpl::SimplifyAnyMemSet(AnyMemSetInst *MI) {
+   // that the store must be storing the constant value (else the memory
+   // wouldn't be constant), and this must be a noop.
+   if (!isModSet(AA->getModRefInfoMask(MI->getDest()))) {
++    if (DL.isFilC())
++      return nullptr;
+     // Set the size of the copy to 0, it will be deleted on the next iteration.
+     MI->setLength((uint64_t)0);
+     return MI;
+@@ -1325,40 +1332,7 @@ Instruction *InstCombinerImpl::matchSAddSubSat(IntrinsicInst &MinMax1) {
  /// of constants.
  static Instruction *foldClampRangeOfTwo(IntrinsicInst *II,
                                          InstCombiner::BuilderTy &Builder) {
@@ -509,7 +530,7 @@ index e521c9d70..cd03ef399 100644
  }
  
  /// If this min/max has a constant operand and an operand that is a matching
-@@ -2178,15 +2150,6 @@ Instruction *InstCombinerImpl::visitCallInst(CallInst &CI) {
+@@ -2362,15 +2336,6 @@ Instruction *InstCombinerImpl::visitCallInst(CallInst &CI) {
    }
    case Intrinsic::bitreverse: {
      Value *IIOperand = II->getArgOperand(0);
@@ -526,10 +547,10 @@ index e521c9d70..cd03ef399 100644
      if (Instruction *crossLogicOpFold =
          foldBitOrderCrossLogicOp<Intrinsic::bitreverse>(IIOperand, Builder))
 diff --git a/llvm/lib/Transforms/InstCombine/InstCombineLoadStoreAlloca.cpp b/llvm/lib/Transforms/InstCombine/InstCombineLoadStoreAlloca.cpp
-index e791bc4b5..57df28ff8 100644
+index 5bca0bb88..44f532a62 100644
 --- a/llvm/lib/Transforms/InstCombine/InstCombineLoadStoreAlloca.cpp
 +++ b/llvm/lib/Transforms/InstCombine/InstCombineLoadStoreAlloca.cpp
-@@ -1411,7 +1411,7 @@ Instruction *InstCombinerImpl::visitStoreInst(StoreInst &SI) {
+@@ -1437,7 +1437,7 @@ Instruction *InstCombinerImpl::visitStoreInst(StoreInst &SI) {
  
    // If the RHS is an alloca with a single use, zapify the store, making the
    // alloca dead.
@@ -538,7 +559,7 @@ index e791bc4b5..57df28ff8 100644
      if (isa<AllocaInst>(Ptr))
        return eraseInstFromFunction(SI);
      if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(Ptr)) {
-@@ -1425,8 +1425,11 @@ Instruction *InstCombinerImpl::visitStoreInst(StoreInst &SI) {
+@@ -1451,8 +1451,11 @@ Instruction *InstCombinerImpl::visitStoreInst(StoreInst &SI) {
    // If we have a store to a location which is known constant, we can conclude
    // that the store must be storing the constant value (else the memory
    // wouldn't be constant), and this must be a noop.
@@ -552,10 +573,10 @@ index e791bc4b5..57df28ff8 100644
    // Do really simple DSE, to catch cases where there are several consecutive
    // stores to the same location, separated by a few arithmetic operations. This
 diff --git a/llvm/lib/Transforms/InstCombine/InstCombineMulDivRem.cpp b/llvm/lib/Transforms/InstCombine/InstCombineMulDivRem.cpp
-index d7310b1c7..914f93e31 100644
+index 9022a029a..96627fb85 100644
 --- a/llvm/lib/Transforms/InstCombine/InstCombineMulDivRem.cpp
 +++ b/llvm/lib/Transforms/InstCombine/InstCombineMulDivRem.cpp
-@@ -507,30 +507,6 @@ Instruction *InstCombinerImpl::visitMul(BinaryOperator &I) {
+@@ -514,30 +514,6 @@ Instruction *InstCombinerImpl::visitMul(BinaryOperator &I) {
        return SelectInst::Create(X, NegC, ConstantInt::getNullValue(Ty));
      }
  
@@ -586,7 +607,7 @@ index d7310b1c7..914f93e31 100644
    }
  
    // ((ashr X, 31) | 1) * X --> abs(X)
-@@ -1831,16 +1807,6 @@ Instruction *InstCombinerImpl::visitSDiv(BinaryOperator &I) {
+@@ -1839,16 +1815,6 @@ Instruction *InstCombinerImpl::visitSDiv(BinaryOperator &I) {
      return BinaryOperator::CreateNSWNeg(
          Builder.CreateSDiv(X, Y, I.getName(), I.isExact()));
  
@@ -603,7 +624,7 @@ index d7310b1c7..914f93e31 100644
    KnownBits KnownDividend = computeKnownBits(Op0, &I);
    if (!I.isExact() &&
        (match(Op1, m_Power2(Op1C)) || match(Op1, m_NegatedPower2(Op1C))) &&
-@@ -1877,13 +1843,6 @@ Instruction *InstCombinerImpl::visitSDiv(BinaryOperator &I) {
+@@ -1885,13 +1851,6 @@ Instruction *InstCombinerImpl::visitSDiv(BinaryOperator &I) {
      }
    }
  
@@ -617,7 +638,7 @@ index d7310b1c7..914f93e31 100644
    return nullptr;
  }
  
-@@ -2434,44 +2393,6 @@ Instruction *InstCombinerImpl::visitURem(BinaryOperator &I) {
+@@ -2442,44 +2401,6 @@ Instruction *InstCombinerImpl::visitURem(BinaryOperator &I) {
      return CastInst::CreateZExtOrBitCast(Cmp, Ty);
    }
  
@@ -663,22 +684,23 @@ index d7310b1c7..914f93e31 100644
  }
  
 diff --git a/llvm/lib/Transforms/InstCombine/InstCombineShifts.cpp b/llvm/lib/Transforms/InstCombine/InstCombineShifts.cpp
-index 550f095b2..d046be8f4 100644
+index 7700c54b6..0e321a68d 100644
 --- a/llvm/lib/Transforms/InstCombine/InstCombineShifts.cpp
 +++ b/llvm/lib/Transforms/InstCombine/InstCombineShifts.cpp
-@@ -1250,11 +1250,6 @@ Instruction *InstCombinerImpl::visitShl(BinaryOperator &I) {
+@@ -1251,12 +1251,6 @@ Instruction *InstCombinerImpl::visitShl(BinaryOperator &I) {
      if (match(Op0, m_Mul(m_Value(X), m_ImmConstant(C2))))
        return BinaryOperator::CreateMul(X, Builder.CreateShl(C2, C1));
  
 -    // shl (zext i1 X), C1 --> select (X, 1 << C1, 0)
 -    if (match(Op0, m_ZExt(m_Value(X))) && X->getType()->isIntOrIntVectorTy(1)) {
 -      auto *NewC = Builder.CreateShl(ConstantInt::get(Ty, 1), C1);
--      return SelectInst::Create(X, NewC, ConstantInt::getNullValue(Ty));
+-      return createSelectInstWithUnknownProfile(X, NewC,
+-                                                ConstantInt::getNullValue(Ty));
 -    }
    }
  
    if (match(Op0, m_One())) {
-@@ -1444,12 +1439,6 @@ Instruction *InstCombinerImpl::visitLShr(BinaryOperator &I) {
+@@ -1446,12 +1440,6 @@ Instruction *InstCombinerImpl::visitLShr(BinaryOperator &I) {
  
      if (match(Op0, m_SExt(m_Value(X)))) {
        unsigned SrcTyBitWidth = X->getType()->getScalarSizeInBits();
@@ -692,10 +714,10 @@ index 550f095b2..d046be8f4 100644
        if ((!Ty->isIntegerTy() || shouldChangeType(Ty, X->getType())) &&
            Op0->hasOneUse()) {
 diff --git a/llvm/lib/Transforms/InstCombine/InstructionCombining.cpp b/llvm/lib/Transforms/InstCombine/InstructionCombining.cpp
-index 91a1b61dd..4f2a55098 100644
+index 52c8916fc..a71dca10e 100644
 --- a/llvm/lib/Transforms/InstCombine/InstructionCombining.cpp
 +++ b/llvm/lib/Transforms/InstCombine/InstructionCombining.cpp
-@@ -3408,6 +3408,9 @@ static bool isRemovableWrite(CallBase &CB, Value *UsedV,
+@@ -3609,6 +3609,9 @@ static bool isRemovableWrite(CallBase &CB, Value *UsedV,
  static std::optional<ModRefInfo>
  isAllocSiteRemovable(Instruction *AI, SmallVectorImpl<WeakTrackingVH> &Users,
                       const TargetLibraryInfo &TLI, bool KnowInit) {
@@ -706,10 +728,10 @@ index 91a1b61dd..4f2a55098 100644
    const std::optional<StringRef> Family = getAllocationFamily(AI, &TLI);
    Worklist.push_back(AI);
 diff --git a/llvm/lib/Transforms/Scalar/SROA.cpp b/llvm/lib/Transforms/Scalar/SROA.cpp
-index f537b0d3f..aa268905b 100644
+index 43a6269c3..c376294cc 100644
 --- a/llvm/lib/Transforms/Scalar/SROA.cpp
 +++ b/llvm/lib/Transforms/Scalar/SROA.cpp
-@@ -1053,6 +1053,8 @@ private:
+@@ -1071,6 +1071,8 @@ private:
                          << AllocSize << " byte alloca:\n"
                          << "    alloca: " << AS.AI << "\n"
                          << "       use: " << I << "\n");
@@ -718,7 +740,7 @@ index f537b0d3f..aa268905b 100644
        return markAsDead(I);
      }
  
-@@ -1073,6 +1075,8 @@ private:
+@@ -1091,6 +1093,8 @@ private:
                          << "    alloca: " << AS.AI << "\n"
                          << "       use: " << I << "\n");
        EndOffset = AllocSize;
@@ -726,8 +748,8 @@ index f537b0d3f..aa268905b 100644
 +        PI.setAborted(&I);
      }
  
-     AS.Slices.push_back(Slice(BeginOffset, EndOffset, U, IsSplittable));
-@@ -1163,6 +1167,8 @@ private:
+     AS.Slices.push_back(
+@@ -1182,6 +1186,8 @@ private:
                          << AllocSize << " byte alloca:\n"
                          << "    alloca: " << AS.AI << "\n"
                          << "       use: " << SI << "\n");
@@ -736,7 +758,7 @@ index f537b0d3f..aa268905b 100644
        return markAsDead(SI);
      }
  
-@@ -1175,9 +1181,12 @@ private:
+@@ -1194,9 +1200,12 @@ private:
      assert(II.getRawDest() == *U && "Pointer use is not the destination?");
      ConstantInt *Length = dyn_cast<ConstantInt>(II.getLength());
      if ((Length && Length->getValue() == 0) ||
@@ -750,7 +772,7 @@ index f537b0d3f..aa268905b 100644
  
      if (!IsOffsetKnown)
        return PI.setAborted(&II);
-@@ -1212,6 +1221,8 @@ private:
+@@ -1231,6 +1240,8 @@ private:
            MemTransferSliceMap.find(&II);
        if (MTPI != MemTransferSliceMap.end())
          AS.Slices[MTPI->second].kill();
@@ -759,7 +781,7 @@ index f537b0d3f..aa268905b 100644
        return markAsDead(II);
      }
  
-@@ -1387,6 +1398,8 @@ private:
+@@ -1423,6 +1434,8 @@ private:
      // FIXME: This should instead be escaped in the event we're instrumenting
      // for address sanitization.
      if (Offset.uge(AllocSize)) {
@@ -768,7 +790,7 @@ index f537b0d3f..aa268905b 100644
        AS.DeadOperands.push_back(U);
        return;
      }
-@@ -2741,6 +2754,9 @@ class AllocaSliceRewriter : public InstVisitor<AllocaSliceRewriter, bool> {
+@@ -2854,6 +2867,9 @@ class AllocaSliceRewriter : public InstVisitor<AllocaSliceRewriter, bool> {
    // original alloca.
    uint64_t NewBeginOffset = 0, NewEndOffset = 0;
  
@@ -778,7 +800,7 @@ index f537b0d3f..aa268905b 100644
    uint64_t SliceSize = 0;
    bool IsSplittable = false;
    bool IsSplit = false;
-@@ -2772,10 +2788,12 @@ public:
+@@ -2885,10 +2901,12 @@ public:
                        uint64_t NewAllocaEndOffset, bool IsIntegerPromotable,
                        VectorType *PromotableVecTy,
                        SmallSetVector<PHINode *, 8> &PHIUsers,
@@ -792,7 +814,7 @@ index f537b0d3f..aa268905b 100644
          NewAllocaTy(NewAI.getAllocatedType()),
          IntTy(
              IsIntegerPromotable
-@@ -2891,7 +2909,7 @@ private:
+@@ -3211,7 +3229,7 @@ private:
    /// alignment is itself suitable, this will return zero.
    Align getSliceAlign() {
      return commonAlignment(NewAI.getAlign(),
@@ -801,9 +823,9 @@ index f537b0d3f..aa268905b 100644
    }
  
    unsigned getIndex(uint64_t Offset) {
-@@ -4983,6 +5001,14 @@ AllocaInst *SROA::rewritePartition(AllocaInst &AI, AllocaSlices &AS,
-   if (VecTy)
-     SliceTy = VecTy;
+@@ -5328,6 +5346,14 @@ AllocaInst *SROA::rewritePartition(AllocaInst &AI, AllocaSlices &AS,
+   auto [PartitionTy, IsIntegerWideningViable, VecTy] =
+       selectPartitionType(P, DL, AI, *C);
  
 +  bool NoType = true;
 +  for (Slice& S : P) {
@@ -816,27 +838,25 @@ index f537b0d3f..aa268905b 100644
    // Check for the case where we're going to rewrite to a new alloca of the
    // exact same type as the original, and with the same access offsets. In that
    // case, re-use the existing alloca, but still run through the rewriter to
-@@ -5021,10 +5047,17 @@ AllocaInst *SROA::rewritePartition(AllocaInst &AI, AllocaSlices &AS,
-   unsigned NumUses = 0;
+@@ -5367,9 +5393,16 @@ AllocaInst *SROA::rewritePartition(AllocaInst &AI, AllocaSlices &AS,
    SmallSetVector<PHINode *, 8> PHIUsers;
    SmallSetVector<SelectInst *, 8> SelectUsers;
--
-+  
+ 
 +  // Fil-C Hack!
 +  // FIXME: We can almost certainly get rid of this, once we have misaligned capability support.
 +  constexpr uint64_t FilCWordSize = 8;
 +  uint64_t Skew = 0;
 +  if (DL.isFilC() && NoType && P.size() >= FilCWordSize)
 +    Skew = P.beginOffset() % FilCWordSize;
-+  
++
    AllocaSliceRewriter Rewriter(DL, AS, *this, AI, *NewAI, P.beginOffset(),
-                                P.endOffset(), IsIntegerPromotable, VecTy,
+                                P.endOffset(), IsIntegerWideningViable, VecTy,
 -                               PHIUsers, SelectUsers);
 +                               PHIUsers, SelectUsers, Skew);
    bool Promotable = true;
-   for (Slice *S : P.splitSliceTails()) {
-     Promotable &= Rewriter.visit(S);
-@@ -5098,6 +5131,41 @@ AllocaInst *SROA::rewritePartition(AllocaInst &AI, AllocaSlices &AS,
+   // Check whether we can have tree-structured merge.
+   if (auto DeletedValues = Rewriter.rewriteTreeStructuredMerge(P)) {
+@@ -5450,6 +5483,41 @@ AllocaInst *SROA::rewritePartition(AllocaInst &AI, AllocaSlices &AS,
      if (NewAI == &AI)
        return nullptr;
  

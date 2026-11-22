@@ -10,9 +10,9 @@ BUILD_SYSTEM="make"
 MAKE_ARGS=""
 INSTALL_ARGS=""
 TEST_CMD=""
-POLICY_CLASS="P3-BuildOpt"
-POLICY_RATIONALE="Uses upstream ZSTD_NO_ASM=1 build option to avoid inline assembly without patching source files."
-FILC_ORIGIN_REF="cede3de02b42:build_zstd.sh"
+POLICY_CLASS="P2-Package"
+POLICY_RATIONALE="Uses ZSTD_NO_ASM=1 to disable external x86-64 assembly files plus a minimal !defined(__FILC__) guard on x86-64 inline asm (cmova pointer selection in ZSTD_selectAddr and .p2align/nop loop alignment hints) to fall back to upstream portable C."
+FILC_ORIGIN_REF="cede3de02b42:projects/zstd-1.5.7"
 
 port_build() {
   ZSTD_NO_ASM=1 CPPFLAGS="-I$PIZFIX/include" LDFLAGS="-L$PIZFIX/lib" \

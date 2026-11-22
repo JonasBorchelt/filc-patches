@@ -86,12 +86,42 @@ Building and packaging software with Fil-C follows a toolchain-first policy desi
 
 ## Provenance & Licensing
 
-This repository contains patches and build/test glue referencing upstream
-projects under their respective open-source licenses:
+This repository contains patch series, provenance metadata, and build/test
+scripts referencing upstream projects pinned in `UPSTREAM`. Each upstream
+component remains under its own license, verified against the pinned source
+files:
 
-- **Fil-C** (`pizlonator/fil-c`): BSD-2-Clause License (copyright Epic Games,
-  Inc. and Filip Pizlo). Every adopted patch and runtime path documents its
-  exact origin commits.
-- **LLVM / Clang / LLD / compiler-rt / libc++ / libc++abi**: Apache License v2.0
-  with LLVM Exceptions.
-- **musl**: MIT License.
+- **Fil-C compiler & C++ libraries** (`pizlonator/fil-c` @ `cede3de02b42`,
+  patches in `llvm/` and `runtime/cxx/`): **Apache License v2.0 with LLVM
+  Exceptions** (`Apache-2.0 WITH LLVM-exception`) — see Fil-C `README.md`
+  (`## License`), `llvm/LICENSE.TXT`, `clang/LICENSE.TXT`, `libcxx/LICENSE.TXT`,
+  `libcxxabi/LICENSE.TXT`, and SPDX headers in the Fil-C compiler files (e.g.,
+  `llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp`).
+- **Fil-C runtime** (`pizlonator/fil-c` @ `cede3de02b42`, fetched sparsely into
+  `libpas/`, `filc/{include,src,main}`, `yolounwind/`, and
+  `projects/zegarmistrz/include`): **BSD-2-Clause** (`Copyright (c) 2018-2022
+  Apple Inc.`, `Copyright (c) 2023-2026 Epic Games, Inc.`, `Copyright (c) 2026
+  Filip Pizlo`) — see `libpas/LICENSE.txt` and per-file headers
+  (`filc/include/stdfil.h`, `filc/main/main.c`, `yolounwind/yolounwind.c`,
+  `projects/zegarmistrz/include/zegarmistrz.h`). Specific files within these
+  runtime paths carry additional/distinct upstream notices: `setproctitle` from
+  OpenSSH 10.3p1 (**BSD-3-Clause**, documented in `libpas/LICENSE.txt`),
+  `filc/include/unwind.h` (**Apache-2.0 WITH LLVM-exception**, derived from
+  LLVM `libunwind`), and `filc/src/snprintf.c` (permissive notice,
+  `Copyright Patrick Powell 1995`).
+- **LLVM / Clang / LLD / `compiler-rt` / `libc++` / `libc++abi`**
+  (`llvm/llvm-project` @ `llvmorg-23.1.6` / `5b10d2d74929`): **Apache License
+  v2.0 with LLVM Exceptions** (`Apache-2.0 WITH LLVM-exception`) — see
+  `LICENSE.TXT`, `llvm/LICENSE.TXT`, `clang/LICENSE.TXT`, `lld/LICENSE.TXT`,
+  `compiler-rt/LICENSE.TXT`, `libcxx/LICENSE.TXT`, and `libcxxabi/LICENSE.TXT`.
+- **musl** (`f314e133929b`) and **Fil-C `yolomusl` / `usermusl`**
+  (`libc/musl/`): **MIT License** (`Copyright © 2005-2020 Rich Felker, et al.`,
+  with compatible permissive third-party portions listed in `COPYRIGHT`) — see
+  upstream musl `COPYRIGHT` and Fil-C `projects/yolomusl/COPYRIGHT` /
+  `projects/usermusl/COPYRIGHT`. The `libc/musl/usermusl/01-usermusl-filc.patch`
+  series additionally carries BSD-licensed components with preserved file
+  headers (Regents of the University of California, `Copyright (c) 1991, 1993`;
+  Colin Percival and Alexander Peslyak, BSD-2-Clause).
+
+Every adopted patch and runtime path documents its exact upstream origin
+commits (`Fil-C-Origin-Commits` and `runtime/filc/PROVENANCE.md`).

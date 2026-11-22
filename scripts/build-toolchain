@@ -1,0 +1,396 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Build the complete Fil-C Linux musl toolchain against the pinned LLVM release:
+#   1. LLVM + Clang + LLD
+#   2. compiler-rt (builtins + crt -> crtbegin.o, crtend.o, libyolort.a)
+#   3. yolounwind (libyolounwind.a)
+#   4. pizfix/os-include (Linux kernel UAPI headers)
+#   5. yolomusl (libyoloc.so/a, ld-fil1-<arch>.so, CRT objects, yolo-include)
+#   6. Fil-C runtime (libpas + filc/{include,src,main} -> libpizlo.so/a, filc_crt.o)
+#   7. usermusl (pizlonated libc.so/a + headers)
+#   8. libc++ + libc++abi (pizlonated C++ runtime + headers)
+#
+# Usage: scripts/build-toolchain [WORK_ROOT]
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../UPSTREAM
+source "$REPO_ROOT/UPSTREAM"
+
+WORK_ROOT="${1:-$REPO_ROOT/.work/toolchain}"
+mkdir -p "$WORK_ROOT"
+WORK_ROOT="$(cd "$WORK_ROOT" && pwd)"
+
+LLVM_SRC="$WORK_ROOT/llvm-project"
+RUNTIME_SRC="$WORK_ROOT/filc-runtime"
+YOLOMUSL_SRC="$WORK_ROOT/yolomusl"
+USERMUSL_SRC="$WORK_ROOT/usermusl"
+BUILD_DIR="$WORK_ROOT/build"
+PIZFIX="$WORK_ROOT/pizfix"
+CRT_BUILD_DIR="$WORK_ROOT/compiler-rt-build"
+RUNTIMES_BUILD_DIR="$WORK_ROOT/runtimes-build"
+
+ARCH="$(uname -m)"
+case "$ARCH" in
+  amd64|x86_64) ARCH="x86_64" ;;
+  arm64|aarch64) ARCH="aarch64" ;;
+  *)
+    echo "error: unsupported host architecture: $ARCH" >&2
+    exit 1
+    ;;
+esac
+
+NPROC="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)"
+if [[ -r /proc/meminfo ]]; then
+  MEM_MB="$(awk '/MemTotal:/ {printf "%d", $2/1024}' /proc/meminfo)"
+else
+  MEM_MB="$(( $(sysctl -n hw.memsize 2>/dev/null || echo 8589934592) / 1024 / 1024 ))"
+fi
+
+if (( MEM_MB >= 24576 )); then
+  DEFAULT_COMPILE_JOBS="$NPROC"
+  DEFAULT_LINK_JOBS=2
+else
+  DEFAULT_COMPILE_JOBS=$(( (MEM_MB - 1024) / 2560 ))
+  (( DEFAULT_COMPILE_JOBS < 1 )) && DEFAULT_COMPILE_JOBS=1
+  DEFAULT_LINK_JOBS=1
+fi
+
+COMPILE_JOBS="${FILC_COMPILE_JOBS:-$DEFAULT_COMPILE_JOBS}"
+LINK_JOBS="${FILC_LINK_JOBS:-$DEFAULT_LINK_JOBS}"
+(( COMPILE_JOBS > NPROC )) && COMPILE_JOBS="$NPROC"
+
+HOST_CC="${HOST_CC:-clang}"
+HOST_CXX="${HOST_CXX:-clang++}"
+
+echo "=== Fil-C Full Toolchain Build ==="
+echo "WORK_ROOT:    $WORK_ROOT"
+echo "ARCH:         $ARCH"
+echo "LLVM:         ${LLVM_TAG:-$LLVM_COMMIT} ($LLVM_COMMIT)"
+echo "FILC_COMMIT:  $FILC_COMMIT"
+echo "MUSL_COMMIT:  $MUSL_COMMIT"
+echo "Host:         nproc=${NPROC}, mem=${MEM_MB} MiB -> compile_jobs=${COMPILE_JOBS}, link_jobs=${LINK_JOBS}"
+
+T_TOTAL_START="$(date +%s)"
+
+# ---------------------------------------------------------------------------
+# Stage 0: Fetch and patch sources
+# ---------------------------------------------------------------------------
+if [[ "${FILC_SKIP_FETCH:-0}" != "1" ]]; then
+  echo "=== [0/8] Fetching & applying LLVM, Fil-C runtime, yolomusl, usermusl ==="
+  APPLY_LLVM_ARGS=(--sparse)
+  [[ -n "${FILC_LLVM_REFERENCE:-}" ]] && APPLY_LLVM_ARGS+=(--reference "$FILC_LLVM_REFERENCE")
+  "$REPO_ROOT/scripts/apply" "${APPLY_LLVM_ARGS[@]}" "$LLVM_SRC"
+
+  FETCH_RT_ARGS=()
+  [[ -n "${FILC_RUNTIME_REFERENCE:-}" ]] && FETCH_RT_ARGS+=(--reference "$FILC_RUNTIME_REFERENCE")
+  "$REPO_ROOT/scripts/fetch-runtime" "${FETCH_RT_ARGS[@]}" "$RUNTIME_SRC"
+
+  APPLY_YOLO_ARGS=(yolomusl)
+  [[ -n "${FILC_MUSL_REFERENCE:-}" ]] && APPLY_YOLO_ARGS+=(--reference "$FILC_MUSL_REFERENCE")
+  "$REPO_ROOT/scripts/apply-musl" "${APPLY_YOLO_ARGS[@]}" "$YOLOMUSL_SRC"
+
+  # Reuse yolomusl git object store so musl is only downloaded once.
+  "$REPO_ROOT/scripts/apply-musl" usermusl --reference "$YOLOMUSL_SRC" "$USERMUSL_SRC"
+fi
+
+# Fresh pizfix sysroot
+rm -rf "$PIZFIX"
+mkdir -p \
+  "$PIZFIX/include" \
+  "$PIZFIX/stdfil-include" \
+  "$PIZFIX/musl-include" \
+  "$PIZFIX/bin" \
+  "$PIZFIX/sbin" \
+  "$PIZFIX/libexec" \
+  "$PIZFIX/share" \
+  "$PIZFIX/lib" \
+  "$PIZFIX/lib_gcverify" \
+  "$PIZFIX/lib_test" \
+  "$PIZFIX/lib_test_gcverify" \
+  "$PIZFIX/man/man1"
+
+# ---------------------------------------------------------------------------
+# Stage 1: LLVM + Clang + LLD
+# ---------------------------------------------------------------------------
+echo "=== [1/8] Building LLVM + Clang + LLD ==="
+T_S1="$(date +%s)"
+LLVM_CMAKE_ARGS=(
+  -S "$LLVM_SRC/llvm"
+  -B "$BUILD_DIR"
+  -G Ninja
+  -DCMAKE_BUILD_TYPE=Release
+  -DLLVM_ENABLE_ASSERTIONS=OFF
+  -DLLVM_TARGETS_TO_BUILD="X86;AArch64"
+  -DLLVM_ENABLE_PROJECTS="clang;lld"
+  -DCLANG_ENABLE_CIR=OFF
+  -DLLVM_PARALLEL_LINK_JOBS="$LINK_JOBS"
+  -DLLVM_ENABLE_LIBXML2=OFF
+  -DLLVM_ENABLE_LIBEDIT=OFF
+  -DLLVM_ENABLE_LIBPFM=OFF
+  -DLLVM_ENABLE_ZLIB=OFF
+  -DLLVM_ENABLE_ZSTD=OFF
+  -DLLVM_ENABLE_CURL=OFF
+  -DLLVM_ENABLE_HTTPLIB=OFF
+  -DLLVM_INCLUDE_BENCHMARKS=OFF
+  -DLLVM_INCLUDE_EXAMPLES=OFF
+  -DLLVM_INCLUDE_TESTS=OFF
+  -DLLVM_INCLUDE_DOCS=OFF
+  -DCLANG_INCLUDE_TESTS=OFF
+  -DCLANG_INCLUDE_DOCS=OFF
+)
+
+if command -v "$HOST_CC" >/dev/null 2>&1 && command -v "$HOST_CXX" >/dev/null 2>&1; then
+  LLVM_CMAKE_ARGS+=(-DCMAKE_C_COMPILER="$HOST_CC" -DCMAKE_CXX_COMPILER="$HOST_CXX")
+fi
+if command -v ld.lld >/dev/null 2>&1; then
+  LLVM_CMAKE_ARGS+=(-DLLVM_ENABLE_LLD=ON)
+fi
+if command -v ccache >/dev/null 2>&1; then
+  LLVM_CMAKE_ARGS+=(-DLLVM_CCACHE_BUILD=ON)
+fi
+
+cmake "${LLVM_CMAKE_ARGS[@]}"
+ninja -C "$BUILD_DIR" -j"$COMPILE_JOBS" clang lld
+
+test -x "$BUILD_DIR/bin/clang"
+test -x "$BUILD_DIR/bin/clang++"
+test -x "$BUILD_DIR/bin/ld.lld"
+echo "STAGE1_LLVM_SECONDS=$(( $(date +%s) - T_S1 ))"
+
+# ---------------------------------------------------------------------------
+# Stage 2: compiler-rt (builtins + crt)
+# ---------------------------------------------------------------------------
+echo "=== [2/8] Building compiler-rt (builtins + crt) ==="
+T_S2="$(date +%s)"
+rm -rf "$CRT_BUILD_DIR"
+cmake -S "$LLVM_SRC/runtimes" -B "$CRT_BUILD_DIR" -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_C_COMPILER="$HOST_CC" \
+  -DCMAKE_CXX_COMPILER="$HOST_CXX" \
+  -DCMAKE_ASM_COMPILER="$HOST_CC" \
+  -DLLVM_ENABLE_RUNTIMES="compiler-rt" \
+  -DLLVM_ENABLE_PER_TARGET_RUNTIME_DIR=OFF \
+  -DCOMPILER_RT_BUILD_BUILTINS=ON \
+  -DCOMPILER_RT_BUILD_CRT=ON \
+  -DCOMPILER_RT_CRT_USE_EH_FRAME_REGISTRY=ON \
+  -DCOMPILER_RT_BUILD_SANITIZERS=OFF \
+  -DCOMPILER_RT_BUILD_XRAY=OFF \
+  -DCOMPILER_RT_BUILD_LIBFUZZER=OFF \
+  -DCOMPILER_RT_BUILD_PROFILE=OFF \
+  -DCOMPILER_RT_BUILD_CTX_PROFILE=OFF \
+  -DCOMPILER_RT_BUILD_MEMPROF=OFF \
+  -DCOMPILER_RT_BUILD_ORC=OFF \
+  -DCOMPILER_RT_BUILD_GWP_ASAN=OFF \
+  -DCOMPILER_RT_DEFAULT_TARGET_TRIPLE="${ARCH}-linux-gnu" \
+  -DLLVM_INCLUDE_TESTS=OFF
+
+ninja -C "$CRT_BUILD_DIR" -j"$COMPILE_JOBS" builtins crt
+
+CRTBEGIN_OBJ="$(find "$CRT_BUILD_DIR" -name "clang_rt.crtbegin-${ARCH}.o" -o -name "clang_rt.crtbegin.o" | head -n 1)"
+CRTEND_OBJ="$(find "$CRT_BUILD_DIR" -name "clang_rt.crtend-${ARCH}.o" -o -name "clang_rt.crtend.o" | head -n 1)"
+BUILTINS_LIB="$(find "$CRT_BUILD_DIR" -name "libclang_rt.builtins-${ARCH}.a" -o -name "libclang_rt.builtins.a" | head -n 1)"
+
+if [[ -z "$CRTBEGIN_OBJ" || -z "$CRTEND_OBJ" || -z "$BUILTINS_LIB" ]]; then
+  echo "error: missing compiler-rt outputs in $CRT_BUILD_DIR" >&2
+  find "$CRT_BUILD_DIR" -maxdepth 5 -name '*clang_rt*' >&2 || true
+  exit 1
+fi
+
+cp "$CRTBEGIN_OBJ" "$PIZFIX/lib/crtbegin.o"
+cp "$CRTEND_OBJ" "$PIZFIX/lib/crtend.o"
+cp "$BUILTINS_LIB" "$PIZFIX/lib/libyolort.a"
+echo "STAGE2_COMPILER_RT_SECONDS=$(( $(date +%s) - T_S2 ))"
+
+# ---------------------------------------------------------------------------
+# Stage 3: yolounwind
+# ---------------------------------------------------------------------------
+echo "=== [3/8] Building yolounwind ==="
+T_S3="$(date +%s)"
+make -C "$RUNTIME_SRC/yolounwind" clean || true
+make -C "$RUNTIME_SRC/yolounwind" -j"$COMPILE_JOBS"
+cp "$RUNTIME_SRC/yolounwind/libyolounwind.a" "$PIZFIX/lib/libyolounwind.a"
+echo "STAGE3_YOLOUNWIND_SECONDS=$(( $(date +%s) - T_S3 ))"
+
+# ---------------------------------------------------------------------------
+# Stage 4: pizfix/os-include
+# ---------------------------------------------------------------------------
+echo "=== [4/8] Setting up pizfix/os-include ==="
+rm -rf "$PIZFIX/os-include"
+mkdir -p "$PIZFIX/os-include"
+ln -s /usr/include/linux "$PIZFIX/os-include/linux"
+if [[ -d "/usr/include/${ARCH}-linux-gnu/asm" ]]; then
+  ln -s "/usr/include/${ARCH}-linux-gnu/asm" "$PIZFIX/os-include/asm"
+elif [[ -d /usr/include/asm ]]; then
+  ln -s /usr/include/asm "$PIZFIX/os-include/asm"
+else
+  echo "error: kernel asm headers not found under /usr/include (install linux-libc-dev)" >&2
+  exit 1
+fi
+ln -s /usr/include/asm-generic "$PIZFIX/os-include/asm-generic"
+
+# ---------------------------------------------------------------------------
+# Stage 5: yolomusl
+# ---------------------------------------------------------------------------
+echo "=== [5/8] Building yolomusl ==="
+T_S5="$(date +%s)"
+(
+  cd "$YOLOMUSL_SRC"
+  CC="$HOST_CC" ./configure \
+    --prefix="$PIZFIX/yolo" \
+    --syslibdir="$PIZFIX/yolo/lib" \
+    LIBCC="$PIZFIX/lib/libyolort.a"
+  make clean || true
+  make -j"$COMPILE_JOBS"
+  make install
+)
+
+mv "$PIZFIX/yolo/lib/libyoloc.so" "$PIZFIX/lib/"
+mv "$PIZFIX/yolo/lib/libyoloc.a" "$PIZFIX/lib/"
+mv "$PIZFIX/yolo/lib/crt1.o" "$PIZFIX/lib/"
+mv "$PIZFIX/yolo/lib/crti.o" "$PIZFIX/lib/"
+mv "$PIZFIX/yolo/lib/crtn.o" "$PIZFIX/lib/"
+mv "$PIZFIX/yolo/lib/rcrt1.o" "$PIZFIX/lib/"
+mv "$PIZFIX/yolo/lib/Scrt1.o" "$PIZFIX/lib/"
+rm -f "$PIZFIX/lib/libyolom.a"
+ar cr "$PIZFIX/lib/libyolom.a"
+ln -fs libyoloc.so "$PIZFIX/lib/ld-fil1-${ARCH}.so"
+rm -rf "$PIZFIX/yolo-include"
+mv "$PIZFIX/yolo/include" "$PIZFIX/yolo-include"
+rm -rf "$PIZFIX/yolo"
+echo "STAGE5_YOLOMUSL_SECONDS=$(( $(date +%s) - T_S5 ))"
+
+# ---------------------------------------------------------------------------
+# Stage 6: Fil-C runtime (libpas + filc/{include,src,main})
+# ---------------------------------------------------------------------------
+echo "=== [6/8] Building Fil-C runtime (libpizlo + CRT) ==="
+T_S6="$(date +%s)"
+# Wire relative ../pizfix and ../build inside RUNTIME_SRC so Makefile-setup
+# and libpas/Makefile resolve directly to our unified layout.
+ln -sfn "$PIZFIX" "$RUNTIME_SRC/pizfix"
+ln -sfn "$BUILD_DIR" "$RUNTIME_SRC/build"
+
+(
+  cd "$RUNTIME_SRC/libpas"
+  make -f Makefile-setup
+  make -f Makefile clean || true
+  make -f Makefile -j"$COMPILE_JOBS" \
+    FILC_OUTPUT_ROOT="$PIZFIX" \
+    FILC_CLANG="$BUILD_DIR/bin/clang" \
+    HOST_CLANG="$HOST_CC"
+)
+echo "STAGE6_RUNTIME_SECONDS=$(( $(date +%s) - T_S6 ))"
+
+# ---------------------------------------------------------------------------
+# Stage 7: usermusl
+# ---------------------------------------------------------------------------
+echo "=== [7/8] Building usermusl ==="
+T_S7="$(date +%s)"
+(
+  cd "$USERMUSL_SRC"
+  CC="$BUILD_DIR/bin/clang -yolo-assembler" ./configure \
+    --prefix="$PIZFIX" \
+    LIBCC=-lyolort
+  make clean || true
+  make -j"$COMPILE_JOBS"
+  make install
+)
+echo "STAGE7_USERMUSL_SECONDS=$(( $(date +%s) - T_S7 ))"
+
+# ---------------------------------------------------------------------------
+# Stage 8: libc++ and libc++abi
+# ---------------------------------------------------------------------------
+echo "=== [8/8] Building libc++ and libc++abi ==="
+T_S8="$(date +%s)"
+TRIPLE="$("$BUILD_DIR/bin/clang" -print-target-triple)"
+echo "Target triple: $TRIPLE"
+
+rm -rf "$RUNTIMES_BUILD_DIR" "$BUILD_DIR/include/c++" "$BUILD_DIR/include/$TRIPLE/c++"
+mkdir -p "$RUNTIMES_BUILD_DIR"
+
+cmake -S "$LLVM_SRC/runtimes" -B "$RUNTIMES_BUILD_DIR" -G Ninja \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DCMAKE_C_COMPILER="$BUILD_DIR/bin/clang" \
+  -DCMAKE_CXX_COMPILER="$BUILD_DIR/bin/clang++" \
+  -DCMAKE_ASM_COMPILER="$BUILD_DIR/bin/clang" \
+  -DCMAKE_C_COMPILER_WORKS=ON \
+  -DCMAKE_CXX_COMPILER_WORKS=ON \
+  -DCMAKE_ASM_COMPILER_WORKS=ON \
+  -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi" \
+  -DLLVM_DEFAULT_TARGET_TRIPLE="$TRIPLE" \
+  -DLLVM_ENABLE_PER_TARGET_RUNTIME_DIR=ON \
+  -DLIBCXXABI_HAS_PTHREAD_API=ON \
+  -DLIBCXX_ENABLE_EXCEPTIONS=ON \
+  -DLIBCXXABI_ENABLE_EXCEPTIONS=ON \
+  -DLIBCXX_HAS_PTHREAD_API=ON \
+  -DLIBCXX_HAS_MUSL_LIBC=ON \
+  -DLIBCXXABI_USE_LLVM_UNWINDER=OFF \
+  -DLIBCXX_FORCE_LIBCXXABI=ON \
+  -DLLVM_ENABLE_ASSERTIONS=ON \
+  -DLIBCXX_HARDENING_MODE=extensive \
+  -DLLVM_INCLUDE_TESTS=OFF
+
+ninja -C "$RUNTIMES_BUILD_DIR" -j"$COMPILE_JOBS"
+
+# Install C++ headers into LLVM build tree (where Fil-C clang++ driver looks)
+rm -rf "$BUILD_DIR/include/c++"
+cp -R "$RUNTIMES_BUILD_DIR/include/c++" "$BUILD_DIR/include/c++"
+mkdir -p "$BUILD_DIR/include/$TRIPLE"
+rm -rf "$BUILD_DIR/include/$TRIPLE/c++"
+cp -R "$RUNTIMES_BUILD_DIR/include/$TRIPLE/c++" "$BUILD_DIR/include/$TRIPLE/c++"
+
+if [[ -d "$RUNTIMES_BUILD_DIR/modules/c++" ]]; then
+  mkdir -p "$BUILD_DIR/modules"
+  rm -rf "$BUILD_DIR/modules/c++"
+  cp -R "$RUNTIMES_BUILD_DIR/modules/c++" "$BUILD_DIR/modules/c++"
+fi
+
+# Install libc++ / libc++abi libraries into pizfix/lib
+CXX_LIB_DIR="$RUNTIMES_BUILD_DIR/lib/$TRIPLE"
+cp "$CXX_LIB_DIR/libc++.so" "$PIZFIX/lib/"
+cp "$CXX_LIB_DIR/libc++.so.1.0" "$PIZFIX/lib/"
+cp "$CXX_LIB_DIR/libc++abi.so.1.0" "$PIZFIX/lib/"
+cp "$CXX_LIB_DIR/libc++.a" "$PIZFIX/lib/"
+cp "$CXX_LIB_DIR/libc++abi.a" "$PIZFIX/lib/"
+if [[ -f "$CXX_LIB_DIR/libc++experimental.a" ]]; then
+  cp "$CXX_LIB_DIR/libc++experimental.a" "$PIZFIX/lib/"
+fi
+(
+  cd "$PIZFIX/lib"
+  ln -fs libc++.so.1.0 libc++.so.1
+  ln -fs libc++abi.so.1.0 libc++abi.so.1
+  ln -fs libc++abi.so.1 libc++abi.so
+)
+echo "STAGE8_LIBCXX_SECONDS=$(( $(date +%s) - T_S8 ))"
+
+# Verify critical sysroot deliverables
+for f in \
+  "$BUILD_DIR/bin/clang" \
+  "$BUILD_DIR/bin/clang++" \
+  "$BUILD_DIR/bin/ld.lld" \
+  "$PIZFIX/lib/crtbegin.o" \
+  "$PIZFIX/lib/crtend.o" \
+  "$PIZFIX/lib/libyolort.a" \
+  "$PIZFIX/lib/libyolounwind.a" \
+  "$PIZFIX/lib/libyoloc.so" \
+  "$PIZFIX/lib/ld-fil1-${ARCH}.so" \
+  "$PIZFIX/lib/libpizlo.so" \
+  "$PIZFIX/lib/libpizlo.a" \
+  "$PIZFIX/lib/filc_crt.o" \
+  "$PIZFIX/lib/libc.so" \
+  "$PIZFIX/lib/libc.a" \
+  "$PIZFIX/lib/libc++.so.1.0" \
+  "$PIZFIX/lib/libc++abi.so.1.0"; do
+  if [[ ! -e "$f" ]]; then
+    echo "error: expected toolchain artifact missing: $f" >&2
+    exit 1
+  fi
+done
+
+if command -v ccache >/dev/null 2>&1; then
+  echo "=== ccache stats ==="
+  ccache -s || true
+fi
+
+echo "TOTAL_TOOLCHAIN_BUILD_SECONDS=$(( $(date +%s) - T_TOTAL_START ))"
+echo "=== FIL-C TOOLCHAIN BUILD COMPLETE ($WORK_ROOT) ==="

@@ -46,7 +46,7 @@ Rebase-Notes (llvmorg-21.1.8 -> llvmorg-22.1.8):
 Rebase-Notes (llvmorg-22.1.8 -> llvmorg-23.1.6):
   - TargetInfo.h: context updated for isProcessorName() insertion above getDataLayoutString().
   - ASTContext.cpp -> CompilerInvocation.cpp: LLVM 23 removed ItaniumVTableContext::ComponentLayout and checks LangOpts.RelativeCXXABIVTables directly; forced Opts.RelativeCXXABIVTables = false in CompilerInvocation.cpp.
-  - SPIR.cpp: updated AMDGPUTI static-initializer removal for multi-line Triple constructor.
+  - SPIR.cpp: updated AMDGPUTI static-initializer removal for multi-line Triple constructor and new isValidCPUName/fillValidCPUList pointer dereferences.
 
 ---
 diff --git a/clang/include/clang/AST/Decl.h b/clang/include/clang/AST/Decl.h
@@ -282,7 +282,7 @@ index 2e1d9abac..7b427f43a 100644
    // If possible, get a TargetInfo for our host triple, so we can match its
    // types.
 diff --git a/clang/lib/Basic/Targets/SPIR.cpp b/clang/lib/Basic/Targets/SPIR.cpp
-index 3eb62c905..b11b03b3f 100644
+index 3eb62c905..677467313 100644
 --- a/clang/lib/Basic/Targets/SPIR.cpp
 +++ b/clang/lib/Basic/Targets/SPIR.cpp
 @@ -110,13 +110,11 @@ void SPIRV64TargetInfo::getTargetDefines(const LangOptions &Opts,
@@ -323,6 +323,19 @@ index 3eb62c905..b11b03b3f 100644
  }
  
  void SPIRV64AMDGCNTargetInfo::getTargetDefines(const LangOptions &Opts,
+@@ -191,10 +189,10 @@ void SPIRV64AMDGCNTargetInfo::setAuxTarget(const TargetInfo *Aux) {
+ }
+ 
+ bool SPIRV64AMDGCNTargetInfo::isValidCPUName(StringRef CPU) const {
+-  return AMDGPUTI.isValidCPUName(CPU);
++  return AMDGPUTI->isValidCPUName(CPU);
+ }
+ 
+ void SPIRV64AMDGCNTargetInfo::fillValidCPUList(
+     SmallVectorImpl<StringRef> &Values) const {
+-  return AMDGPUTI.fillValidCPUList(Values);
++  return AMDGPUTI->fillValidCPUList(Values);
+ }
 diff --git a/clang/lib/Basic/Version.cpp b/clang/lib/Basic/Version.cpp
 index 4823f566b..0def33723 100644
 --- a/clang/lib/Basic/Version.cpp

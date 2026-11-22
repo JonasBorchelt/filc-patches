@@ -1,0 +1,21 @@
+NAME="nghttp2"
+VERSION="1.71.0"
+LICENSE="MIT"
+UPSTREAM_URL="https://github.com/nghttp2/nghttp2/releases/download/v1.71.0/nghttp2-1.71.0.tar.xz"
+UPSTREAM_SHA256="c0f55121d88650e4b9227aec28cebaf664d2417ca60fe70be0f8d38829f52116"
+EXTRACT_DIR="nghttp2-1.71.0"
+TIER=3
+DEPS="zlib pkgconf"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--enable-lib-only --with-zlib"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD="make check"
+POLICY_CLASS="P0-Clean"
+POLICY_RATIONALE="Builds unmodified upstream libnghttp2 with zlib support and passes its upstream unit test suite."
+FILC_ORIGIN_REF="cede3de02b42:projects/nghttp2.projeny"
+
+port_configure() {
+  CPPFLAGS="-I$PIZFIX/include" LDFLAGS="-L$PIZFIX/lib" \
+    ./configure --prefix="$PIZFIX" --enable-lib-only --with-zlib
+}

@@ -1,0 +1,32 @@
+NAME="rsync"
+VERSION="3.5.2"
+LICENSE="GPL-3.0-or-later"
+UPSTREAM_URL="https://github.com/RsyncProject/rsync/releases/download/v3.5.2/rsync-3.5.2.tar.gz"
+UPSTREAM_SHA256="a10d591825251e070f74c98df3daad195def4ed81b4a2de16169026aea33f6c8"
+EXTRACT_DIR="rsync-3.5.2"
+TIER=3
+DEPS="zlib lz4 zstd xxhash"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--disable-openssl --disable-md2man"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P0-Clean"
+POLICY_RATIONALE="Builds unmodified upstream rsync 3.5.2 linked against Fil-C zlib, lz4, zstd, and xxhash."
+FILC_ORIGIN_REF="cede3de02b42:projects/rsync.projeny"
+
+port_configure() {
+  CPPFLAGS="-I$PIZFIX/include" LDFLAGS="-L$PIZFIX/lib" \
+    ./configure --prefix="$PIZFIX" --disable-openssl --disable-md2man
+}
+
+port_test() {
+  "$PIZFIX/bin/rsync" --version
+  local td
+  td="$(mktemp -d)"
+  mkdir -p "$td/src" "$td/dst"
+  printf 'filc-rsync-check\n' > "$td/src/hello.txt"
+  "$PIZFIX/bin/rsync" -a "$td/src/" "$td/dst/"
+  grep -qx 'filc-rsync-check' "$td/dst/hello.txt"
+  rm -rf "$td"
+}

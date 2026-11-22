@@ -1,0 +1,35 @@
+NAME="libarchive"
+VERSION="3.7.4"
+LICENSE="BSD-2-Clause"
+UPSTREAM_URL="https://github.com/libarchive/libarchive/releases/download/v3.7.4/libarchive-3.7.4.tar.xz"
+UPSTREAM_SHA256="f887755c434a736a609cbd28d87ddbfbe9d6a3bb5b703c22c02f6af80a802735"
+EXTRACT_DIR="libarchive-3.7.4"
+TIER=3
+DEPS="zlib bzip2 xz lz4 zstd pkgconf"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--without-expat --without-nettle --without-xml2 --without-openssl"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P2-Package"
+POLICY_RATIONALE="Preserves capability metadata on tagged red-black tree parent pointers (archive_rb) and rar5 cdeque pointer slots (void** instead of size_t*)."
+FILC_ORIGIN_REF="cede3de02b42:projects/libarchive-3.7.4"
+
+port_configure() {
+  CPPFLAGS="-I$PIZFIX/include" LDFLAGS="-L$PIZFIX/lib" \
+    ./configure --prefix="$PIZFIX" \
+      --without-expat --without-nettle --without-xml2 --without-openssl
+}
+
+port_test() {
+  "$PIZFIX/bin/bsdtar" --version
+  local td
+  td="$(mktemp -d)"
+  printf 'filc-libarchive-check\n' > "$td/in.txt"
+  for flag in -z -J --zstd; do
+    "$PIZFIX/bin/bsdtar" -cf "$td/out.tar" "$flag" -C "$td" in.txt
+    rm -f "$td/extracted.txt"
+    "$PIZFIX/bin/bsdtar" -xOf "$td/out.tar" in.txt | grep -qx 'filc-libarchive-check'
+  done
+  rm -rf "$td"
+}

@@ -77,7 +77,7 @@ fi
 
 if [[ "$SPARSE" -eq 1 ]]; then
   git -C "$TARGET_DIR" sparse-checkout init --cone
-  git -C "$TARGET_DIR" sparse-checkout set llvm clang libcxx libcxxabi libc polly
+  git -C "$TARGET_DIR" sparse-checkout set llvm clang lld cmake third-party libcxx libcxxabi libunwind libc polly
 else
   if [[ -f "$TARGET_DIR/.git/info/sparse-checkout" ]]; then
     git -C "$TARGET_DIR" sparse-checkout disable

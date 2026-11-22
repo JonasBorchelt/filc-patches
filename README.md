@@ -74,6 +74,16 @@ Automated CI verifies two workflows and publishes sanitized status reports to
   4. **C++ with `libc++`**: `std::vector`, `std::string`, `<iostream>`, and
      `throw`/`catch` exceptions, exit code `0`.
 
+## Ports policy
+
+Building and packaging software with Fil-C follows a toolchain-first policy designed to keep upstream packages unmodified whenever possible:
+
+1. **Fix toolchain gaps at the source:** Missing compiler, runtime, or libc support is fixed in the Fil-C toolchain rather than worked around per package — one fix benefits every package and keeps upstream sources untouched.
+2. **Small, upstreamable package patches only when necessary:** Genuinely unsafe or non-portable patterns in a package (such as pointer-to-integer casts, custom allocators, inline assembly, JIT engines, or address-based hashing) receive a minimal, documented, upstreamable patch with an explicit rationale.
+3. **Prefer build options over source patches:** Build-system and configuration issues are resolved through build flags and configuration options instead of patching package sources.
+4. **Audit imported port patches:** Adopted Fil-C port patches serve only as a starting point with full provenance attribution and are reviewed to verify whether they mask an underlying toolchain gap.
+5. **Measure and reduce patch debt:** We track unmodified versus patched package counts and patch sizes, with the explicit goal of driving the number and size of package patches down over time.
+
 ## Provenance & Licensing
 
 This repository contains patches and build/test glue referencing upstream

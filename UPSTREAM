@@ -8,3 +8,6 @@ FILC_REPO=https://github.com/pizlonator/fil-c.git
 FILC_BRANCH=deluge
 FILC_COMMIT=cede3de02b42b58a14acc9ce39c9894ab952a915
 FILC_REBASE_COMMIT=d292f5dbb951d549fc9b053950d5a330d532b361
+
+MUSL_REPO=https://git.musl-libc.org/git/musl
+MUSL_COMMIT=f314e133929b6379eccc632bef32eaebb66a7335

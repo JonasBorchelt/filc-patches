@@ -1,0 +1,26 @@
+NAME="sqlite"
+VERSION="3.54.1"
+LICENSE="blessing"
+UPSTREAM_URL="https://www.sqlite.org/2026/sqlite-autoconf-3540100.tar.gz"
+UPSTREAM_SHA256="926ef8d3eab93fbf6e06011901273eec076b25594a4e1cdadd50c987f4f6d64e"
+EXTRACT_DIR="sqlite-autoconf-3540100"
+TIER=2
+DEPS="zlib libedit"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--disable-static"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P0-Clean"
+POLICY_RATIONALE="Builds unmodified upstream SQLite amalgamation (sqlite-autoconf) with libedit and zlib support."
+FILC_ORIGIN_REF="cede3de02b42:build_sqlite.sh"
+
+port_configure() {
+  CPPFLAGS="-I$PIZFIX/include" LDFLAGS="-L$PIZFIX/lib" \
+    ./configure --prefix="$PIZFIX" --disable-static
+}
+
+port_test() {
+  "$PIZFIX/bin/sqlite3" --version
+  "$PIZFIX/bin/sqlite3" :memory: "CREATE TABLE t(x INT, s TEXT); INSERT INTO t VALUES (42, 'filc-ok'); SELECT x || ':' || s FROM t;" | grep -qx '42:filc-ok'
+}

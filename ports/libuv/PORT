@@ -1,0 +1,39 @@
+NAME="libuv"
+VERSION="1.53.0"
+LICENSE="MIT"
+UPSTREAM_URL="https://dist.libuv.org/dist/v1.53.0/libuv-v1.53.0-dist.tar.gz"
+UPSTREAM_SHA256="21425fa398be98b51181a1885df31428092d5435c4373a396351e427322e5f1b"
+EXTRACT_DIR="libuv-1.53.0"
+TIER=2
+DEPS=""
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS=""
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P2-Package"
+POLICY_RATIONALE="Replaces atomic uintptr_t pointer punning, raw signal-pipe handle pointer passing, unsafe signal interception, vfork probe, io_uring probe, and inline pause asm with capability-safe Fil-C equivalents."
+FILC_ORIGIN_REF="cede3de02b42:projects/libuv.projeny"
+
+port_test() {
+  cat > "$SRC_DIR/_filc_test_uv.c" <<'EOF'
+#include <uv.h>
+static int fired = 0;
+static void on_timer(uv_timer_t *handle) {
+  fired = 1;
+  uv_close((uv_handle_t *)handle, NULL);
+}
+int main(void) {
+  uv_loop_t loop;
+  if (uv_loop_init(&loop) != 0) return 1;
+  uv_timer_t timer;
+  if (uv_timer_init(&loop, &timer) != 0) return 2;
+  if (uv_timer_start(&timer, on_timer, 1, 0) != 0) return 3;
+  uv_run(&loop, UV_RUN_DEFAULT);
+  uv_loop_close(&loop);
+  return fired == 1 ? 0 : 4;
+}
+EOF
+  "$CC" -O2 -I"$PIZFIX/include" "$SRC_DIR/_filc_test_uv.c" -L"$PIZFIX/lib" -luv -lpthread -o "$SRC_DIR/_filc_test_uv"
+  "$SRC_DIR/_filc_test_uv"
+}

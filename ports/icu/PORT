@@ -1,0 +1,37 @@
+NAME="icu"
+VERSION="79.1"
+LICENSE="Unicode-3.0"
+UPSTREAM_URL="https://github.com/unicode-org/icu/releases/download/release-79.1/icu4c-79.1-sources.tgz"
+UPSTREAM_SHA256="06fa63ecb521048f8082f12ad988f6b678d90cbd88aafce24cbc94902b191d99"
+EXTRACT_DIR="icu"
+TIER=2
+DEPS="pkgconf"
+BUILD_SYSTEM="custom"
+CONFIGURE_ARGS=""
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P2-Package"
+POLICY_RATIONALE="Uses capability-preserving zmkptr alignment in ucnv_clone, bounds pointer-TOC tables, disables raw assembly/object data codegen in favor of C arrays, and returns libc timezone directly under Fil-C."
+FILC_ORIGIN_REF="cede3de02b42:projects/icu.projeny"
+
+port_configure() {
+  cd "$SRC_DIR/source"
+  THE_OS=Linux THE_COMP="the Clang C++" CFLAGS="-O2 -g" CXXFLAGS="-O2 -g" \
+    ./configure --prefix="$PIZFIX"
+}
+
+port_build() {
+  cd "$SRC_DIR/source"
+  make -j "$JOBS"
+}
+
+port_install() {
+  cd "$SRC_DIR/source"
+  make -j "$JOBS" install
+}
+
+port_test() {
+  "$PIZFIX/bin/uconv" --version
+  printf 'Fil-C ICU UTF-8 check: üöä\n' | "$PIZFIX/bin/uconv" -f UTF-8 -t UTF-16BE | "$PIZFIX/bin/uconv" -f UTF-16BE -t UTF-8 | grep -qx 'Fil-C ICU UTF-8 check: üöä'
+}

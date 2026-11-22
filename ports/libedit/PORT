@@ -1,0 +1,36 @@
+NAME="libedit"
+VERSION="20260512-3.1"
+LICENSE="BSD-3-Clause"
+UPSTREAM_URL="https://thrysoee.dk/editline/libedit-20260512-3.1.tar.gz"
+UPSTREAM_SHA256="432d5e7ea8b0116dd39f2eca7bc11d0eed77faa6b77ea526ace89907c23ea4a0"
+EXTRACT_DIR="libedit-20260512-3.1"
+TIER=2
+DEPS="ncurses"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS=""
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P2-Package"
+POLICY_RATIONALE="Single-line guard in src/chartype.h skips the __STDC_ISO_10646__ error on Linux musl/Fil-C matching the existing BSD guard."
+FILC_ORIGIN_REF="cede3de02b42:projects/libedit.projeny"
+
+port_configure() {
+  CPPFLAGS="-I$PIZFIX/include -I$PIZFIX/include/ncurses" LDFLAGS="-L$PIZFIX/lib" \
+    ./configure --prefix="$PIZFIX"
+}
+
+port_test() {
+  cat > "$SRC_DIR/_filc_test_edit.c" <<'EOF'
+#include <histedit.h>
+#include <stdio.h>
+int main(void) {
+  EditLine *el = el_init("filc-test", stdin, stdout, stderr);
+  if (!el) return 1;
+  el_end(el);
+  return 0;
+}
+EOF
+  "$CC" -O2 -I"$PIZFIX/include" "$SRC_DIR/_filc_test_edit.c" -L"$PIZFIX/lib" -ledit -lncurses -o "$SRC_DIR/_filc_test_edit"
+  "$SRC_DIR/_filc_test_edit"
+}

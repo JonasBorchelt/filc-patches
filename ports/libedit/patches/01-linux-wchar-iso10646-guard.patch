@@ -1,0 +1,19 @@
+Subject: Skip __STDC_ISO_10646__ wchar_t error guard on Linux
+Policy-Class: P2-Package
+Rationale: musl-based Linux toolchains (including Fil-C usermusl) use Unicode wchar_t without defining __STDC_ISO_10646__, causing src/chartype.h to abort compilation unless __linux__ is excluded alongside macOS and the BSDs.
+Upstream-Status: Pending
+Fil-C-Origin-Commits: cede3de02b42
+
+diff --git a/src/chartype.h b/src/chartype.h
+--- a/src/chartype.h
++++ b/src/chartype.h
+@@ -39,7 +39,8 @@
+ 	!(defined(__APPLE__) && defined(__MACH__)) && \
+ 	!defined(__OpenBSD__) && \
+ 	!defined(__FreeBSD__) && \
+-	!defined(__DragonFly__)
++	!defined(__DragonFly__) && \
++	!defined(__linux__)
+ #ifndef __STDC_ISO_10646__
+ /* In many places it is assumed that the first 127 code points are ASCII
+  * compatible, so ensure wchar_t indeed does ISO 10646 and not some other

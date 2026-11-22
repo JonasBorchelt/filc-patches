@@ -1,0 +1,18 @@
+Subject: Mark xmlCatalogEntry.children _Atomic for capability-safe concurrent reads
+Policy-Class: P2-Package
+Rationale: xmlCatalogEntry.children is written under xmlCatalogMutex but read without holding the lock during concurrent catalog traversals; under Fil-C a non-atomic pointer load risks tearing a capability and triggering a safety trap.
+Upstream-Status: Pending
+Fil-C-Origin-Commits: cede3de02b42
+
+diff --git a/catalog.c b/catalog.c
+--- a/catalog.c
++++ b/catalog.c
+@@ -110,7 +110,7 @@
+ struct _xmlCatalogEntry {
+     struct _xmlCatalogEntry *next;
+     struct _xmlCatalogEntry *parent;
+-    struct _xmlCatalogEntry *children;
++    struct _xmlCatalogEntry *_Atomic children;
+     xmlCatalogEntryType type;
+     xmlChar *name;
+     xmlChar *value;

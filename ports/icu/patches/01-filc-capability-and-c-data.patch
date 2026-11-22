@@ -1,0 +1,145 @@
+Subject: Make ICU converter alignment, TOC bounds, timezone, and data generation Fil-C safe
+Policy-Class: P2-Package
+Rationale: ucnv_clone() aligns a stack buffer pointer via integer reinterpret_cast (stripping Fil-C capability metadata), ICU's data builder emits raw ELF/assembly object files that cannot link under Fil-C, and uprv_timezone()'s localtime/mktime fallback is fragile under Fil-C. Re-deriving the aligned pointer with zmkptr(), bounding TOC tables, and disabling assembly/object data emission keeps ICU4C 79.1 fully capability-safe.
+Upstream-Status: Fil-C-Specific
+Fil-C-Origin-Commits: cede3de02b42
+
+diff --git a/source/common/putil.cpp b/source/common/putil.cpp
+--- a/source/common/putil.cpp
++++ b/source/common/putil.cpp
+@@ -641,9 +641,16 @@
+ U_CAPI int32_t U_EXPORT2
+ uprv_timezone()
+ {
++#ifdef __PIZLONATOR_WAS_HERE__
+ #ifdef U_TIMEZONE
+     return U_TIMEZONE;
+ #else
++    return timezone;
++#endif
++#else
++#ifdef U_TIMEZONE
++    return U_TIMEZONE;
++#else
+     time_t t, t1, t2;
+     struct tm tmrec;
+     int32_t tdiff = 0;
+@@ -672,6 +683,7 @@
+ #endif
+     return tdiff;
+ #endif
++#endif
+ }
+ 
+ /* Note that U_TZNAME does *not* have to be tzname, but if it is,
+diff --git a/source/common/ucnv.cpp b/source/common/ucnv.cpp
+--- a/source/common/ucnv.cpp
++++ b/source/common/ucnv.cpp
+@@ -43,6 +43,10 @@
+ #include "ucnv_cnv.h"
+ #include "ucnv_bld.h"
+ 
++#ifdef __PIZLONATOR_WAS_HERE__
++#include <stdfil.h>
++#endif
++
+ /* size of intermediate and preflighting buffers in ucnv_convert() */
+ #define CHUNK_SIZE 1024
+ 
+@@ -236,7 +240,11 @@
+         uintptr_t aligned_p = (p + alignof(UConverter) - 1) & ~(alignof(UConverter) - 1);
+         ptrdiff_t pointerAdjustment = aligned_p - p;
+         if (bufferSizeNeeded + pointerAdjustment <= stackBufferSize) {
++#ifdef __PIZLONATOR_WAS_HERE__
++            stackBuffer = zmkptr(stackBuffer, static_cast<unsigned long>(aligned_p));
++#else
+             stackBuffer = reinterpret_cast<void *>(aligned_p);
++#endif
+             stackBufferSize -= static_cast<int32_t>(pointerAdjustment);
+         } else {
+             /* prevent using the stack buffer but keep the size > 0 so that we do not just preflight */
+diff --git a/source/common/ucnv_io.cpp b/source/common/ucnv_io.cpp
+--- a/source/common/ucnv_io.cpp
++++ b/source/common/ucnv_io.cpp
+@@ -249,15 +249,19 @@
+ 
+     sectionSizes = static_cast<const uint32_t*>(udata_getMemory(data));
+     int32_t dataLength = udata_getLength(data); // This is the length minus the UDataInfo size
+-    UBool isDataLengthKnown = dataLength >= 0; // Only false when using a pointer table of contents (not files nor a common data archive)
++    UBool isDataLengthKnown = dataLength >= 0;
+     if (isDataLengthKnown && dataLength <= int32_t(sizeof(sectionSizes[0]))) {
+         // We don't even have a TOC!
+         goto invalidFormat;
+     }
+     table = reinterpret_cast<const uint16_t*>(sectionSizes);
+     tableStart = sectionSizes[0];
++    if (tableStart < minTocLength || tableStart > normalizedStringTableIndex) {
++        // We don't have a whole TOC!
++        goto invalidFormat;
++    }
+     sizeOfTOC = int32_t((tableStart + 1) * sizeof(sectionSizes[0]));
+-    if (tableStart < minTocLength || (isDataLengthKnown && dataLength <= sizeOfTOC)) {
++    if (isDataLengthKnown && dataLength <= sizeOfTOC) {
+         // We don't have a whole TOC!
+         goto invalidFormat;
+     }
+@@ -278,6 +282,9 @@
+ 
+     sizeOfData = sizeOfTOC;
+     for (uint32_t section = 1; section <= tableStart; section++) {
++        if (sectionSizes[section] > uint32_t(INT32_MAX - sizeOfData) / uint32_t(sizeof(table[0]))) {
++            goto invalidFormat;
++        }
+         sizeOfData += sectionSizes[section] * sizeof(table[0]);
+     }
+     if (isDataLengthKnown && dataLength < sizeOfData) {
+diff --git a/source/common/unicode/char16ptr.h b/source/common/unicode/char16ptr.h
+--- a/source/common/unicode/char16ptr.h
++++ b/source/common/unicode/char16ptr.h
+@@ -17,6 +17,10 @@
+ 
+ #endif
+ 
++#ifdef __PIZLONATOR_WAS_HERE__
++#include <stdfil.h>
++#endif
++
+ /**
+  * \file
+  * \brief C++ API: char16_t pointer wrappers with
+diff --git a/source/configure b/source/configure
+--- a/source/configure
++++ b/source/configure
+@@ -7038,6 +7038,7 @@
+ #    GENCCODE_ASSEMBLY="-a aCC-ia64"
+     ;;
+ esac
++GENCCODE_ASSEMBLY=
+ 
+ 
+ { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $GENCCODE_ASSEMBLY" >&5
+diff --git a/source/configure.ac b/source/configure.ac
+--- a/source/configure.ac
++++ b/source/configure.ac
+@@ -642,6 +642,7 @@
+ #    GENCCODE_ASSEMBLY="-a aCC-ia64"
+     ;;
+ esac
++GENCCODE_ASSEMBLY=
+ AC_SUBST(GENCCODE_ASSEMBLY)
+ 
+ AC_MSG_RESULT($GENCCODE_ASSEMBLY)
+diff --git a/source/tools/toolutil/pkg_genc.h b/source/tools/toolutil/pkg_genc.h
+--- a/source/tools/toolutil/pkg_genc.h
++++ b/source/tools/toolutil/pkg_genc.h
+@@ -29,6 +29,10 @@
+ #define BUILD_DATA_WITHOUT_ASSEMBLY
+ #endif
+ 
++#ifdef __PIZLONATOR_WAS_HERE__
++#define U_DISABLE_OBJ_CODE
++#endif
++
+ #ifndef U_DISABLE_OBJ_CODE /* testing */
+ #if defined(WINDOWS_WITH_MSVC) || U_PLATFORM_IS_LINUX_BASED
+ #define CAN_WRITE_OBJ_CODE

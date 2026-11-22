@@ -1,0 +1,26 @@
+NAME="libxml2"
+VERSION="2.15.4"
+LICENSE="MIT"
+UPSTREAM_URL="https://download.gnome.org/sources/libxml2/2.15/libxml2-2.15.4.tar.xz"
+UPSTREAM_SHA256="98087fd181d9070724f3fbc65c7377db03038eb92bd882374daff44940138821"
+EXTRACT_DIR="libxml2-2.15.4"
+TIER=2
+DEPS="zlib xz pkgconf"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--disable-maintainer-mode --without-python"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P2-Package"
+POLICY_RATIONALE="Marks xmlCatalogEntry.children _Atomic in catalog.c so concurrent lockless catalog reads do not tear Fil-C capabilities."
+FILC_ORIGIN_REF="cede3de02b42:projects/libxml2.projeny"
+
+port_configure() {
+  CPPFLAGS="-I$PIZFIX/include" LDFLAGS="-L$PIZFIX/lib" \
+    ./configure --prefix="$PIZFIX" --disable-maintainer-mode --without-python
+}
+
+port_test() {
+  "$PIZFIX/bin/xmllint" --version
+  printf '<filc ok="yes">hello</filc>\n' | "$PIZFIX/bin/xmllint" --xpath 'string(/filc)' - | grep -qx 'hello'
+}

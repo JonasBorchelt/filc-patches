@@ -1,0 +1,47 @@
+NAME="libevent"
+VERSION="2.1.12-stable"
+LICENSE="BSD-3-Clause"
+UPSTREAM_URL="https://github.com/libevent/libevent/releases/download/release-2.1.12-stable/libevent-2.1.12-stable.tar.gz"
+UPSTREAM_SHA256="92e6de1be9ec176428fd2367677e61ceffc2ee1cb119035037a27d346b0403bb"
+EXTRACT_DIR="libevent-2.1.12-stable"
+TIER=2
+DEPS="zlib"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--disable-openssl --disable-samples"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P0-Clean"
+POLICY_RATIONALE="Builds unmodified upstream libevent 2.1.12-stable library without source patches."
+FILC_ORIGIN_REF="cede3de02b42:build_libevent.sh"
+
+port_configure() {
+  CPPFLAGS="-I$PIZFIX/include" LDFLAGS="-L$PIZFIX/lib" \
+    ./configure --prefix="$PIZFIX" --disable-openssl --disable-samples
+}
+
+port_test() {
+  cat > "$SRC_DIR/_filc_test_event.c" <<'EOF'
+#include <event2/event.h>
+#include <stdio.h>
+static int fired = 0;
+static void on_timer(evutil_socket_t fd, short what, void *arg) {
+  (void)fd; (void)what; (void)arg;
+  fired = 1;
+}
+int main(void) {
+  struct event_base *base = event_base_new();
+  if (!base) return 1;
+  struct timeval tv = {0, 1000};
+  struct event *ev = evtimer_new(base, on_timer, NULL);
+  if (!ev) return 2;
+  evtimer_add(ev, &tv);
+  event_base_dispatch(base);
+  event_free(ev);
+  event_base_free(base);
+  return fired == 1 ? 0 : 3;
+}
+EOF
+  "$CC" -O2 -I"$PIZFIX/include" "$SRC_DIR/_filc_test_event.c" -L"$PIZFIX/lib" -levent -o "$SRC_DIR/_filc_test_event"
+  "$SRC_DIR/_filc_test_event"
+}

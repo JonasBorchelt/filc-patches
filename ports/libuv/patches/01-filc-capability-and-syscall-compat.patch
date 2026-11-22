@@ -1,0 +1,189 @@
+Subject: Make libuv pointer caches, signal pipe, proctitle, and pause asm capability-safe under Fil-C
+Policy-Class: P2-Package
+Rationale: libuv stores function pointers in _Atomic uintptr_t (losing Fil-C capability metadata), writes raw pointers across signal self-pipes (stripping capabilities on read), derives argv span via cross-object pointer arithmetic, probes io_uring/vfork, and emits inline rep;nop asm. Using void *_Atomic, zexact_ptrtable, zlength, zis_unsafe_signal_for_handlers, and __builtin_ia32_pause preserves full capability safety.
+Upstream-Status: Fil-C-Specific
+Fil-C-Origin-Commits: cede3de02b42
+
+diff --git a/src/unix/fs.c b/src/unix/fs.c
+--- a/src/unix/fs.c
++++ b/src/unix/fs.c
+@@ -458,30 +458,29 @@
+                                  const struct iovec* bufs,
+                                  size_t nbufs,
+                                  off_t off,
+-                                 _Atomic uintptr_t* cache,
++                                 void*_Atomic* cache,
+                                  int is_pread) {
+-  union {
+-    int (*f)(int, const struct iovec*, uv__iovcnt, off_t);
+-    void* p;
+-  } u;
++  int (*f)(int, const struct iovec*, uv__iovcnt, off_t);
++  void* p;
+ 
+-  u.p = (void*) atomic_load_explicit(cache, memory_order_relaxed);
+-  if (u.p == NULL) {
++  p = (void*) atomic_load_explicit(cache, memory_order_relaxed);
++  if (p == NULL) {
+ #ifdef RTLD_DEFAULT
+     /* Try _LARGEFILE_SOURCE version of preadv/pwritev first,
+      * then fall back to the plain version, for libcs like musl.
+      */
+-    u.p = dlsym(RTLD_DEFAULT, is_pread ? "preadv64" : "pwritev64");
+-    if (u.p == NULL)
+-      u.p = dlsym(RTLD_DEFAULT, is_pread ? "preadv" : "pwritev");
++    p = dlsym(RTLD_DEFAULT, is_pread ? "preadv64" : "pwritev64");
++    if (p == NULL)
++      p = dlsym(RTLD_DEFAULT, is_pread ? "preadv" : "pwritev");
+     dlerror();  /* Clear errors. */
+ #endif  /* RTLD_DEFAULT */
+-    if (u.p == NULL)
+-      u.f = is_pread ? uv__preadv_emul : uv__pwritev_emul;
+-    atomic_store_explicit(cache, (uintptr_t) u.p, memory_order_relaxed);
++    if (p == NULL)
++      p = is_pread ? uv__preadv_emul : uv__pwritev_emul;
++    atomic_store_explicit(cache, p, memory_order_relaxed);
+   }
+ 
+-  return u.f(fd, bufs, nbufs, off);
++  f = p;
++  return f(fd, bufs, nbufs, off);
+ }
+ 
+ 
+@@ -489,7 +488,7 @@
+                           const struct iovec* bufs,
+                           size_t nbufs,
+                           off_t off) {
+-  static _Atomic uintptr_t cache;
++  static void*_Atomic cache;
+   return uv__preadv_or_pwritev(fd, bufs, nbufs, off, &cache, /*is_pread*/1);
+ }
+ 
+@@ -498,7 +497,7 @@
+                        const struct iovec* bufs,
+                        size_t nbufs,
+                        off_t off) {
+-  static _Atomic uintptr_t cache;
++  static void*_Atomic cache;
+   return uv__preadv_or_pwritev(fd, bufs, nbufs, off, &cache, /*is_pread*/0);
+ }
+ 
+diff --git a/src/unix/linux.c b/src/unix/linux.c
+--- a/src/unix/linux.c
++++ b/src/unix/linux.c
+@@ -516,6 +516,9 @@
+ #elif defined(__powerpc64__) || defined(__ppc64__)
+   /* See https://github.com/libuv/libuv/issues/4283. */
+   return 0; /* Random SIGSEGV in signal handler. */
++#elif defined(__FILC__)
++  /* The io_uring API is not yet supported by Fil-C, and may never be. */
++  return 0;
+ #else
+   /* Ternary: unknown=0, yes=1, no=-1 */
+   static _Atomic int use_io_uring;
+diff --git a/src/unix/process.c b/src/unix/process.c
+--- a/src/unix/process.c
++++ b/src/unix/process.c
+@@ -100,7 +100,9 @@
+   uv__wait_children(handle->loop);
+ }
+ 
++#include <stdfil.h>
+ 
++
+ int uv__process_init(uv_loop_t* loop) {
+   int err;
+ 
+@@ -342,7 +344,7 @@
+    * them internally.
+    */
+   for (n = 1; n < 32; n += 1) {
+-    if (n == SIGKILL || n == SIGSTOP)
++    if (n == SIGKILL || n == SIGSTOP || zis_unsafe_signal_for_handlers(n))
+       continue;  /* Can't be changed. */
+ 
+ #if defined(__HAIKU__)
+@@ -492,6 +494,10 @@
+    */
+ #else
+ #if !defined(__linux__) && !defined(_AIX) && !defined(__PASE__)
++  posix_spawn_works = 1;
++#elif defined(__FILC__)
++  /* Fil-C does not support vfork, so skip the vfork() probe below and
++     assume posix_spawn() works. */
+   posix_spawn_works = 1;
+ #elif !defined(__ANDROID__)
+   pid_t pid;
+diff --git a/src/unix/proctitle.c b/src/unix/proctitle.c
+--- a/src/unix/proctitle.c
++++ b/src/unix/proctitle.c
+@@ -23,6 +23,7 @@
+ 
+ #include <stdlib.h>
+ #include <string.h>
++#include <stdfil.h>
+ 
+ struct uv__process_title {
+   char* str;
+@@ -85,7 +86,7 @@
+   }
+   new_argv[i] = NULL;
+ 
+-  pt.cap = argv[i - 1] + size - argv[0];
++  pt.cap = zlength(pt.str);
+ 
+   args_mem = new_argv;
+   process_title = pt;
+diff --git a/src/unix/signal.c b/src/unix/signal.c
+--- a/src/unix/signal.c
++++ b/src/unix/signal.c
+@@ -27,7 +27,15 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <unistd.h>
++#include <stdfil.h>
+ 
++static zexact_ptrtable* handle_table;
++
++static void construct_ptrtable(void) __attribute__((constructor));
++static void construct_ptrtable(void) {
++  handle_table = zexact_ptrtable_new_weak();
++}
++
+ #ifndef SA_RESTART
+ # define SA_RESTART 0
+ #endif
+@@ -198,7 +206,7 @@
+     int r;
+ 
+     msg.signum = signum;
+-    msg.handle = handle;
++    msg.handle = (void*)zexact_ptrtable_encode(handle_table, handle);
+ 
+     /* write() should be atomic for small data chunks, so the entire message
+      * should be written at once. In theory the pipe could become full, in
+@@ -474,7 +482,7 @@
+ 
+     for (i = 0; i < end; i += sizeof(uv__signal_msg_t)) {
+       msg = (uv__signal_msg_t*) (buf + i);
+-      handle = msg->handle;
++      handle = zexact_ptrtable_decode(handle_table, (uintptr_t)msg->handle);
+ 
+       if (msg->signum == handle->signum) {
+         assert(!(handle->flags & UV_HANDLE_CLOSING));
+diff --git a/src/uv-common.c b/src/uv-common.c
+--- a/src/uv-common.c
++++ b/src/uv-common.c
+@@ -906,7 +906,11 @@
+ #if defined(_WIN32)
+   YieldProcessor();
+ #elif defined(__i386__) || defined(__x86_64__)
++#ifdef __FILC__
++  __builtin_ia32_pause();
++#else
+   __asm__ __volatile__ ("rep; nop" ::: "memory");  /* a.k.a. PAUSE */
++#endif
+ #elif (defined(__arm__) && __ARM_ARCH >= 7) || defined(__aarch64__)
+   __asm__ __volatile__ ("isb" ::: "memory");
+ #elif !defined(__APPLE__) && (defined(__powerpc64__) || defined(__ppc64__) || defined(__PPC64__))

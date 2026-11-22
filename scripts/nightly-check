@@ -1,27 +1,42 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Nightly check against the latest stable upstream LLVM release tag
+# Nightly end-to-end check against the latest stable upstream LLVM release tag
 # (llvmorg-X.Y.Z, excluding rc/init tags).
 #
-# - If the latest release matches UPSTREAM: applies the patch series and runs
-#   scripts/build-and-smoke as a regression check.
+# - If the latest release matches UPSTREAM: applies the patch series, builds the
+#   full Fil-C toolchain (scripts/build-toolchain), and executes the end-to-end
+#   runtime tests (scripts/test-toolchain: Hello World, OOB trap, UAF trap, C++
+#   with libc++) as a regression check.
 # - If a newer release tag is available: applies the patch series patch-by-patch,
-#   reports the first failing patch (if any), and runs scripts/build-and-smoke
-#   when all patches apply cleanly.
+#   reports the first failing patch (if any) without building on apply failure,
+#   and runs the full toolchain build + runtime tests when all patches apply.
 #
 # Always emits a SHA-256-hashed evidence report (Belegdatei) to REPORT_FILE,
 # stdout, and optionally FILC_REPORT_ARCHIVE_DIR.
 #
-# Usage: scripts/nightly-check [LLVM_DIR] [BUILD_DIR] [REPORT_FILE]
+# Usage: scripts/nightly-check [WORK_ROOT] [REPORT_FILE]
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../UPSTREAM
 source "$REPO_ROOT/UPSTREAM"
 
-LLVM_DIR="${1:-$REPO_ROOT/.work/llvm-nightly}"
-BUILD_DIR="${2:-$REPO_ROOT/.work/build-nightly}"
-REPORT_FILE="${3:-$REPO_ROOT/.work/nightly-report.txt}"
+if [[ $# -ge 3 ]]; then
+  # Backwards-compatible 3-arg invocation: [LLVM_DIR] [BUILD_DIR] [REPORT_FILE]
+  WORK_ROOT="$(dirname "$2")/nightly-toolchain"
+  REPORT_FILE="$3"
+else
+  WORK_ROOT="${1:-$REPO_ROOT/.work/nightly-toolchain}"
+  REPORT_FILE="${2:-$REPO_ROOT/.work/nightly-report.txt}"
+fi
+
+mkdir -p "$WORK_ROOT"
+WORK_ROOT="$(cd "$WORK_ROOT" && pwd)"
+LLVM_DIR="$WORK_ROOT/llvm-project"
+RUNTIME_SRC="$WORK_ROOT/filc-runtime"
+YOLOMUSL_SRC="$WORK_ROOT/yolomusl"
+USERMUSL_SRC="$WORK_ROOT/usermusl"
+TOOLCHAIN_REPORT="$WORK_ROOT/toolchain-report.txt"
 
 ARCHIVE_DIR="${FILC_REPORT_ARCHIVE_DIR:-}"
 
@@ -49,10 +64,42 @@ RUN_MODE="unknown"
 PATCH_STATUS="FAIL"
 FIRST_FAILING_PATCH="none"
 FIRST_FAILURE_DETAIL=""
-BUILD_AND_SMOKE_STATUS="SKIP"
+TOOLCHAIN_BUILD_STATUS="SKIP"
+TOOLCHAIN_TEST_STATUS="SKIP"
+TEST_HELLO="SKIP"
+TEST_OOB="SKIP"
+TEST_UAF="SKIP"
+TEST_CXX="SKIP"
 OVERALL_STATUS="FAIL"
 
 declare -a PATCH_RESULTS=()
+
+extract_section() {
+  local file="$1"
+  local header="$2"
+  awk -v hdr="$header" '
+    $0 == hdr { in_sec = 1; next }
+    in_sec && /^--- / { exit }
+    in_sec && /^====/ { exit }
+    in_sec && /^$/ { exit }
+    in_sec { print }
+  ' "$file"
+}
+
+parse_toolchain_report() {
+  local rpt="$1"
+  [[ -f "$rpt" ]] || return 0
+
+  local st
+  st="$(sed -n 's/^--- TEST (a) .* \[\(PASS\|FAIL\|SKIP\)\] ---$/\1/p' "$rpt" | head -n 1)"
+  [[ -n "$st" ]] && TEST_HELLO="$st"
+  st="$(sed -n 's/^--- TEST (b1) .* \[\(PASS\|FAIL\|SKIP\)\] ---$/\1/p' "$rpt" | head -n 1)"
+  [[ -n "$st" ]] && TEST_OOB="$st"
+  st="$(sed -n 's/^--- TEST (b2) .* \[\(PASS\|FAIL\|SKIP\)\] ---$/\1/p' "$rpt" | head -n 1)"
+  [[ -n "$st" ]] && TEST_UAF="$st"
+  st="$(sed -n 's/^--- TEST (c) .* \[\(PASS\|FAIL\|SKIP\)\] ---$/\1/p' "$rpt" | head -n 1)"
+  [[ -n "$st" ]] && TEST_CXX="$st"
+}
 
 emit_report() {
   local t_end duration body_file report_sha archived
@@ -71,10 +118,17 @@ emit_report() {
     echo "RELEASE_TAG=${RELEASE_TAG}"
     echo "RELEASE_COMMIT=${RELEASE_COMMIT}"
     echo "RELEASE_SUBJECT=${RELEASE_SUBJECT}"
+    echo "FILC_COMMIT=${FILC_COMMIT}"
+    echo "MUSL_COMMIT=${MUSL_COMMIT}"
     echo "RUN_MODE=${RUN_MODE}"
     echo "PATCH_STATUS=${PATCH_STATUS}"
     echo "FIRST_FAILING_PATCH=${FIRST_FAILING_PATCH}"
-    echo "BUILD_AND_SMOKE_STATUS=${BUILD_AND_SMOKE_STATUS}"
+    echo "TOOLCHAIN_BUILD_STATUS=${TOOLCHAIN_BUILD_STATUS}"
+    echo "TOOLCHAIN_TEST_STATUS=${TOOLCHAIN_TEST_STATUS}"
+    echo "TEST_HELLO=${TEST_HELLO}"
+    echo "TEST_OOB=${TEST_OOB}"
+    echo "TEST_UAF=${TEST_UAF}"
+    echo "TEST_CXX=${TEST_CXX}"
     echo "OVERALL_STATUS=${OVERALL_STATUS}"
     echo "DURATION_SECONDS=${duration}"
     echo ""
@@ -85,6 +139,17 @@ emit_report() {
       for entry in "${PATCH_RESULTS[@]}"; do
         echo "  ${entry}"
       done
+    fi
+    if [[ -f "$TOOLCHAIN_REPORT" ]]; then
+      echo ""
+      echo "TOOLCHAIN_LIBRARY_SHA256:"
+      extract_section "$TOOLCHAIN_REPORT" "--- TOOLCHAIN LIBRARY SHA-256 ---"
+      echo ""
+      echo "TEST_BINARY_SHA256:"
+      extract_section "$TOOLCHAIN_REPORT" "--- TEST BINARY SHA-256 ---"
+      echo ""
+      echo "TOOLCHAIN_E2E_OUTPUT:"
+      awk '/^--- TEST \(a\)/{p=1} /^====/{if(p) exit} p{print "  " $0}' "$TOOLCHAIN_REPORT"
     fi
     if [[ -n "$FIRST_FAILURE_DETAIL" ]]; then
       echo ""
@@ -149,7 +214,7 @@ fi
 
 if [[ "$RELEASE_TAG" == "$PINNED_RELEASE_TAG" && "$RELEASE_COMMIT" == "$PINNED_LLVM_COMMIT" ]]; then
   RUN_MODE="regression"
-  echo "Latest release ${RELEASE_TAG} (${RELEASE_COMMIT}) matches UPSTREAM pin -> regression build + smoke"
+  echo "Latest release ${RELEASE_TAG} (${RELEASE_COMMIT}) matches UPSTREAM pin -> regression toolchain + E2E"
 else
   RUN_MODE="new-release"
   echo "Newer release detected: ${RELEASE_TAG} (${RELEASE_COMMIT}) vs pinned ${PINNED_RELEASE_TAG} (${PINNED_LLVM_COMMIT})"
@@ -170,7 +235,7 @@ fi
 
 git -C "$LLVM_DIR" sparse-checkout init --cone
 git -C "$LLVM_DIR" sparse-checkout set \
-  llvm clang lld cmake third-party libcxx libcxxabi libunwind libc polly
+  llvm clang lld cmake third-party compiler-rt runtimes libcxx libcxxabi libunwind libc polly
 git -C "$LLVM_DIR" checkout -q --force --detach "$RELEASE_COMMIT"
 git -C "$LLVM_DIR" clean -fdx -q
 
@@ -238,17 +303,34 @@ for rel in "${ALL_PATCHES[@]}"; do
   fi
 done
 
+rm -f "$TOOLCHAIN_REPORT"
+
 if [[ "$PATCH_STATUS" == "PASS" ]]; then
-  echo "=== All ${#ALL_PATCHES[@]} patches applied cleanly (${RUN_MODE}); running build-and-smoke ==="
-  if "$REPO_ROOT/scripts/build-and-smoke" "$LLVM_DIR" "$BUILD_DIR"; then
-    BUILD_AND_SMOKE_STATUS="PASS"
-    OVERALL_STATUS="PASS"
+  echo "=== All ${#ALL_PATCHES[@]} patches applied cleanly (${RUN_MODE}); building full toolchain ==="
+  if "$REPO_ROOT/scripts/fetch-runtime" "$RUNTIME_SRC" \
+    && "$REPO_ROOT/scripts/apply-musl" yolomusl "$YOLOMUSL_SRC" \
+    && "$REPO_ROOT/scripts/apply-musl" usermusl --reference "$YOLOMUSL_SRC" "$USERMUSL_SRC" \
+    && FILC_SKIP_FETCH=1 "$REPO_ROOT/scripts/build-toolchain" "$WORK_ROOT"; then
+    TOOLCHAIN_BUILD_STATUS="PASS"
+    echo "=== Running end-to-end runtime tests (Hello, OOB, UAF, C++) ==="
+    if FILC_REPORT_ARCHIVE_DIR="" "$REPO_ROOT/scripts/test-toolchain" "$WORK_ROOT" "$TOOLCHAIN_REPORT"; then
+      parse_toolchain_report "$TOOLCHAIN_REPORT"
+      TOOLCHAIN_TEST_STATUS="PASS"
+      OVERALL_STATUS="PASS"
+    else
+      parse_toolchain_report "$TOOLCHAIN_REPORT"
+      TOOLCHAIN_TEST_STATUS="FAIL"
+      OVERALL_STATUS="FAIL"
+    fi
   else
-    BUILD_AND_SMOKE_STATUS="FAIL"
+    TOOLCHAIN_BUILD_STATUS="FAIL"
+    TOOLCHAIN_TEST_STATUS="SKIP"
     OVERALL_STATUS="FAIL"
   fi
 else
-  BUILD_AND_SMOKE_STATUS="SKIP"
+  echo "=== Skipping toolchain build and E2E tests (PATCH_STATUS=${PATCH_STATUS}) ==="
+  TOOLCHAIN_BUILD_STATUS="SKIP"
+  TOOLCHAIN_TEST_STATUS="SKIP"
   OVERALL_STATUS="FAIL"
 fi
 

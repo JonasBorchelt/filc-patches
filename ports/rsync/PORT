@@ -7,17 +7,17 @@ EXTRACT_DIR="rsync-3.5.2"
 TIER=3
 DEPS="zlib lz4 zstd xxhash"
 BUILD_SYSTEM="autotools"
-CONFIGURE_ARGS="--disable-openssl --disable-md2man"
+CONFIGURE_ARGS="--disable-openssl --disable-md2man --disable-md5-asm"
 MAKE_ARGS=""
 INSTALL_ARGS=""
 TEST_CMD=""
-POLICY_CLASS="P0-Clean"
-POLICY_RATIONALE="Builds unmodified upstream rsync 3.5.2 linked against Fil-C zlib, lz4, zstd, and xxhash."
+POLICY_CLASS="P3-BuildOpt"
+POLICY_RATIONALE="Builds unmodified upstream rsync 3.5.2 (0 source patches) with --disable-md5-asm while OpenSSL is disabled so rsync uses portable C MD5 instead of unannotated x86-64 md5-asm-x86_64.S."
 FILC_ORIGIN_REF="cede3de02b42:projects/rsync.projeny"
 
 port_configure() {
   CPPFLAGS="-I$PIZFIX/include" LDFLAGS="-L$PIZFIX/lib" \
-    ./configure --prefix="$PIZFIX" --disable-openssl --disable-md2man
+    ./configure --prefix="$PIZFIX" --disable-openssl --disable-md2man --disable-md5-asm
 }
 
 port_test() {

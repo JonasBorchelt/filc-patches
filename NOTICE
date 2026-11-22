@@ -1,0 +1,46 @@
+filc-patches
+=============
+
+Original scripts, documentation, and repository metadata in this repository
+(including `scripts/`, `ports/PLAN.md`, `README.md`, and `UPSTREAM`) are
+licensed under the Apache License v2.0 with LLVM Exceptions
+(`Apache-2.0 WITH LLVM-exception`); see `LICENSE`.
+
+Derived patch series and provenance files correspond to the upstream projects
+pinned in `UPSTREAM` and retain their respective upstream licenses:
+
+1. `llvm/` and `runtime/cxx/` (derived from LLVM / Clang / libc++ / libc++abi
+   and Fil-C compiler/C++ changes, pinned to `llvmorg-23.1.6` / `5b10d2d74929`
+   and Fil-C `cede3de02b42`):
+   - License: Apache License v2.0 with LLVM Exceptions (`Apache-2.0 WITH LLVM-exception`)
+   - Upstream sources: LLVM `LICENSE.TXT`, `llvm/LICENSE.TXT`, `clang/LICENSE.TXT`,
+     `lld/LICENSE.TXT`, `compiler-rt/LICENSE.TXT`, `libcxx/LICENSE.TXT`,
+     `libcxxabi/LICENSE.TXT`; Fil-C `README.md` (`## License`) and per-file
+     SPDX headers (e.g., `llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp`).
+
+2. `runtime/filc/` (provenance and compatibility patches for Fil-C runtime
+   paths fetched sparsely from `cede3de02b42`: `libpas/`, `filc/{include,src,main}`,
+   `yolounwind/`, `projects/zegarmistrz/include`):
+   - Primary license: BSD-2-Clause
+     Copyright (c) 2018-2022 Apple Inc.
+     Copyright (c) 2023-2026 Epic Games, Inc.
+     Copyright (c) 2026 Filip Pizlo
+   - Upstream sources: `libpas/LICENSE.txt` and per-file headers
+     (`filc/include/stdfil.h`, `filc/main/main.c`, `yolounwind/yolounwind.c`,
+     `projects/zegarmistrz/include/zegarmistrz.h`).
+   - File-specific upstream notices within fetched runtime paths:
+     - `setproctitle` from OpenSSH 10.3p1 (BSD-3-Clause; see `libpas/LICENSE.txt`)
+     - `filc/include/unwind.h` (Apache-2.0 WITH LLVM-exception; derived from LLVM libunwind)
+     - `filc/src/snprintf.c` (permissive notice; Copyright Patrick Powell 1995)
+
+3. `libc/musl/` (derived from upstream musl `f314e133929b` and Fil-C
+   `projects/yolomusl/` and `projects/usermusl/` at `cede3de02b42`):
+   - Primary license: MIT License
+     Copyright (c) 2005-2020 Rich Felker, et al.
+   - Upstream sources: musl `COPYRIGHT`, Fil-C `projects/yolomusl/COPYRIGHT`,
+     and `projects/usermusl/COPYRIGHT` (including compatible third-party
+     permissive portions documented therein).
+   - `libc/musl/usermusl/01-usermusl-filc.patch` additionally includes
+     BSD-licensed components with preserved file headers (Regents of the
+     University of California, Copyright (c) 1991, 1993; Colin Percival and
+     Alexander Peslyak, BSD-2-Clause).

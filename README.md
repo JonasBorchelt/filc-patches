@@ -86,10 +86,15 @@ Building and packaging software with Fil-C follows a toolchain-first policy desi
 
 ## Provenance & Licensing
 
-This repository contains patch series, provenance metadata, and build/test
-scripts referencing upstream projects pinned in `UPSTREAM`. Each upstream
-component remains under its own license, verified against the pinned source
-files:
+Original scripts, documentation, and repository metadata in `filc-patches`
+are licensed under the **Apache License v2.0 with LLVM Exceptions**
+(`Apache-2.0 WITH LLVM-exception`); see [`LICENSE`](LICENSE) and
+[`NOTICE`](NOTICE) for the full per-directory license and attribution
+breakdown.
+
+This repository also contains patch series and provenance metadata referencing
+upstream projects pinned in `UPSTREAM`. Each upstream component remains under
+its own license, verified against the pinned source files:
 
 - **Fil-C compiler & C++ libraries** (`pizlonator/fil-c` @ `cede3de02b42`,
   patches in `llvm/` and `runtime/cxx/`): **Apache License v2.0 with LLVM

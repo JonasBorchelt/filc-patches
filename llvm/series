@@ -1,0 +1,7 @@
+# Fil-C LLVM/Clang core patch series (Linux / Unikraft)
+01-llvm-ir-datalayout-and-analysis.patch
+02-llvm-optimizer-guards.patch
+03-llvm-filc-passes.patch
+04-clang-frontend-ast-basic-sema.patch
+05-clang-codegen-abi-and-pipeline.patch
+06a-clang-driver-filc-core.patch

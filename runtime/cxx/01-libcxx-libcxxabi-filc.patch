@@ -1,0 +1,1554 @@
+Subject: Fil-C libc++ and libc++abi runtime adaptations
+Upstream-Base: llvmorg-20.1.8 (87f0227cb60147a26a1eeb4fb06e3b505e9c7261)
+Fil-C-Head: cede3de02b42b58a14acc9ce39c9894ab952a915 (branch deluge)
+
+Adapts libc++abi exception personality to <pizlonated_eh_landing_pad.h>,
+prefixes exported symbols in .exp lists with pizlonated_, adjusts libc++
+CMake/atomic/locale/chrono/tzdb hooks, and guards llvm-libc cfloat16.h
+under __FILC__ for aarch64 demangler builds.
+
+Fil-C-Origin-Commits (3):
+  37785dac5b13dc137467b21a6ca71e34a6c74d9d 2026-09-26 cosmo: aarch64 libc++ + gen_shims arch gate + argv2 exclusion
+  1636dbb63e6bdf76451c30b38743345114bbc5ba 2026-09-19 cosmo: libc++/libc++abi for the cosmo flavor (static) + C++ tests enabled
+  d292f5dbb951d549fc9b053950d5a330d532b361 2025-08-22 Rebase Fil-C to clang/llvm 20.1.8
+
+---
+diff --git a/libc/include/llvm-libc-types/cfloat16.h b/libc/include/llvm-libc-types/cfloat16.h
+index 2d4cef756272..ad54bde72a9a 100644
+--- a/libc/include/llvm-libc-types/cfloat16.h
++++ b/libc/include/llvm-libc-types/cfloat16.h
+@@ -13,7 +13,10 @@
+     (!defined(__GNUC__) || __GNUC__ >= 13 ||                                   \
+      (defined(__clang__) && __clang_major__ >= 14)) &&                         \
+     !defined(__arm__) && !defined(_M_ARM) && !defined(__riscv) &&              \
+-    !defined(_WIN32)
++    !defined(_WIN32) && !defined(__FILC__)
++/* Fil-C port: the Fil-Pizlonator's frontend has no _Complex _Float16 on
++   aarch64; disabling the typedef compiles the (unused) complex half paths
++   out of the demangler. */
+ #define LIBC_TYPES_HAS_CFLOAT16
+ typedef _Complex _Float16 cfloat16;
+ #endif
+diff --git a/libcxx/CMakeLists.txt b/libcxx/CMakeLists.txt
+index abe12c2805a7..8b9f17ce8981 100644
+--- a/libcxx/CMakeLists.txt
++++ b/libcxx/CMakeLists.txt
+@@ -234,10 +234,16 @@ if (NOT "${LIBCXX_LIBC}" IN_LIST LIBCXX_SUPPORTED_C_LIBRARIES)
+ endif()
+ 
+ # ABI Library options ---------------------------------------------------------
+-if (MSVC)
+-  set(LIBCXX_DEFAULT_ABI_LIBRARY "vcruntime")
+-else()
++if (LIBCXX_FORCE_LIBCXXABI)
++  message(STATUS "Forcing libcxxabi")
+   set(LIBCXX_DEFAULT_ABI_LIBRARY "libcxxabi")
++else()
++  message(STATUS "NOT forcing libcxxabi")
++  if (MSVC)
++    set(LIBCXX_DEFAULT_ABI_LIBRARY "vcruntime")
++  else()
++    set(LIBCXX_DEFAULT_ABI_LIBRARY "libcxxabi")
++  endif()
+ endif()
+ 
+ set(LIBCXX_SUPPORTED_ABI_LIBRARIES none libcxxabi system-libcxxabi libcxxrt libstdc++ libsupc++ vcruntime)
+@@ -293,6 +299,11 @@ endif()
+ 
+ # Feature options -------------------------------------------------------------
+ option(LIBCXX_HAS_MUSL_LIBC "Build libc++ with support for the Musl C library" OFF)
++# Cosmopolitan libc (cosmo), as used by Fil-C's cosmo flavor, is musl-like
++# except that it natively provides most of the *_l locale functions (and is
++# C-locale-only), so it is not quite the same as musl.  The differences are
++# handled by _LIBCPP_HAS_COSMO_LIBC special cases in the headers.
++option(LIBCXX_HAS_COSMO_LIBC "Build libc++ with support for the Cosmopolitan (cosmo) C library" OFF)
+ option(LIBCXX_HAS_PTHREAD_API "Ignore auto-detection and force use of pthread API" OFF)
+ option(LIBCXX_HAS_WIN32_THREAD_API "Ignore auto-detection and force use of win32 thread API" OFF)
+ option(LIBCXX_HAS_EXTERNAL_THREAD_API
+@@ -317,6 +328,7 @@ if (WIN32)
+ endif()
+ option(LIBCXX_HERMETIC_STATIC_LIBRARY
+   "Do not export any symbols from the static library." ${LIBCXX_HERMETIC_STATIC_LIBRARY_DEFAULT})
++option(LIBCXX_FORCE_LIBCXXABI "Force use of libcxxabi." OFF)
+ 
+ #===============================================================================
+ # Check option configurations
+@@ -473,6 +485,8 @@ include(HandleLibcxxFlags)
+ # 'config-ix' use them during feature checks. It also adds them to both
+ # 'LIBCXX_COMPILE_FLAGS' and 'LIBCXX_LINK_FLAGS'
+ 
++list(APPEND LIBCXX_LINK_FLAGS "-nostdlib++")
++
+ if (${CMAKE_SYSTEM_NAME} MATCHES "AIX")
+   add_flags_if_supported("-mdefault-visibility-export-mapping=explicit")
+   set(CMAKE_AIX_EXPORT_ALL_SYMBOLS OFF)
+@@ -755,6 +769,7 @@ config_define(${LIBCXX_HAS_PTHREAD_API} _LIBCPP_HAS_THREAD_API_PTHREAD)
+ config_define(${LIBCXX_HAS_EXTERNAL_THREAD_API} _LIBCPP_HAS_THREAD_API_EXTERNAL)
+ config_define(${LIBCXX_HAS_WIN32_THREAD_API} _LIBCPP_HAS_THREAD_API_WIN32)
+ config_define(${LIBCXX_HAS_MUSL_LIBC} _LIBCPP_HAS_MUSL_LIBC)
++config_define(${LIBCXX_HAS_COSMO_LIBC} _LIBCPP_HAS_COSMO_LIBC)
+ config_define_if(LIBCXX_NO_VCRUNTIME _LIBCPP_NO_VCRUNTIME)
+ config_define(${LIBCXX_ENABLE_FILESYSTEM} _LIBCPP_HAS_FILESYSTEM)
+ config_define(${LIBCXX_ENABLE_RANDOM_DEVICE} _LIBCPP_HAS_RANDOM_DEVICE)
+diff --git a/libcxx/include/__atomic/contention_t.h b/libcxx/include/__atomic/contention_t.h
+index 5b42a0125f87..f588672fb2b7 100644
+--- a/libcxx/include/__atomic/contention_t.h
++++ b/libcxx/include/__atomic/contention_t.h
+@@ -19,11 +19,14 @@
+ 
+ _LIBCPP_BEGIN_NAMESPACE_STD
+ 
+-#if defined(__linux__) || (defined(_AIX) && !defined(__64BIT__))
++// Note: cosmo's headers undefine __linux__ (cosmo is polyglot), and whether
++// that has happened depends on include order, so the cosmo configuration is
++// checked directly to keep __cxx_contention_t consistent everywhere.
++#if defined(__linux__) || _LIBCPP_HAS_COSMO_LIBC || (defined(_AIX) && !defined(__64BIT__))
+ using __cxx_contention_t _LIBCPP_NODEBUG = int32_t;
+ #else
+ using __cxx_contention_t _LIBCPP_NODEBUG = int64_t;
+-#endif // __linux__ || (_AIX && !__64BIT__)
++#endif // __linux__ || _LIBCPP_HAS_COSMO_LIBC || (_AIX && !__64BIT__)
+ 
+ using __cxx_atomic_contention_t _LIBCPP_NODEBUG = __cxx_atomic_impl<__cxx_contention_t>;
+ 
+diff --git a/libcxx/include/__config b/libcxx/include/__config
+index a866a7e65183..347b7c7d0d0a 100644
+--- a/libcxx/include/__config
++++ b/libcxx/include/__config
+@@ -908,7 +908,7 @@ typedef __char32_t char32_t;
+ #  endif
+ 
+ #  if defined(__BIONIC__) || defined(__NuttX__) || defined(__Fuchsia__) || defined(__wasi__) ||                        \
+-      _LIBCPP_HAS_MUSL_LIBC || defined(__OpenBSD__) || defined(__LLVM_LIBC__)
++      _LIBCPP_HAS_MUSL_LIBC || _LIBCPP_HAS_COSMO_LIBC || defined(__OpenBSD__) || defined(__LLVM_LIBC__)
+ #    define _LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE
+ #  endif
+ 
+diff --git a/libcxx/include/__config_site.in b/libcxx/include/__config_site.in
+index fc01aaf2d874..30b51d572958 100644
+--- a/libcxx/include/__config_site.in
++++ b/libcxx/include/__config_site.in
+@@ -17,6 +17,7 @@
+ #cmakedefine01 _LIBCPP_HAS_MONOTONIC_CLOCK
+ #cmakedefine01 _LIBCPP_HAS_TERMINAL
+ #cmakedefine01 _LIBCPP_HAS_MUSL_LIBC
++#cmakedefine01 _LIBCPP_HAS_COSMO_LIBC
+ #cmakedefine01 _LIBCPP_HAS_THREAD_API_PTHREAD
+ #cmakedefine01 _LIBCPP_HAS_THREAD_API_EXTERNAL
+ #cmakedefine01 _LIBCPP_HAS_THREAD_API_WIN32
+diff --git a/libcxx/include/__locale_dir/locale_base_api.h b/libcxx/include/__locale_dir/locale_base_api.h
+index 9d92a5ea1f0a..4d1bec261431 100644
+--- a/libcxx/include/__locale_dir/locale_base_api.h
++++ b/libcxx/include/__locale_dir/locale_base_api.h
+@@ -226,19 +226,48 @@ inline _LIBCPP_HIDE_FROM_ABI int __tolower(int __ch, __locale_t __loc) { return
+ 
+ #      if _LIBCPP_HAS_WIDE_CHARACTERS
+ inline _LIBCPP_HIDE_FROM_ABI int __wcscoll(const wchar_t* __s1, const wchar_t* __s2, __locale_t __loc) {
++#        if _LIBCPP_HAS_COSMO_LIBC
++  // Cosmo declares wcscoll_l but does not implement it (and does not implement
++  // plain wcscoll either).  Cosmo only has the "C" locale, where collation is
++  // code point order, i.e. wcscmp.
++  return wcscmp(__s1, __s2);
++#        else
+   return wcscoll_l(__s1, __s2, __loc);
++#        endif
+ }
+ inline _LIBCPP_HIDE_FROM_ABI size_t __wcsxfrm(wchar_t* __dest, const wchar_t* __src, size_t __n, __locale_t __loc) {
+   return wcsxfrm_l(__dest, __src, __n, __loc);
+ }
+ inline _LIBCPP_HIDE_FROM_ABI int __iswctype(wint_t __ch, wctype_t __type, __locale_t __loc) {
++#        if _LIBCPP_HAS_COSMO_LIBC
++  // Cosmo declares iswctype_l but does not implement it.  Cosmo only has the
++  // "C" locale, where iswctype_l is iswctype.
++  return iswctype(__ch, __type);
++#        else
+   return iswctype_l(__ch, __type, __loc);
++#        endif
+ }
+ inline _LIBCPP_HIDE_FROM_ABI int __iswspace(wint_t __ch, __locale_t __loc) { return iswspace_l(__ch, __loc); }
+ inline _LIBCPP_HIDE_FROM_ABI int __iswprint(wint_t __ch, __locale_t __loc) { return iswprint_l(__ch, __loc); }
+ inline _LIBCPP_HIDE_FROM_ABI int __iswcntrl(wint_t __ch, __locale_t __loc) { return iswcntrl_l(__ch, __loc); }
+-inline _LIBCPP_HIDE_FROM_ABI int __iswupper(wint_t __ch, __locale_t __loc) { return iswupper_l(__ch, __loc); }
+-inline _LIBCPP_HIDE_FROM_ABI int __iswlower(wint_t __ch, __locale_t __loc) { return iswlower_l(__ch, __loc); }
++inline _LIBCPP_HIDE_FROM_ABI int __iswupper(wint_t __ch, __locale_t __loc) {
++#        if _LIBCPP_HAS_COSMO_LIBC
++  // Cosmo declares iswupper_l but does not implement it.  Cosmo only has the
++  // "C" locale, where iswupper_l is iswupper.
++  return iswupper(__ch);
++#        else
++  return iswupper_l(__ch, __loc);
++#        endif
++}
++inline _LIBCPP_HIDE_FROM_ABI int __iswlower(wint_t __ch, __locale_t __loc) {
++#        if _LIBCPP_HAS_COSMO_LIBC
++  // Cosmo declares iswlower_l but does not implement it.  Cosmo only has the
++  // "C" locale, where iswlower_l is iswlower.
++  return iswlower(__ch);
++#        else
++  return iswlower_l(__ch, __loc);
++#        endif
++}
+ inline _LIBCPP_HIDE_FROM_ABI int __iswalpha(wint_t __ch, __locale_t __loc) { return iswalpha_l(__ch, __loc); }
+ inline _LIBCPP_HIDE_FROM_ABI int __iswblank(wint_t __ch, __locale_t __loc) { return iswblank_l(__ch, __loc); }
+ inline _LIBCPP_HIDE_FROM_ABI int __iswdigit(wint_t __ch, __locale_t __loc) { return iswdigit_l(__ch, __loc); }
+diff --git a/libcxx/lib/notweak.exp b/libcxx/lib/notweak.exp
+index fafde1c84b63..b1e1981f7837 100644
+--- a/libcxx/lib/notweak.exp
++++ b/libcxx/lib/notweak.exp
+@@ -1,5 +1,5 @@
+ # Remove the weak-def bit from these external symbols
+-__ZT*
+-__ZN*
+-__ZS*
++_pizlonated__ZT*
++_pizlonated__ZN*
++_pizlonated__ZS*
+ 
+diff --git a/libcxx/lib/weak.exp b/libcxx/lib/weak.exp
+index 6bdcc0578460..a43e416fdc5b 100644
+--- a/libcxx/lib/weak.exp
++++ b/libcxx/lib/weak.exp
+@@ -1,16 +1,16 @@
+-__ZTISt10bad_typeid
+-__ZTISt11logic_error
+-__ZTISt11range_error
+-__ZTISt12domain_error
+-__ZTISt12length_error
+-__ZTISt12out_of_range
+-__ZTISt13bad_exception
+-__ZTISt13runtime_error
+-__ZTISt14overflow_error
+-__ZTISt15underflow_error
+-__ZTISt16invalid_argument
+-__ZTISt16nested_exception
+-__ZTISt20bad_array_new_length
+-__ZTISt8bad_cast
+-__ZTISt9bad_alloc
+-__ZTISt9exception
++_pizlonated__ZTISt10bad_typeid
++_pizlonated__ZTISt11logic_error
++_pizlonated__ZTISt11range_error
++_pizlonated__ZTISt12domain_error
++_pizlonated__ZTISt12length_error
++_pizlonated__ZTISt12out_of_range
++_pizlonated__ZTISt13bad_exception
++_pizlonated__ZTISt13runtime_error
++_pizlonated__ZTISt14overflow_error
++_pizlonated__ZTISt15underflow_error
++_pizlonated__ZTISt16invalid_argument
++_pizlonated__ZTISt16nested_exception
++_pizlonated__ZTISt20bad_array_new_length
++_pizlonated__ZTISt8bad_cast
++_pizlonated__ZTISt9bad_alloc
++_pizlonated__ZTISt9exception
+diff --git a/libcxx/src/atomic.cpp b/libcxx/src/atomic.cpp
+index c1af8d6f95aa..9335fd307d37 100644
+--- a/libcxx/src/atomic.cpp
++++ b/libcxx/src/atomic.cpp
+@@ -16,16 +16,20 @@
+ 
+ #ifdef __linux__
+ 
+-#  include <linux/futex.h>
+-#  include <sys/syscall.h>
+-#  include <unistd.h>
++#  ifdef __PIZLONATOR_WAS_HERE__
++#    include <pizlonated_syscalls.h>
++#  else
++#    include <linux/futex.h>
++#    include <sys/syscall.h>
++#    include <unistd.h>
+ 
+ // libc++ uses SYS_futex as a universal syscall name. However, on 32 bit architectures
+ // with a 64 bit time_t, we need to specify SYS_futex_time64.
+-#  if !defined(SYS_futex) && defined(SYS_futex_time64)
+-#    define SYS_futex SYS_futex_time64
++#    if !defined(SYS_futex) && defined(SYS_futex_time64)
++#      define SYS_futex SYS_futex_time64
++#    endif
++#    define _LIBCPP_FUTEX(...) syscall(SYS_futex, __VA_ARGS__)
+ #  endif
+-#  define _LIBCPP_FUTEX(...) syscall(SYS_futex, __VA_ARGS__)
+ 
+ #elif defined(__FreeBSD__)
+ 
+@@ -55,12 +59,20 @@ _LIBCPP_BEGIN_NAMESPACE_STD
+ 
+ static void
+ __libcpp_platform_wait_on_address(__cxx_atomic_contention_t const volatile* __ptr, __cxx_contention_t __val) {
++#  ifdef __PIZLONATOR_WAS_HERE__
++  zsys_futex_wait((volatile int*)__ptr, __val, 1);
++#  else
+   static constexpr timespec __timeout = {2, 0};
+   _LIBCPP_FUTEX(__ptr, FUTEX_WAIT_PRIVATE, __val, &__timeout, 0, 0);
++#  endif
+ }
+ 
+ static void __libcpp_platform_wake_by_address(__cxx_atomic_contention_t const volatile* __ptr, bool __notify_one) {
++#  ifdef __PIZLONATOR_WAS_HERE__
++  zsys_futex_wake((volatile int*)__ptr, __notify_one ? 1 : INT_MAX, 1);
++#  else
+   _LIBCPP_FUTEX(__ptr, FUTEX_WAKE_PRIVATE, __notify_one ? 1 : INT_MAX, 0, 0, 0);
++#  endif
+ }
+ 
+ #elif defined(__APPLE__) && defined(_LIBCPP_USE_ULOCK)
+diff --git a/libcxx/src/chrono.cpp b/libcxx/src/chrono.cpp
+index dbc0f617b4fc..4e97ff239b7a 100644
+--- a/libcxx/src/chrono.cpp
++++ b/libcxx/src/chrono.cpp
+@@ -37,8 +37,10 @@
+ 
+ // OpenBSD and GPU do not have a fully conformant suite of POSIX timers, but
+ // it does have clock_gettime and CLOCK_MONOTONIC which is all we need.
++// Cosmo doesn't advertise _POSIX_TIMERS in its headers, but it does provide
++// clock_gettime and the CLOCK_* constants.
+ #if defined(__APPLE__) || defined(__gnu_hurd__) || defined(__OpenBSD__) || defined(__AMDGPU__) ||                      \
+-    defined(__NVPTX__) || (defined(_POSIX_TIMERS) && _POSIX_TIMERS > 0)
++    defined(__NVPTX__) || _LIBCPP_HAS_COSMO_LIBC || (defined(_POSIX_TIMERS) && _POSIX_TIMERS > 0)
+ #  define _LIBCPP_HAS_CLOCK_GETTIME
+ #endif
+ 
+diff --git a/libcxx/src/experimental/tzdb.cpp b/libcxx/src/experimental/tzdb.cpp
+index f38f495c2d0b..8ac183d7ec22 100644
+--- a/libcxx/src/experimental/tzdb.cpp
++++ b/libcxx/src/experimental/tzdb.cpp
+@@ -52,7 +52,9 @@ namespace chrono {
+ // This function is weak so it can be overriden in the tests. The
+ // declaration is in the test header test/support/test_tzdb.h
+ _LIBCPP_WEAK string_view __libcpp_tzdb_directory() {
+-#if defined(__linux__)
++// Note: cosmo's headers undefine __linux__ (cosmo is polyglot), so we key on
++// the libc++ cosmo configuration instead.
++#if defined(__linux__) || _LIBCPP_HAS_COSMO_LIBC
+   return "/usr/share/zoneinfo/";
+ #else
+ #  error "unknown path to the IANA Time Zone Database"
+diff --git a/libcxx/src/include/config_elast.h b/libcxx/src/include/config_elast.h
+index 7edff2d9375d..31c54bcf1abe 100644
+--- a/libcxx/src/include/config_elast.h
++++ b/libcxx/src/include/config_elast.h
+@@ -33,7 +33,7 @@
+ // No _LIBCPP_ELAST needed on WASI
+ #elif defined(__EMSCRIPTEN__)
+ // No _LIBCPP_ELAST needed on Emscripten
+-#elif defined(__linux__) || _LIBCPP_HAS_MUSL_LIBC
++#elif defined(__linux__) || _LIBCPP_HAS_MUSL_LIBC || _LIBCPP_HAS_COSMO_LIBC
+ #  define _LIBCPP_ELAST 4095
+ #elif defined(__APPLE__)
+ // No _LIBCPP_ELAST needed on Apple
+diff --git a/libcxxabi/CMakeLists.txt b/libcxxabi/CMakeLists.txt
+index 6dcfc51e5532..dd5ae4eb78ed 100644
+--- a/libcxxabi/CMakeLists.txt
++++ b/libcxxabi/CMakeLists.txt
+@@ -411,6 +411,8 @@ if (LIBCXXABI_HAS_UNDEFINED_SYMBOLS)
+   endif()
+ endif()
+ 
++list(APPEND LIBCXXABI_LINK_FLAGS "-nostdlib++")
++
+ if (LIBCXXABI_HAS_PTHREAD_API)
+   add_definitions(-D_LIBCPP_HAS_THREAD_API_PTHREAD)
+ endif()
+diff --git a/libcxxabi/include/__cxxabi_config.h b/libcxxabi/include/__cxxabi_config.h
+index 759445dac91f..a4c2cdfc8033 100644
+--- a/libcxxabi/include/__cxxabi_config.h
++++ b/libcxxabi/include/__cxxabi_config.h
+@@ -10,7 +10,7 @@
+ #define ____CXXABI_CONFIG_H
+ 
+ #if defined(__arm__) && !defined(__USING_SJLJ_EXCEPTIONS__) &&                 \
+-    !defined(__ARM_DWARF_EH__) && !defined(__SEH__)
++    !defined(__ARM_DWARF_EH__) && !defined(__SEH__) && !defined(__PIZLONATOR_WAS_HERE__)
+ #define _LIBCXXABI_ARM_EHABI
+ #endif
+ 
+diff --git a/libcxxabi/lib/cxxabiv1.exp b/libcxxabi/lib/cxxabiv1.exp
+index 0a22831a63d0..c00211882e4a 100644
+--- a/libcxxabi/lib/cxxabiv1.exp
++++ b/libcxxabi/lib/cxxabiv1.exp
+@@ -1,35 +1,35 @@
+ # Typeinfos for types from libc++abi
+-__ZTIN10__cxxabiv116__enum_type_infoE
+-__ZTIN10__cxxabiv116__shim_type_infoE
+-__ZTIN10__cxxabiv117__array_type_infoE
+-__ZTIN10__cxxabiv117__pbase_type_infoE
+-__ZTIN10__cxxabiv119__pointer_type_infoE
+-__ZTIN10__cxxabiv120__function_type_infoE
+-__ZTIN10__cxxabiv123__fundamental_type_infoE
+-__ZTIN10__cxxabiv129__pointer_to_member_type_infoE
++_pizlonated__ZTIN10__cxxabiv116__enum_type_infoE
++_pizlonated__ZTIN10__cxxabiv116__shim_type_infoE
++_pizlonated__ZTIN10__cxxabiv117__array_type_infoE
++_pizlonated__ZTIN10__cxxabiv117__pbase_type_infoE
++_pizlonated__ZTIN10__cxxabiv119__pointer_type_infoE
++_pizlonated__ZTIN10__cxxabiv120__function_type_infoE
++_pizlonated__ZTIN10__cxxabiv123__fundamental_type_infoE
++_pizlonated__ZTIN10__cxxabiv129__pointer_to_member_type_infoE
+ 
+ # Typeinfo names for types from libc++abi
+-__ZTSN10__cxxabiv116__enum_type_infoE
+-__ZTSN10__cxxabiv116__shim_type_infoE
+-__ZTSN10__cxxabiv117__array_type_infoE
+-__ZTSN10__cxxabiv117__class_type_infoE
+-__ZTSN10__cxxabiv117__pbase_type_infoE
+-__ZTSN10__cxxabiv119__pointer_type_infoE
+-__ZTSN10__cxxabiv120__function_type_infoE
+-__ZTSN10__cxxabiv120__si_class_type_infoE
+-__ZTSN10__cxxabiv121__vmi_class_type_infoE
+-__ZTSN10__cxxabiv123__fundamental_type_infoE
+-__ZTSN10__cxxabiv129__pointer_to_member_type_infoE
++_pizlonated__ZTSN10__cxxabiv116__enum_type_infoE
++_pizlonated__ZTSN10__cxxabiv116__shim_type_infoE
++_pizlonated__ZTSN10__cxxabiv117__array_type_infoE
++_pizlonated__ZTSN10__cxxabiv117__class_type_infoE
++_pizlonated__ZTSN10__cxxabiv117__pbase_type_infoE
++_pizlonated__ZTSN10__cxxabiv119__pointer_type_infoE
++_pizlonated__ZTSN10__cxxabiv120__function_type_infoE
++_pizlonated__ZTSN10__cxxabiv120__si_class_type_infoE
++_pizlonated__ZTSN10__cxxabiv121__vmi_class_type_infoE
++_pizlonated__ZTSN10__cxxabiv123__fundamental_type_infoE
++_pizlonated__ZTSN10__cxxabiv129__pointer_to_member_type_infoE
+ 
+ # Vtables for libc++abi types
+-__ZTVN10__cxxabiv116__enum_type_infoE
+-__ZTVN10__cxxabiv116__shim_type_infoE
+-__ZTVN10__cxxabiv117__array_type_infoE
+-__ZTVN10__cxxabiv117__class_type_infoE
+-__ZTVN10__cxxabiv117__pbase_type_infoE
+-__ZTVN10__cxxabiv119__pointer_type_infoE
+-__ZTVN10__cxxabiv120__function_type_infoE
+-__ZTVN10__cxxabiv120__si_class_type_infoE
+-__ZTVN10__cxxabiv121__vmi_class_type_infoE
+-__ZTVN10__cxxabiv123__fundamental_type_infoE
+-__ZTVN10__cxxabiv129__pointer_to_member_type_infoE
++_pizlonated__ZTVN10__cxxabiv116__enum_type_infoE
++_pizlonated__ZTVN10__cxxabiv116__shim_type_infoE
++_pizlonated__ZTVN10__cxxabiv117__array_type_infoE
++_pizlonated__ZTVN10__cxxabiv117__class_type_infoE
++_pizlonated__ZTVN10__cxxabiv117__pbase_type_infoE
++_pizlonated__ZTVN10__cxxabiv119__pointer_type_infoE
++_pizlonated__ZTVN10__cxxabiv120__function_type_infoE
++_pizlonated__ZTVN10__cxxabiv120__si_class_type_infoE
++_pizlonated__ZTVN10__cxxabiv121__vmi_class_type_infoE
++_pizlonated__ZTVN10__cxxabiv123__fundamental_type_infoE
++_pizlonated__ZTVN10__cxxabiv129__pointer_to_member_type_infoE
+diff --git a/libcxxabi/lib/fundamental-types.exp b/libcxxabi/lib/fundamental-types.exp
+index fe21022328fe..ddcebcabe0e7 100644
+--- a/libcxxabi/lib/fundamental-types.exp
++++ b/libcxxabi/lib/fundamental-types.exp
+@@ -1,153 +1,153 @@
+ # Typeinfos for fundamental types
+-__ZTIa
+-__ZTIb
+-__ZTIc
+-__ZTId
+-__ZTIDh
+-__ZTIDi
+-__ZTIDn
+-__ZTIDs
+-__ZTIDu
+-__ZTIe
+-__ZTIf
+-__ZTIg
+-__ZTIh
+-__ZTIi
+-__ZTIj
+-__ZTIl
+-__ZTIm
+-__ZTIn
+-__ZTIo
+-__ZTIPa
+-__ZTIPb
+-__ZTIPc
+-__ZTIPd
+-__ZTIPDh
+-__ZTIPDi
+-__ZTIPDn
+-__ZTIPDs
+-__ZTIPDu
+-__ZTIPe
+-__ZTIPf
+-__ZTIPg
+-__ZTIPh
+-__ZTIPi
+-__ZTIPj
+-__ZTIPKa
+-__ZTIPKb
+-__ZTIPKc
+-__ZTIPKd
+-__ZTIPKDh
+-__ZTIPKDi
+-__ZTIPKDn
+-__ZTIPKDs
+-__ZTIPKDu
+-__ZTIPKe
+-__ZTIPKf
+-__ZTIPKg
+-__ZTIPKh
+-__ZTIPKi
+-__ZTIPKj
+-__ZTIPKl
+-__ZTIPKm
+-__ZTIPKn
+-__ZTIPKo
+-__ZTIPKs
+-__ZTIPKt
+-__ZTIPKv
+-__ZTIPKw
+-__ZTIPKx
+-__ZTIPKy
+-__ZTIPl
+-__ZTIPm
+-__ZTIPn
+-__ZTIPo
+-__ZTIPs
+-__ZTIPt
+-__ZTIPv
+-__ZTIPw
+-__ZTIPx
+-__ZTIPy
+-__ZTIs
+-__ZTIt
+-__ZTIv
+-__ZTIw
+-__ZTIx
+-__ZTIy
++_pizlonated__ZTIa
++_pizlonated__ZTIb
++_pizlonated__ZTIc
++_pizlonated__ZTId
++_pizlonated__ZTIDh
++_pizlonated__ZTIDi
++_pizlonated__ZTIDn
++_pizlonated__ZTIDs
++_pizlonated__ZTIDu
++_pizlonated__ZTIe
++_pizlonated__ZTIf
++_pizlonated__ZTIg
++_pizlonated__ZTIh
++_pizlonated__ZTIi
++_pizlonated__ZTIj
++_pizlonated__ZTIl
++_pizlonated__ZTIm
++_pizlonated__ZTIn
++_pizlonated__ZTIo
++_pizlonated__ZTIPa
++_pizlonated__ZTIPb
++_pizlonated__ZTIPc
++_pizlonated__ZTIPd
++_pizlonated__ZTIPDh
++_pizlonated__ZTIPDi
++_pizlonated__ZTIPDn
++_pizlonated__ZTIPDs
++_pizlonated__ZTIPDu
++_pizlonated__ZTIPe
++_pizlonated__ZTIPf
++_pizlonated__ZTIPg
++_pizlonated__ZTIPh
++_pizlonated__ZTIPi
++_pizlonated__ZTIPj
++_pizlonated__ZTIPKa
++_pizlonated__ZTIPKb
++_pizlonated__ZTIPKc
++_pizlonated__ZTIPKd
++_pizlonated__ZTIPKDh
++_pizlonated__ZTIPKDi
++_pizlonated__ZTIPKDn
++_pizlonated__ZTIPKDs
++_pizlonated__ZTIPKDu
++_pizlonated__ZTIPKe
++_pizlonated__ZTIPKf
++_pizlonated__ZTIPKg
++_pizlonated__ZTIPKh
++_pizlonated__ZTIPKi
++_pizlonated__ZTIPKj
++_pizlonated__ZTIPKl
++_pizlonated__ZTIPKm
++_pizlonated__ZTIPKn
++_pizlonated__ZTIPKo
++_pizlonated__ZTIPKs
++_pizlonated__ZTIPKt
++_pizlonated__ZTIPKv
++_pizlonated__ZTIPKw
++_pizlonated__ZTIPKx
++_pizlonated__ZTIPKy
++_pizlonated__ZTIPl
++_pizlonated__ZTIPm
++_pizlonated__ZTIPn
++_pizlonated__ZTIPo
++_pizlonated__ZTIPs
++_pizlonated__ZTIPt
++_pizlonated__ZTIPv
++_pizlonated__ZTIPw
++_pizlonated__ZTIPx
++_pizlonated__ZTIPy
++_pizlonated__ZTIs
++_pizlonated__ZTIt
++_pizlonated__ZTIv
++_pizlonated__ZTIw
++_pizlonated__ZTIx
++_pizlonated__ZTIy
+ 
+ # Typeinfo names for fundamental types
+-__ZTSa
+-__ZTSb
+-__ZTSc
+-__ZTSd
+-__ZTSDh
+-__ZTSDi
+-__ZTSDn
+-__ZTSDs
+-__ZTSDu
+-__ZTSe
+-__ZTSf
+-__ZTSg
+-__ZTSh
+-__ZTSi
+-__ZTSj
+-__ZTSl
+-__ZTSm
+-__ZTSn
+-__ZTSo
+-__ZTSPa
+-__ZTSPb
+-__ZTSPc
+-__ZTSPd
+-__ZTSPDh
+-__ZTSPDi
+-__ZTSPDn
+-__ZTSPDs
+-__ZTSPDu
+-__ZTSPe
+-__ZTSPf
+-__ZTSPg
+-__ZTSPh
+-__ZTSPi
+-__ZTSPj
+-__ZTSPKa
+-__ZTSPKb
+-__ZTSPKc
+-__ZTSPKd
+-__ZTSPKDh
+-__ZTSPKDi
+-__ZTSPKDn
+-__ZTSPKDs
+-__ZTSPKDu
+-__ZTSPKe
+-__ZTSPKf
+-__ZTSPKg
+-__ZTSPKh
+-__ZTSPKi
+-__ZTSPKj
+-__ZTSPKl
+-__ZTSPKm
+-__ZTSPKn
+-__ZTSPKo
+-__ZTSPKs
+-__ZTSPKt
+-__ZTSPKv
+-__ZTSPKw
+-__ZTSPKx
+-__ZTSPKy
+-__ZTSPl
+-__ZTSPm
+-__ZTSPn
+-__ZTSPo
+-__ZTSPs
+-__ZTSPt
+-__ZTSPv
+-__ZTSPw
+-__ZTSPx
+-__ZTSPy
+-__ZTSs
+-__ZTSt
+-__ZTSv
+-__ZTSw
+-__ZTSx
+-__ZTSy
++_pizlonated__ZTSa
++_pizlonated__ZTSb
++_pizlonated__ZTSc
++_pizlonated__ZTSd
++_pizlonated__ZTSDh
++_pizlonated__ZTSDi
++_pizlonated__ZTSDn
++_pizlonated__ZTSDs
++_pizlonated__ZTSDu
++_pizlonated__ZTSe
++_pizlonated__ZTSf
++_pizlonated__ZTSg
++_pizlonated__ZTSh
++_pizlonated__ZTSi
++_pizlonated__ZTSj
++_pizlonated__ZTSl
++_pizlonated__ZTSm
++_pizlonated__ZTSn
++_pizlonated__ZTSo
++_pizlonated__ZTSPa
++_pizlonated__ZTSPb
++_pizlonated__ZTSPc
++_pizlonated__ZTSPd
++_pizlonated__ZTSPDh
++_pizlonated__ZTSPDi
++_pizlonated__ZTSPDn
++_pizlonated__ZTSPDs
++_pizlonated__ZTSPDu
++_pizlonated__ZTSPe
++_pizlonated__ZTSPf
++_pizlonated__ZTSPg
++_pizlonated__ZTSPh
++_pizlonated__ZTSPi
++_pizlonated__ZTSPj
++_pizlonated__ZTSPKa
++_pizlonated__ZTSPKb
++_pizlonated__ZTSPKc
++_pizlonated__ZTSPKd
++_pizlonated__ZTSPKDh
++_pizlonated__ZTSPKDi
++_pizlonated__ZTSPKDn
++_pizlonated__ZTSPKDs
++_pizlonated__ZTSPKDu
++_pizlonated__ZTSPKe
++_pizlonated__ZTSPKf
++_pizlonated__ZTSPKg
++_pizlonated__ZTSPKh
++_pizlonated__ZTSPKi
++_pizlonated__ZTSPKj
++_pizlonated__ZTSPKl
++_pizlonated__ZTSPKm
++_pizlonated__ZTSPKn
++_pizlonated__ZTSPKo
++_pizlonated__ZTSPKs
++_pizlonated__ZTSPKt
++_pizlonated__ZTSPKv
++_pizlonated__ZTSPKw
++_pizlonated__ZTSPKx
++_pizlonated__ZTSPKy
++_pizlonated__ZTSPl
++_pizlonated__ZTSPm
++_pizlonated__ZTSPn
++_pizlonated__ZTSPo
++_pizlonated__ZTSPs
++_pizlonated__ZTSPt
++_pizlonated__ZTSPv
++_pizlonated__ZTSPw
++_pizlonated__ZTSPx
++_pizlonated__ZTSPy
++_pizlonated__ZTSs
++_pizlonated__ZTSt
++_pizlonated__ZTSv
++_pizlonated__ZTSw
++_pizlonated__ZTSx
++_pizlonated__ZTSy
+diff --git a/libcxxabi/lib/itanium-base.exp b/libcxxabi/lib/itanium-base.exp
+index 0c23a19c94c5..748d5a21105d 100644
+--- a/libcxxabi/lib/itanium-base.exp
++++ b/libcxxabi/lib/itanium-base.exp
+@@ -1,31 +1,31 @@
+ # Itanium C++ ABI requirements (minus most exception support)
+-___cxa_bad_cast
+-___cxa_bad_typeid
+-___cxa_current_primary_exception
+-___cxa_decrement_exception_refcount
+-___cxa_deleted_virtual
+-___cxa_demangle
+-___cxa_get_globals
+-___cxa_get_globals_fast
+-___cxa_guard_abort
+-___cxa_guard_acquire
+-___cxa_guard_release
+-___cxa_increment_exception_refcount
+-___cxa_pure_virtual
+-___cxa_throw_bad_array_new_length
+-___cxa_uncaught_exception
+-___cxa_uncaught_exceptions
+-___cxa_vec_cctor
+-___cxa_vec_cleanup
+-___cxa_vec_ctor
+-___cxa_vec_delete
+-___cxa_vec_delete2
+-___cxa_vec_delete3
+-___cxa_vec_dtor
+-___cxa_vec_new
+-___cxa_vec_new2
+-___cxa_vec_new3
+-___dynamic_cast
+-___cxa_terminate_handler
+-___cxa_unexpected_handler
+-___cxa_new_handler
++_pizlonated___cxa_bad_cast
++_pizlonated___cxa_bad_typeid
++_pizlonated___cxa_current_primary_exception
++_pizlonated___cxa_decrement_exception_refcount
++_pizlonated___cxa_deleted_virtual
++_pizlonated___cxa_demangle
++_pizlonated___cxa_get_globals
++_pizlonated___cxa_get_globals_fast
++_pizlonated___cxa_guard_abort
++_pizlonated___cxa_guard_acquire
++_pizlonated___cxa_guard_release
++_pizlonated___cxa_increment_exception_refcount
++_pizlonated___cxa_pure_virtual
++_pizlonated___cxa_throw_bad_array_new_length
++_pizlonated___cxa_uncaught_exception
++_pizlonated___cxa_uncaught_exceptions
++_pizlonated___cxa_vec_cctor
++_pizlonated___cxa_vec_cleanup
++_pizlonated___cxa_vec_ctor
++_pizlonated___cxa_vec_delete
++_pizlonated___cxa_vec_delete2
++_pizlonated___cxa_vec_delete3
++_pizlonated___cxa_vec_dtor
++_pizlonated___cxa_vec_new
++_pizlonated___cxa_vec_new2
++_pizlonated___cxa_vec_new3
++_pizlonated___dynamic_cast
++_pizlonated___cxa_terminate_handler
++_pizlonated___cxa_unexpected_handler
++_pizlonated___cxa_new_handler
+diff --git a/libcxxabi/lib/itanium-exceptions.exp b/libcxxabi/lib/itanium-exceptions.exp
+index 9a7f317b0232..fb015198f133 100644
+--- a/libcxxabi/lib/itanium-exceptions.exp
++++ b/libcxxabi/lib/itanium-exceptions.exp
+@@ -1,14 +1,14 @@
+ # Itanium C++ ABI requirements related to exceptions
+-___cxa_allocate_dependent_exception
+-___cxa_allocate_exception
+-___cxa_begin_catch
+-___cxa_call_unexpected
+-___cxa_current_exception_type
+-___cxa_end_catch
+-___cxa_call_terminate
+-___cxa_free_dependent_exception
+-___cxa_free_exception
+-___cxa_get_exception_ptr
+-___cxa_init_primary_exception
+-___cxa_rethrow
+-___cxa_throw
++_pizlonated___cxa_allocate_dependent_exception
++_pizlonated___cxa_allocate_exception
++_pizlonated___cxa_begin_catch
++_pizlonated___cxa_call_unexpected
++_pizlonated___cxa_current_exception_type
++_pizlonated___cxa_end_catch
++_pizlonated___cxa_call_terminate
++_pizlonated___cxa_free_dependent_exception
++_pizlonated___cxa_free_exception
++_pizlonated___cxa_get_exception_ptr
++_pizlonated___cxa_init_primary_exception
++_pizlonated___cxa_rethrow
++_pizlonated___cxa_throw
+diff --git a/libcxxabi/lib/new-delete.exp b/libcxxabi/lib/new-delete.exp
+index 4f97de7e8bb6..ab1c6c64b0df 100644
+--- a/libcxxabi/lib/new-delete.exp
++++ b/libcxxabi/lib/new-delete.exp
+@@ -1,21 +1,21 @@
+ # Symbols for all variants of global operator new and delete
+-__Znwm
+-__ZnwmRKSt9nothrow_t
+-__ZnwmSt11align_val_t
+-__ZnwmSt11align_val_tRKSt9nothrow_t
+-__ZdaPv
+-__ZdaPvm
+-__ZdaPvmSt11align_val_t
+-__ZdaPvRKSt9nothrow_t
+-__ZdaPvSt11align_val_t
+-__ZdaPvSt11align_val_tRKSt9nothrow_t
+-__ZdlPv
+-__ZdlPvm
+-__ZdlPvmSt11align_val_t
+-__ZdlPvRKSt9nothrow_t
+-__ZdlPvSt11align_val_t
+-__ZdlPvSt11align_val_tRKSt9nothrow_t
+-__Znam
+-__ZnamRKSt9nothrow_t
+-__ZnamSt11align_val_t
+-__ZnamSt11align_val_tRKSt9nothrow_t
++_pizlonated__Znwm
++_pizlonated__ZnwmRKSt9nothrow_t
++_pizlonated__ZnwmSt11align_val_t
++_pizlonated__ZnwmSt11align_val_tRKSt9nothrow_t
++_pizlonated__ZdaPv
++_pizlonated__ZdaPvm
++_pizlonated__ZdaPvmSt11align_val_t
++_pizlonated__ZdaPvRKSt9nothrow_t
++_pizlonated__ZdaPvSt11align_val_t
++_pizlonated__ZdaPvSt11align_val_tRKSt9nothrow_t
++_pizlonated__ZdlPv
++_pizlonated__ZdlPvm
++_pizlonated__ZdlPvmSt11align_val_t
++_pizlonated__ZdlPvRKSt9nothrow_t
++_pizlonated__ZdlPvSt11align_val_t
++_pizlonated__ZdlPvSt11align_val_tRKSt9nothrow_t
++_pizlonated__Znam
++_pizlonated__ZnamRKSt9nothrow_t
++_pizlonated__ZnamSt11align_val_t
++_pizlonated__ZnamSt11align_val_tRKSt9nothrow_t
+diff --git a/libcxxabi/lib/personality-sjlj.exp b/libcxxabi/lib/personality-sjlj.exp
+index be0bfac668e2..d87ff75584e7 100644
+--- a/libcxxabi/lib/personality-sjlj.exp
++++ b/libcxxabi/lib/personality-sjlj.exp
+@@ -1 +1 @@
+-___gxx_personality_sj0
++_pizlonated___gxx_personality_sj0
+diff --git a/libcxxabi/lib/personality-v0.exp b/libcxxabi/lib/personality-v0.exp
+index 610e4e3568dc..cdabf6025336 100644
+--- a/libcxxabi/lib/personality-v0.exp
++++ b/libcxxabi/lib/personality-v0.exp
+@@ -1 +1 @@
+-___gxx_personality_v0
++_pizlonated___gxx_personality_v0
+diff --git a/libcxxabi/lib/std-exceptions.exp b/libcxxabi/lib/std-exceptions.exp
+index bb4a2b2e93ea..b598735f17b9 100644
+--- a/libcxxabi/lib/std-exceptions.exp
++++ b/libcxxabi/lib/std-exceptions.exp
+@@ -1,121 +1,121 @@
+ # Typeinfos for std:: exception types
+-__ZTISt10bad_typeid
+-__ZTISt11logic_error
+-__ZTISt11range_error
+-__ZTISt12domain_error
+-__ZTISt12length_error
+-__ZTISt12out_of_range
+-__ZTISt13bad_exception
+-__ZTISt13runtime_error
+-__ZTISt14overflow_error
+-__ZTISt15underflow_error
+-__ZTISt16invalid_argument
+-__ZTISt20bad_array_new_length
+-__ZTISt8bad_cast
+-__ZTISt9bad_alloc
+-__ZTISt9exception
+-__ZTISt9type_info
++_pizlonated__ZTISt10bad_typeid
++_pizlonated__ZTISt11logic_error
++_pizlonated__ZTISt11range_error
++_pizlonated__ZTISt12domain_error
++_pizlonated__ZTISt12length_error
++_pizlonated__ZTISt12out_of_range
++_pizlonated__ZTISt13bad_exception
++_pizlonated__ZTISt13runtime_error
++_pizlonated__ZTISt14overflow_error
++_pizlonated__ZTISt15underflow_error
++_pizlonated__ZTISt16invalid_argument
++_pizlonated__ZTISt20bad_array_new_length
++_pizlonated__ZTISt8bad_cast
++_pizlonated__ZTISt9bad_alloc
++_pizlonated__ZTISt9exception
++_pizlonated__ZTISt9type_info
+ 
+ # Typeinfo names for std:: exception types
+-__ZTSSt10bad_typeid
+-__ZTSSt11logic_error
+-__ZTSSt11range_error
+-__ZTSSt12domain_error
+-__ZTSSt12length_error
+-__ZTSSt12out_of_range
+-__ZTSSt13bad_exception
+-__ZTSSt13runtime_error
+-__ZTSSt14overflow_error
+-__ZTSSt15underflow_error
+-__ZTSSt16invalid_argument
+-__ZTSSt20bad_array_new_length
+-__ZTSSt8bad_cast
+-__ZTSSt9bad_alloc
+-__ZTSSt9exception
+-__ZTSSt9type_info
++_pizlonated__ZTSSt10bad_typeid
++_pizlonated__ZTSSt11logic_error
++_pizlonated__ZTSSt11range_error
++_pizlonated__ZTSSt12domain_error
++_pizlonated__ZTSSt12length_error
++_pizlonated__ZTSSt12out_of_range
++_pizlonated__ZTSSt13bad_exception
++_pizlonated__ZTSSt13runtime_error
++_pizlonated__ZTSSt14overflow_error
++_pizlonated__ZTSSt15underflow_error
++_pizlonated__ZTSSt16invalid_argument
++_pizlonated__ZTSSt20bad_array_new_length
++_pizlonated__ZTSSt8bad_cast
++_pizlonated__ZTSSt9bad_alloc
++_pizlonated__ZTSSt9exception
++_pizlonated__ZTSSt9type_info
+ 
+ # Vtables for std:: exception types
+-__ZTVSt10bad_typeid
+-__ZTVSt11logic_error
+-__ZTVSt11range_error
+-__ZTVSt12domain_error
+-__ZTVSt12length_error
+-__ZTVSt12out_of_range
+-__ZTVSt13bad_exception
+-__ZTVSt13runtime_error
+-__ZTVSt14overflow_error
+-__ZTVSt15underflow_error
+-__ZTVSt16invalid_argument
+-__ZTVSt20bad_array_new_length
+-__ZTVSt8bad_cast
+-__ZTVSt9bad_alloc
+-__ZTVSt9exception
+-__ZTVSt9type_info
++_pizlonated__ZTVSt10bad_typeid
++_pizlonated__ZTVSt11logic_error
++_pizlonated__ZTVSt11range_error
++_pizlonated__ZTVSt12domain_error
++_pizlonated__ZTVSt12length_error
++_pizlonated__ZTVSt12out_of_range
++_pizlonated__ZTVSt13bad_exception
++_pizlonated__ZTVSt13runtime_error
++_pizlonated__ZTVSt14overflow_error
++_pizlonated__ZTVSt15underflow_error
++_pizlonated__ZTVSt16invalid_argument
++_pizlonated__ZTVSt20bad_array_new_length
++_pizlonated__ZTVSt8bad_cast
++_pizlonated__ZTVSt9bad_alloc
++_pizlonated__ZTVSt9exception
++_pizlonated__ZTVSt9type_info
+ 
+ # ::what() functions for std:: exception types
+-__ZNKSt10bad_typeid4whatEv
+-__ZNKSt11logic_error4whatEv
+-__ZNKSt13bad_exception4whatEv
+-__ZNKSt13runtime_error4whatEv
+-__ZNKSt20bad_array_new_length4whatEv
+-__ZNKSt8bad_cast4whatEv
+-__ZNKSt9bad_alloc4whatEv
+-__ZNKSt9exception4whatEv
++_pizlonated__ZNKSt10bad_typeid4whatEv
++_pizlonated__ZNKSt11logic_error4whatEv
++_pizlonated__ZNKSt13bad_exception4whatEv
++_pizlonated__ZNKSt13runtime_error4whatEv
++_pizlonated__ZNKSt20bad_array_new_length4whatEv
++_pizlonated__ZNKSt8bad_cast4whatEv
++_pizlonated__ZNKSt9bad_alloc4whatEv
++_pizlonated__ZNKSt9exception4whatEv
+ 
+ # Default constructors and destructors for std:: exception types
+-__ZNSt10bad_typeidC1Ev
+-__ZNSt10bad_typeidC2Ev
+-__ZNSt10bad_typeidD0Ev
+-__ZNSt10bad_typeidD1Ev
+-__ZNSt10bad_typeidD2Ev
+-__ZNSt11logic_errorD0Ev
+-__ZNSt11logic_errorD1Ev
+-__ZNSt11logic_errorD2Ev
+-__ZNSt11range_errorD0Ev
+-__ZNSt11range_errorD1Ev
+-__ZNSt11range_errorD2Ev
+-__ZNSt12domain_errorD0Ev
+-__ZNSt12domain_errorD1Ev
+-__ZNSt12domain_errorD2Ev
+-__ZNSt12length_errorD0Ev
+-__ZNSt12length_errorD1Ev
+-__ZNSt12length_errorD2Ev
+-__ZNSt12out_of_rangeD0Ev
+-__ZNSt12out_of_rangeD1Ev
+-__ZNSt12out_of_rangeD2Ev
+-__ZNSt13bad_exceptionD0Ev
+-__ZNSt13bad_exceptionD1Ev
+-__ZNSt13bad_exceptionD2Ev
+-__ZNSt13runtime_errorD0Ev
+-__ZNSt13runtime_errorD1Ev
+-__ZNSt13runtime_errorD2Ev
+-__ZNSt14overflow_errorD0Ev
+-__ZNSt14overflow_errorD1Ev
+-__ZNSt14overflow_errorD2Ev
+-__ZNSt15underflow_errorD0Ev
+-__ZNSt15underflow_errorD1Ev
+-__ZNSt15underflow_errorD2Ev
+-__ZNSt16invalid_argumentD0Ev
+-__ZNSt16invalid_argumentD1Ev
+-__ZNSt16invalid_argumentD2Ev
+-__ZNSt20bad_array_new_lengthC1Ev
+-__ZNSt20bad_array_new_lengthC2Ev
+-__ZNSt20bad_array_new_lengthD0Ev
+-__ZNSt20bad_array_new_lengthD1Ev
+-__ZNSt20bad_array_new_lengthD2Ev
+-__ZNSt8bad_castC1Ev
+-__ZNSt8bad_castC2Ev
+-__ZNSt8bad_castD0Ev
+-__ZNSt8bad_castD1Ev
+-__ZNSt8bad_castD2Ev
+-__ZNSt9bad_allocC1Ev
+-__ZNSt9bad_allocC2Ev
+-__ZNSt9bad_allocD0Ev
+-__ZNSt9bad_allocD1Ev
+-__ZNSt9bad_allocD2Ev
+-__ZNSt9exceptionD0Ev
+-__ZNSt9exceptionD1Ev
+-__ZNSt9exceptionD2Ev
+-__ZNSt9type_infoD0Ev
+-__ZNSt9type_infoD1Ev
+-__ZNSt9type_infoD2Ev
++_pizlonated__ZNSt10bad_typeidC1Ev
++_pizlonated__ZNSt10bad_typeidC2Ev
++_pizlonated__ZNSt10bad_typeidD0Ev
++_pizlonated__ZNSt10bad_typeidD1Ev
++_pizlonated__ZNSt10bad_typeidD2Ev
++_pizlonated__ZNSt11logic_errorD0Ev
++_pizlonated__ZNSt11logic_errorD1Ev
++_pizlonated__ZNSt11logic_errorD2Ev
++_pizlonated__ZNSt11range_errorD0Ev
++_pizlonated__ZNSt11range_errorD1Ev
++_pizlonated__ZNSt11range_errorD2Ev
++_pizlonated__ZNSt12domain_errorD0Ev
++_pizlonated__ZNSt12domain_errorD1Ev
++_pizlonated__ZNSt12domain_errorD2Ev
++_pizlonated__ZNSt12length_errorD0Ev
++_pizlonated__ZNSt12length_errorD1Ev
++_pizlonated__ZNSt12length_errorD2Ev
++_pizlonated__ZNSt12out_of_rangeD0Ev
++_pizlonated__ZNSt12out_of_rangeD1Ev
++_pizlonated__ZNSt12out_of_rangeD2Ev
++_pizlonated__ZNSt13bad_exceptionD0Ev
++_pizlonated__ZNSt13bad_exceptionD1Ev
++_pizlonated__ZNSt13bad_exceptionD2Ev
++_pizlonated__ZNSt13runtime_errorD0Ev
++_pizlonated__ZNSt13runtime_errorD1Ev
++_pizlonated__ZNSt13runtime_errorD2Ev
++_pizlonated__ZNSt14overflow_errorD0Ev
++_pizlonated__ZNSt14overflow_errorD1Ev
++_pizlonated__ZNSt14overflow_errorD2Ev
++_pizlonated__ZNSt15underflow_errorD0Ev
++_pizlonated__ZNSt15underflow_errorD1Ev
++_pizlonated__ZNSt15underflow_errorD2Ev
++_pizlonated__ZNSt16invalid_argumentD0Ev
++_pizlonated__ZNSt16invalid_argumentD1Ev
++_pizlonated__ZNSt16invalid_argumentD2Ev
++_pizlonated__ZNSt20bad_array_new_lengthC1Ev
++_pizlonated__ZNSt20bad_array_new_lengthC2Ev
++_pizlonated__ZNSt20bad_array_new_lengthD0Ev
++_pizlonated__ZNSt20bad_array_new_lengthD1Ev
++_pizlonated__ZNSt20bad_array_new_lengthD2Ev
++_pizlonated__ZNSt8bad_castC1Ev
++_pizlonated__ZNSt8bad_castC2Ev
++_pizlonated__ZNSt8bad_castD0Ev
++_pizlonated__ZNSt8bad_castD1Ev
++_pizlonated__ZNSt8bad_castD2Ev
++_pizlonated__ZNSt9bad_allocC1Ev
++_pizlonated__ZNSt9bad_allocC2Ev
++_pizlonated__ZNSt9bad_allocD0Ev
++_pizlonated__ZNSt9bad_allocD1Ev
++_pizlonated__ZNSt9bad_allocD2Ev
++_pizlonated__ZNSt9exceptionD0Ev
++_pizlonated__ZNSt9exceptionD1Ev
++_pizlonated__ZNSt9exceptionD2Ev
++_pizlonated__ZNSt9type_infoD0Ev
++_pizlonated__ZNSt9type_infoD1Ev
++_pizlonated__ZNSt9type_infoD2Ev
+diff --git a/libcxxabi/lib/std-misc.exp b/libcxxabi/lib/std-misc.exp
+index 0ce6a2944398..2d7318204323 100644
+--- a/libcxxabi/lib/std-misc.exp
++++ b/libcxxabi/lib/std-misc.exp
+@@ -1,9 +1,9 @@
+ # Other std:: functions implemented in libc++abi
+-__ZSt10unexpectedv
+-__ZSt13get_terminatev
+-__ZSt13set_terminatePFvvE
+-__ZSt14get_unexpectedv
+-__ZSt14set_unexpectedPFvvE
+-__ZSt15get_new_handlerv
+-__ZSt15set_new_handlerPFvvE
+-__ZSt9terminatev
++_pizlonated__ZSt10unexpectedv
++_pizlonated__ZSt13get_terminatev
++_pizlonated__ZSt13set_terminatePFvvE
++_pizlonated__ZSt14get_unexpectedv
++_pizlonated__ZSt14set_unexpectedPFvvE
++_pizlonated__ZSt15get_new_handlerv
++_pizlonated__ZSt15set_new_handlerPFvvE
++_pizlonated__ZSt9terminatev
+diff --git a/libcxxabi/lib/symbols-not-reexported.exp b/libcxxabi/lib/symbols-not-reexported.exp
+index ea5d0b3fc15d..ed05958ee771 100644
+--- a/libcxxabi/lib/symbols-not-reexported.exp
++++ b/libcxxabi/lib/symbols-not-reexported.exp
+@@ -4,10 +4,10 @@
+ # These symbols are implementation details of libc++abi, but they are referenced from UBSan
+ # (which is a total hack). We'll need to figure out how to decouple UBSan from these details
+ # before we can stop exporting them from libc++abi.
+-__ZTIN10__cxxabiv117__class_type_infoE
+-__ZTIN10__cxxabiv120__si_class_type_infoE
+-__ZTIN10__cxxabiv121__vmi_class_type_infoE
++_pizlonated__ZTIN10__cxxabiv117__class_type_infoE
++_pizlonated__ZTIN10__cxxabiv120__si_class_type_infoE
++_pizlonated__ZTIN10__cxxabiv121__vmi_class_type_infoE
+ 
+ # This symbol is not an implementation detail of libc++abi, but it also causes issues when moving
+ # to libc++. This needs further investigation.
+-___cxa_rethrow_primary_exception
++_pizlonated___cxa_rethrow_primary_exception
+diff --git a/libcxxabi/src/cxa_exception.h b/libcxxabi/src/cxa_exception.h
+index aba08f299210..f04bc05038ee 100644
+--- a/libcxxabi/src/cxa_exception.h
++++ b/libcxxabi/src/cxa_exception.h
+@@ -17,6 +17,10 @@
+ #include "cxxabi.h"
+ #include "unwind.h"
+ 
++#if defined(__PIZLONATOR_WAS_HERE__)
++struct pizlonated_eh_landing_pad;
++#endif // defined(__PIZLONATOR_WAS_HERE__)
++
+ namespace __cxxabiv1 {
+ 
+ static const uint64_t kOurExceptionClass          = 0x434C4E47432B2B00; // CLNGC++\0
+@@ -62,7 +66,11 @@ struct _LIBCXXABI_HIDDEN __cxa_exception {
+ #else
+     int handlerSwitchValue;
+     const unsigned char *actionRecord;
++#if defined(__PIZLONATOR_WAS_HERE__)
++    const pizlonated_eh_landing_pad *languageSpecificData;
++#else // !defined(__PIZLONATOR_WAS_HERE__)
+     const unsigned char *languageSpecificData;
++#endif // !defined(__PIZLONATOR_WAS_HERE__)
+     void *catchTemp;
+     void *adjustedPtr;
+ #endif
+diff --git a/libcxxabi/src/cxa_guard_impl.h b/libcxxabi/src/cxa_guard_impl.h
+index 191a589176b1..640e4c1fda0f 100644
+--- a/libcxxabi/src/cxa_guard_impl.h
++++ b/libcxxabi/src/cxa_guard_impl.h
+@@ -63,6 +63,8 @@
+ #include <cstring>
+ #include <limits.h>
+ #include <stdlib.h>
++#include <stdfil.h>
++#include <pizlonated_syscalls.h>
+ 
+ #ifndef _LIBCXXABI_HAS_NO_THREADS
+ #  if defined(__ELF__) && defined(_LIBCXXABI_LINK_PTHREAD_LIB)
+@@ -164,7 +166,7 @@ uint32_t PlatformThreadID() {
+ #elif defined(SYS_gettid) && _LIBCPP_HAS_THREAD_API_PTHREAD
+ uint32_t PlatformThreadID() {
+   static_assert(sizeof(pid_t) == sizeof(uint32_t), "");
+-  return static_cast<uint32_t>(syscall(SYS_gettid));
++  return static_cast<uint32_t>(zthread_self_id());
+ }
+ #else
+ constexpr uint32_t (*PlatformThreadID)() = nullptr;
+@@ -427,14 +429,12 @@ void PlatformFutexWake(int* addr) {
+ }
+ #elif defined(SYS_futex)
+ void PlatformFutexWait(int* addr, int expect) {
+-  constexpr int WAIT = 0;
+-  syscall(SYS_futex, addr, WAIT, expect, 0);
++  zsys_futex_wait((volatile int*)addr, expect, 1);
+   __tsan_acquire(addr);
+ }
+ void PlatformFutexWake(int* addr) {
+-  constexpr int WAKE = 1;
+   __tsan_release(addr);
+-  syscall(SYS_futex, addr, WAKE, INT_MAX);
++  zsys_futex_wake((volatile int*)addr, INT_MAX, 1);
+ }
+ #else
+ constexpr void (*PlatformFutexWait)(int*, int) = nullptr;
+diff --git a/libcxxabi/src/cxa_personality.cpp b/libcxxabi/src/cxa_personality.cpp
+index 5f6e75c5be19..944ae41b37a0 100644
+--- a/libcxxabi/src/cxa_personality.cpp
++++ b/libcxxabi/src/cxa_personality.cpp
+@@ -22,6 +22,10 @@
+ #include "private_typeinfo.h"
+ #include "unwind.h"
+ 
++#ifdef __PIZLONATOR_WAS_HERE__
++#include <pizlonated_eh_landing_pad.h>
++#endif // __PIZLONATOR_WAS_HERE__
++
+ // TODO: This is a temporary workaround for libc++abi to recognize that it's being
+ // built against LLVM's libunwind. LLVM's libunwind started reporting _LIBUNWIND_VERSION
+ // in LLVM 15 -- we can remove this workaround after shipping LLVM 17. Once we remove
+@@ -151,6 +155,9 @@ Notes:
+ 
+ *  A cleanup can also be found under landingPad != 0 and actionEntry != 0 in
+      the Action Table with ttypeIndex == 0.
++
++Note about Fil-C: ifdef __PIZLONATOR_WAS_HERE__, we use the API in
++<pizlonated_eh_landing_pad.h> for all language-specific-data parsing.
+ */
+ 
+ namespace __cxxabiv1
+@@ -339,6 +346,27 @@ call_terminate(bool native_exception, _Unwind_Exception* unwind_exception)
+     std::terminate();
+ }
+ 
++#if defined(__PIZLONATOR_WAS_HERE__)
++static bool exception_spec_can_catch(int64_t specIndex,
++                                     const pizlonated_eh_landing_pad* landing_pad,
++                                     const __shim_type_info* excpType,
++                                     void* adjustedPtr,
++                                     _Unwind_Exception* unwind_exception)
++{
++    const pizlonated_eh_filter* filter =
++        pizlonated_eh_landing_pad_get_filter_by_encoded_action(landing_pad, specIndex);
++    for (unsigned index = 0; index < pizlonated_eh_filter_get_num_types(filter); ++index)
++    {
++        const __shim_type_info* catchType =
++            static_cast<const __shim_type_info*>(
++                pizlonated_eh_filter_get_type(filter, index));
++        void* tempPtr = adjustedPtr;
++        if (catchType->can_catch(excpType, tempPtr))
++            return false;
++    }
++    return true;
++}
++#else // !defined(__PIZLONATOR_WAS_HERE__)
+ #if defined(_LIBCXXABI_ARM_EHABI)
+ static const void* read_target2_value(const void* ptr)
+ {
+@@ -474,7 +502,7 @@ exception_spec_can_catch(int64_t specIndex, const uint8_t* classInfo,
+     }
+     return true;
+ }
+-#else
++#else // !defined(_LIBCXXABI_ARM_EHABI)
+ static
+ bool
+ exception_spec_can_catch(int64_t specIndex, const uint8_t* classInfo,
+@@ -510,7 +538,8 @@ exception_spec_can_catch(int64_t specIndex, const uint8_t* classInfo,
+     }
+     return true;
+ }
+-#endif
++#endif // !defined(_LIBCXXABI_ARM_EHABI)
++#endif // !defined(__PIZLONATOR_WAS_HERE__)
+ 
+ static
+ void*
+@@ -531,7 +560,11 @@ struct scan_results
+ {
+     int64_t        ttypeIndex;   // > 0 catch handler, < 0 exception spec handler, == 0 a cleanup
+     const uint8_t* actionRecord;         // Currently unused.  Retained to ease future maintenance.
++#if defined(__PIZLONATOR_WAS_HERE__)
++    const pizlonated_eh_landing_pad* languageSpecificData;  // Needed only for __cxa_call_unexpected
++#else // !defined(__PIZLONATOR_WAS_HERE__)
+     const uint8_t* languageSpecificData;  // Needed only for __cxa_call_unexpected
++#endif // !defined(__PIZLONATOR_WAS_HERE__)
+     uintptr_t      landingPad;   // null -> nothing found, else something found
+     void*          adjustedPtr;  // Used in cxa_exception.cpp
+     _Unwind_Reason_Code reason;  // One of _URC_FATAL_PHASE1_ERROR,
+@@ -547,6 +580,10 @@ void
+ set_registers(_Unwind_Exception* unwind_exception, _Unwind_Context* context,
+               const scan_results& results)
+ {
++#if defined(__PIZLONATOR_WAS_HERE__)
++  _Unwind_SetGR(context, 0, unwind_exception);
++  _Unwind_SetGR(context, 1, reinterpret_cast<void*>(static_cast<uintptr_t>(results.ttypeIndex)));
++#else // !defined(__PIZLONATOR_WAS_HERE__)
+ #if defined(__USING_SJLJ_EXCEPTIONS__) || defined(__WASM_EXCEPTIONS__)
+ #define __builtin_eh_return_data_regno(regno) regno
+ #elif defined(__ibmxl__)
+@@ -558,6 +595,7 @@ set_registers(_Unwind_Exception* unwind_exception, _Unwind_Context* context,
+   _Unwind_SetGR(context, __builtin_eh_return_data_regno(1),
+                 static_cast<uintptr_t>(results.ttypeIndex));
+   _Unwind_SetIP(context, results.landingPad);
++#endif // !defined(__PIZLONATOR_WAS_HERE__)
+ }
+ 
+ /*
+@@ -622,6 +660,115 @@ static void scan_eh_tab(scan_results &results, _Unwind_Action actions,
+         results.reason = _URC_FATAL_PHASE1_ERROR;
+         return;
+     }
++#if defined(__PIZLONATOR_WAS_HERE__)
++    const pizlonated_eh_landing_pad* lsda = (const pizlonated_eh_landing_pad*)
++        _Unwind_GetLanguageSpecificData(context);
++    if (!lsda)
++    {
++        // There is no exception table
++        results.reason = _URC_CONTINUE_UNWIND;
++        return;
++    }
++    results.languageSpecificData = lsda;
++    bool hasCleanup = false;
++    for (unsigned actionIndex = 0;
++         actionIndex < pizlonated_eh_landing_pad_get_num_actions(lsda);
++         ++actionIndex)
++    {
++        int ttypeIndex = pizlonated_eh_landing_pad_get_encoded_action(lsda, actionIndex);
++        if (ttypeIndex > 0)
++        {
++            const __shim_type_info* catchType =
++                static_cast<const __shim_type_info*>(
++                    pizlonated_eh_landing_pad_get_caught_type_by_encoded_action(lsda, ttypeIndex));
++            if (!catchType)
++            {
++                // Found catch (...) catches everything, including
++                // foreign exceptions. This is search phase, cleanup
++                // phase with foreign exception, or forced unwinding.
++                assert(actions & (_UA_SEARCH_PHASE | _UA_HANDLER_FRAME |
++                                  _UA_FORCE_UNWIND));
++                results.ttypeIndex = ttypeIndex;
++                results.adjustedPtr =
++                    get_thrown_object_ptr(unwind_exception);
++                results.reason = _URC_HANDLER_FOUND;
++                return;
++            }
++            else if (native_exception)
++            {
++                __cxa_exception* exception_header = (__cxa_exception*)(unwind_exception+1) - 1;
++                void* adjustedPtr = get_thrown_object_ptr(unwind_exception);
++                const __shim_type_info* excpType =
++                    static_cast<const __shim_type_info*>(exception_header->exceptionType);
++                if (adjustedPtr == 0 || excpType == 0)
++                {
++                    // Something very bad happened
++                    call_terminate(native_exception, unwind_exception);
++                }
++                if (catchType->can_catch(excpType, adjustedPtr))
++                {
++                    // Found a matching handler. This is either search
++                    // phase or forced unwinding.
++                    assert(actions &
++                           (_UA_SEARCH_PHASE | _UA_FORCE_UNWIND));
++                    results.ttypeIndex = ttypeIndex;
++                    results.adjustedPtr = adjustedPtr;
++                    results.reason = _URC_HANDLER_FOUND;
++                    return;
++                }
++            }
++        }
++        else if (ttypeIndex < 0)
++        {
++            // Found an exception specification.
++            if (actions & _UA_FORCE_UNWIND)
++            {
++                // Skip if forced unwinding.
++            }
++            else if (native_exception)
++            {
++                // Does the exception spec catch this native exception?
++                __cxa_exception* exception_header = (__cxa_exception*)(unwind_exception+1) - 1;
++                void* adjustedPtr = get_thrown_object_ptr(unwind_exception);
++                const __shim_type_info* excpType =
++                    static_cast<const __shim_type_info*>(exception_header->exceptionType);
++                if (adjustedPtr == 0 || excpType == 0)
++                {
++                    // Something very bad happened
++                    call_terminate(native_exception, unwind_exception);
++                }
++                if (exception_spec_can_catch(ttypeIndex, lsda,
++                                             excpType, adjustedPtr,
++                                             unwind_exception))
++                {
++                    // Native exception caught by exception
++                    // specification.
++                    assert(actions & _UA_SEARCH_PHASE);
++                    results.ttypeIndex = ttypeIndex;
++                    results.adjustedPtr = adjustedPtr;
++                    results.reason = _URC_HANDLER_FOUND;
++                    return;
++                }
++            }
++            else
++            {
++                // foreign exception caught by exception spec
++                results.ttypeIndex = ttypeIndex;
++                results.adjustedPtr =
++                    get_thrown_object_ptr(unwind_exception);
++                results.reason = _URC_HANDLER_FOUND;
++                return;
++            }
++        }
++        else
++        {
++            hasCleanup = true;
++        }
++    }
++    results.reason = hasCleanup && actions & _UA_CLEANUP_PHASE
++        ? _URC_HANDLER_FOUND
++        : _URC_CONTINUE_UNWIND;
++#else // !defined(__PIZLONATOR_WAS_HERE__)
+     // Start scan by getting exception table address.
+     const uint8_t *lsda = (const uint8_t *)_Unwind_GetLanguageSpecificData(context);
+     if (lsda == 0)
+@@ -852,6 +999,7 @@ static void scan_eh_tab(scan_results &results, _Unwind_Action actions,
+     // It is possible that no eh table entry specify how to handle
+     // this exception. By spec, terminate it immediately.
+     call_terminate(native_exception, unwind_exception);
++#endif // !defined(__PIZLONATOR_WAS_HERE__)
+ }
+ 
+ // public API
+@@ -1179,7 +1327,11 @@ __cxa_call_unexpected(void* arg)
+     std::terminate_handler t_handler;
+     __cxa_exception* old_exception_header = 0;
+     int64_t ttypeIndex;
++#if defined(__PIZLONATOR_WAS_HERE__)
++    const pizlonated_eh_landing_pad* lsda;
++#else
+     const uint8_t* lsda;
++#endif
+     uintptr_t base = 0;
+ 
+     if (native_old_exception)
+@@ -1216,6 +1368,7 @@ __cxa_call_unexpected(void* arg)
+         //   from here.
+         if (native_old_exception)
+         {
++#if !defined(__PIZLONATOR_WAS_HERE__)
+             // Have:
+             //   old_exception_header->languageSpecificData
+             //   old_exception_header->actionRecord
+@@ -1232,6 +1385,7 @@ __cxa_call_unexpected(void* arg)
+                 std::__terminate(t_handler);
+             uintptr_t classInfoOffset = readULEB128(&lsda);
+             const uint8_t* classInfo = lsda + classInfoOffset;
++#endif // !defined(__PIZLONATOR_WAS_HERE__)
+             // Is this new exception catchable by the exception spec at ttypeIndex?
+             // The answer is obviously yes if the new and old exceptions are the same exception
+             // If no
+@@ -1251,9 +1405,17 @@ __cxa_call_unexpected(void* arg)
+                     __getExceptionClass(&new_exception_header->unwindHeader) == kOurDependentExceptionClass ?
+                         ((__cxa_dependent_exception*)new_exception_header)->primaryException :
+                         new_exception_header + 1;
+-                if (!exception_spec_can_catch(ttypeIndex, classInfo, ttypeEncoding,
++                if (
++#if defined(__PIZLONATOR_WAS_HERE__)
++                    !exception_spec_can_catch(ttypeIndex, lsda,
++                                              excpType, adjustedPtr,
++                                              unwind_exception)
++#else // !defined(__PIZLONATOR_WAS_HERE__)
++                    !exception_spec_can_catch(ttypeIndex, classInfo, ttypeEncoding,
+                                               excpType, adjustedPtr,
+-                                              unwind_exception, base))
++                                              unwind_exception, base)
++#endif // !defined(__PIZLONATOR_WAS_HERE__)
++                    )
+                 {
+                     // We need to __cxa_end_catch, but for the old exception,
+                     //   not the new one.  This is a little tricky ...
+@@ -1281,9 +1443,17 @@ __cxa_call_unexpected(void* arg)
+                 static_cast<const __shim_type_info*>(&typeid(std::bad_exception));
+             std::bad_exception be;
+             adjustedPtr = &be;
+-            if (!exception_spec_can_catch(ttypeIndex, classInfo, ttypeEncoding,
++            if (
++#if defined(__PIZLONATOR_WAS_HERE__)
++                !exception_spec_can_catch(ttypeIndex, lsda,
++                                          excpType, adjustedPtr,
++                                          unwind_exception)
++#else // !defined(__PIZLONATOR_WAS_HERE__)
++                !exception_spec_can_catch(ttypeIndex, classInfo, ttypeEncoding,
+                                           excpType, adjustedPtr,
+-                                          unwind_exception, base))
++                                          unwind_exception, base)
++#endif // !defined(__PIZLONATOR_WAS_HERE__)
++                )
+             {
+                 // We need to __cxa_end_catch for both the old exception and the
+                 //   new exception.  Technically we should do it in that order.
+diff --git a/libcxxabi/src/cxa_thread_atexit.cpp b/libcxxabi/src/cxa_thread_atexit.cpp
+index 8546cfe48c39..094ea83d7419 100644
+--- a/libcxxabi/src/cxa_thread_atexit.cpp
++++ b/libcxxabi/src/cxa_thread_atexit.cpp
+@@ -17,6 +17,8 @@
+ 
+ #include <stdlib.h>
+ 
++#undef HAVE___CXA_THREAD_ATEXIT_IMPL
++
+ namespace __cxxabiv1 {
+ 
+   using Dtor = void(*)(void*);

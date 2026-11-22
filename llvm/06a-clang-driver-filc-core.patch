@@ -1,0 +1,1156 @@
+Subject: Clang driver Fil-C Linux core (pizfix/optfil, sarcasm, JIT CRT, version scripts, linker)
+Upstream-Base: llvmorg-20.1.8 (87f0227cb60147a26a1eeb4fb06e3b505e9c7261)
+Fil-C-Head: cede3de02b42b58a14acc9ce39c9894ab952a915 (branch deluge)
+
+Implements the Fil-C Linux Clang driver: pizfix/optfil sysroot and include
+resolution, --filc-* path override flags, SARCASM default assembler and
+-yolo-assembler escape hatch, -enable-filc-jit CRT selection, static-PIE
+default for -static, pizlonated version scripts, and Fil-C/yolo runtime
+link order. Excludes Cosmopolitan/Fat-APE support (split into optional 06b).
+
+Fil-C-Origin-Commits (25):
+  bc99f1d90f20a319a5aff1952ee68900e78518a6 2026-10-31 Initial implementation of LLVM JIT support. It's really rough.
+  45adc761aeee2a5f80a6d0369a60fe72b8509ec9 2026-10-04 Don't recognize zunsafe_call mechanism unless compiling with -yolo-assembler.
+  8028dec6f484d67ade089d03fe5a05f25e0736b0 2026-10-02 Revert "Add cross build support. This is a manual merge of PR #321."
+  3332335754682e03c3fe6062dd5402534df74aa0 2026-10-02 Add cross build support. This is a manual merge of PR #321.
+  af48ea6c39ef7c425dbb0be065e0991c86442b60 2026-09-27 Fix arm64 Fil-C build.
+  bb0d0a64eed297ab8e171002033208fb08ad9941 2026-09-15 Revert "Build both X86 and AArch64 backends so each Fil-C binary can cross compile for the other architecture"
+  b5eede80d3ba6258fd7190a05843efdd4dcdb4dd 2026-09-13 Merge pull request #319 from greenaddress/crosscompile
+  de5eb62d3b7d0e91ca42c4390c4464eda86d5c42 2026-09-12 Build both X86 and AArch64 backends so each Fil-C binary can cross compile for the other architecture
+  a626db4ccbc53de3a549804a7259696f78b3174a 2026-09-12 Make glibc work on ARM64.
+  2763e47cac81a20e50f25412609e10fff184ec01 2026-08-29 Improve sarcasm's architecture detection and add explicit target selection flags
+  82190be1971abdcad5a3619c8542a4678a355882 2026-08-29 Make sarcasm the default assembler, add -yolo-assembler escape hatch
+  270460e9aa7afae6aebbcf0325e2e525f48e4e93 2026-08-01 Make the name of the Fil-C loader be ld-fil1-<arch> rather than ld-yolo-x86_64.
+  bf4f93e6b99903ce9b8957ce25d23855f780ed39 2026-06-29 Fix glibc static build
+  c70053418795d2643fa83213e56cc4e30959c1a2 2026-06-29 Make -static mean -static-pie so I can bump the min_address back up to 0x100000000. I need that for systemd's cdrom_id to work (the CDSL_CURRENT ioctl takes an int and INT_MAX aka CDSL_CURRENT is a possible value).
+  7b368ebbf493a12c389637623c8b614a7986c719 2025-11-19 Switch /opt/fil and pizlix to use libyolort, libyolounwind, and the compiler-rt crtbegin/end. Resolve #130.
+  7bad58e986a79951d23c8201e83bb211d8da1f3b 2025-11-19 Use our own compiler-rt build of crtbegin/end and libyolort (instead of libgcc). For now only in the pizfix build. Work towards #130.
+  73dc226a9e19c2aac9750082b815d7a66fddb7b4 2025-11-18 Use a stub unwind library instead of gcc_eh.
+  853e558ffd3f3b606b8fe20e8afe25b8b54a4c6c 2025-11-03 Set HasPizfix when filc flags are present
+  332564f130b718d15498de7dfe45b636331dcbdc 2025-11-03 Claim fil-c driver flags to prevent unused-argument warnings
+  88edd041db22be6068c8ce3616a25fd269afb1b0 2025-11-03 Fix getValue() return type - returns const char* not string
+  75f7c25bf1d77cd4bddb3a603673307ebb195a3f 2025-11-03 Add command-line flags for Nix-friendly resource path overrides
+  5945b69f2fbcf638b7e29ad1959f537222ce5158 2025-10-16 Make the ssh installation use its own configuration. Include binutils in /opt/fil because otherwise we end up having linker compatibility problems.
+  41547d81d5d239842f788bd12877daabc46bc57e 2025-10-14 Make the optfil build mostly kinda work.
+  e5e8e0b1ea062765753c8d23c5d2113467de3613 2025-10-03 Add limited support for calling to Yolo-land from Fil-C. This is Fil-C's first escape hatch. The intended use case is to allow OpenSSL to use its constant time crypto assembly code.
+  d292f5dbb951d549fc9b053950d5a330d532b361 2025-08-22 Rebase Fil-C to clang/llvm 20.1.8
+
+---
+diff --git a/clang/include/clang/Basic/DiagnosticDriverKinds.td b/clang/include/clang/Basic/DiagnosticDriverKinds.td
+index 288786b..630dfc0 100644
+--- a/clang/include/clang/Basic/DiagnosticDriverKinds.td
++++ b/clang/include/clang/Basic/DiagnosticDriverKinds.td
+@@ -191,6 +191,16 @@ def err_drv_invalid_diagnotics_misexpect_tolerance : Error<
+   "invalid argument in '%0', only integers are supported">;
+ def err_drv_missing_argument : Error<
+   "argument to '%0' is missing (expected %1 value%s1)">;
++def err_drv_sarcasm_missing : Error<
++  "sarcasm assembler not found at %0 (install it with build_sarcasm.sh or pass -yolo-assembler)">;
++def err_drv_sarcasm_unsupported_option : Error<
++  "'%0' is not supported by the sarcasm assembler (pass -yolo-assembler to use the built-in YOLO assembler)">;
++def warn_drv_filc_jit_ignored_with_shared : Warning<
++  "ignoring '%0' with '%1': the Fil-C JIT CRT is only linked into executables, so '%0' has no effect when building a shared library">,
++  InGroup<filc_jit>;
++def warn_drv_filc_jit_with_relocatable : Warning<
++  "'%0' has no effect with '%1': the Fil-C JIT CRT cannot be linked into a relocatable object; link the final executable with '%0' instead">,
++  InGroup<filc_jit>;
+ def err_drv_invalid_Xarch_argument_with_args : Error<
+   "invalid Xarch argument: '%0', options requiring arguments are unsupported">;
+ def err_drv_Xopenmp_target_missing_triple : Error<
+diff --git a/clang/include/clang/Basic/DiagnosticGroups.td b/clang/include/clang/Basic/DiagnosticGroups.td
+index af57a42..64733d3 100644
+--- a/clang/include/clang/Basic/DiagnosticGroups.td
++++ b/clang/include/clang/Basic/DiagnosticGroups.td
+@@ -129,6 +129,10 @@ def MathErrnoEnabledWithVecLib : DiagGroup<"math-errno-enabled-with-veclib">;
+ 
+ def FrameAddress : DiagGroup<"frame-address">;
+ def FreeNonHeapObject : DiagGroup<"free-nonheap-object">;
++// -enable-filc-jit is silently dropped when linking a shared library (the JIT
++// CRT is only linked into executables); the driver warns about it (see the
++// gnutools link job in ToolChains/Gnu.cpp).
++def filc_jit : DiagGroup<"filc-jit">;
+ def DoublePromotion : DiagGroup<"double-promotion">;
+ def EnumTooLarge : DiagGroup<"enum-too-large">;
+ def UnsupportedNan : DiagGroup<"unsupported-nan">;
+diff --git a/clang/include/clang/Driver/Driver.h b/clang/include/clang/Driver/Driver.h
+index f4a52cc..dda50bf 100644
+--- a/clang/include/clang/Driver/Driver.h
++++ b/clang/include/clang/Driver/Driver.h
+@@ -179,6 +179,10 @@ public:
+   /// command line.
+   std::string Dir;
+ 
++  bool HasPizfix;
++  bool HasOptfil;
++  std::string PizfixRoot;
++
+   /// The original path to the clang executable.
+   std::string ClangExecutable;
+ 
+diff --git a/clang/include/clang/Driver/Options.td b/clang/include/clang/Driver/Options.td
+index 02e5c4c..4f1f2ad 100644
+--- a/clang/include/clang/Driver/Options.td
++++ b/clang/include/clang/Driver/Options.td
+@@ -834,6 +834,33 @@ def gcc_toolchain : Joined<["--"], "gcc-toolchain=">, Flags<[NoXarchOption]>,
+     "Flang will use the GCC installation with the largest version">;
+ def gcc_triple_EQ : Joined<["--"], "gcc-triple=">,
+   HelpText<"Search for the GCC installation with the specified triple.">;
++def filc_resource_dir : Joined<["--"], "filc-resource-dir=">, Flags<[NoXarchOption]>,
++  Visibility<[ClangOption]>,
++  HelpText<"Override Fil-C pizfix directory location (default: <binary>/../../../pizfix)">;
++def filc_dynamic_linker : Joined<["--"], "filc-dynamic-linker=">, Flags<[NoXarchOption]>,
++  Visibility<[ClangOption]>,
++  HelpText<"Override Fil-C dynamic linker path (default: pizfix/lib/ld-fil1-<arch>.so)">;
++def filc_crt_path : Joined<["--"], "filc-crt-path=">, Flags<[NoXarchOption]>,
++  Visibility<[ClangOption]>,
++  HelpText<"Override Fil-C CRT object files directory (default: pizfix/lib)">;
++def filc_stdfil_include : Joined<["--"], "filc-stdfil-include=">, Flags<[NoXarchOption]>,
++  Visibility<[ClangOption]>,
++  HelpText<"Override Fil-C stdfil include directory (default: pizfix/stdfil-include)">;
++def filc_os_include : Joined<["--"], "filc-os-include=">, Flags<[NoXarchOption]>,
++  Visibility<[ClangOption]>,
++  HelpText<"Override Fil-C OS include directory (default: pizfix/os-include)">;
++def filc_include : Joined<["--"], "filc-include=">, Flags<[NoXarchOption]>,
++  Visibility<[ClangOption]>,
++  HelpText<"Override Fil-C libc include directory (default: pizfix/include)">;
++def enable_filc_jit : Flag<["-"], "enable-filc-jit">, Flags<[NoXarchOption]>,
++  Visibility<[ClangOption]>,
++  HelpText<"Enable Fil-C LLVM JIT support: link filc_jit_crt.o (or filc_jit_mincrt.o) so the program may use the JIT API. Refused at startup for setuid/setgid processes">;
++def filc_enable_jit : Flag<["--"], "filc-enable-jit">, Flags<[NoXarchOption]>,
++  Visibility<[ClangOption]>,
++  HelpText<"Alias for -enable-filc-jit">;
++def yolo_assembler : Flag<["-"], "yolo-assembler">, Flags<[NoXarchOption]>,
++  Visibility<[ClangOption]>,
++  HelpText<"Use the built-in YOLO assembler for .s inputs instead of sarcasm, and recognize the zunsafe_* unsafe call intrinsics">;
+ def CC : Flag<["-"], "CC">, Visibility<[ClangOption, CC1Option]>,
+   Group<Preprocessor_Group>,
+     HelpText<"Include comments from within macros in preprocessed output">,
+@@ -1691,6 +1718,9 @@ defm auto_import : BoolFOption<"auto-import",
+ def offload_EQ : CommaJoined<["--"], "offload=">, Flags<[NoXarchOption]>,
+   HelpText<"Specify comma-separated list of offloading target triples (CUDA and HIP only)">;
+ 
++def version_script_EQ : Joined<["--"], "version-script=">, Group<Link_Group>,
++  HelpText<"Specify a Fil-C version script.">;
++
+ // C++ Coroutines
+ defm coroutines : BoolFOption<"coroutines",
+   LangOpts<"Coroutines">, Default<cpp20.KeyPath>,
+@@ -5722,6 +5752,7 @@ def noprebind : Flag<["-"], "noprebind">;
+ def noprofilelib : Flag<["-"], "noprofilelib">;
+ def noseglinkedit : Flag<["-"], "noseglinkedit">;
+ def nostartfiles : Flag<["-"], "nostartfiles">, Group<Link_Group>;
++def normalcrt : Flag<["-"], "normalcrt">, Group<Link_Group>;
+ def startfiles : Flag<["-"], "startfiles">, Group<Link_Group>;
+ def nostdinc : Flag<["-"], "nostdinc">,
+   Visibility<[ClangOption, CLOption, DXCOption]>, Group<IncludePath_Group>,
+diff --git a/clang/include/clang/Driver/ToolChain.h b/clang/include/clang/Driver/ToolChain.h
+index 7d1d8feebf35..1ecdbfb5318e 100644
+--- a/clang/include/clang/Driver/ToolChain.h
++++ b/clang/include/clang/Driver/ToolChain.h
+@@ -160,6 +160,7 @@ private:
+   mutable std::unique_ptr<Tool> Clang;
+   mutable std::unique_ptr<Tool> Flang;
+   mutable std::unique_ptr<Tool> Assemble;
++  mutable std::unique_ptr<Tool> SarcasmAs;
+   mutable std::unique_ptr<Tool> Link;
+   mutable std::unique_ptr<Tool> StaticLibTool;
+   mutable std::unique_ptr<Tool> IfsMerge;
+@@ -174,6 +175,7 @@ private:
+   Tool *getStaticLibTool() const;
+   Tool *getIfsMerge() const;
+   Tool *getClangAs() const;
++  Tool *getSarcasmAs() const;
+   Tool *getOffloadBundler() const;
+   Tool *getOffloadPackager() const;
+   Tool *getLinkerWrapper() const;
+diff --git a/clang/lib/Driver/Driver.cpp b/clang/lib/Driver/Driver.cpp
+index 87855fd..ec1ccb0 100644
+--- a/clang/lib/Driver/Driver.cpp
++++ b/clang/lib/Driver/Driver.cpp
+@@ -241,6 +241,7 @@ std::string CUIDOptions::getCUID(StringRef InputFile,
+   }
+   return CUID;
+ }
++
+ Driver::Driver(StringRef ClangExecutable, StringRef TargetTriple,
+                DiagnosticsEngine &Diags, std::string Title,
+                IntrusiveRefCntPtr<llvm::vfs::FileSystem> VFS)
+@@ -262,6 +263,20 @@ Driver::Driver(StringRef ClangExecutable, StringRef TargetTriple,
+   Name = std::string(llvm::sys::path::filename(ClangExecutable));
+   Dir = std::string(llvm::sys::path::parent_path(ClangExecutable));
+ 
++  {
++    SmallString<128> P(Dir);
++    llvm::sys::path::append(P, "..", "..", "pizfix");
++    HasPizfix = llvm::sys::fs::is_directory(P);
++    if (HasPizfix)
++      PizfixRoot = std::string(P);
++  }
++  if (!HasPizfix) {
++    SmallString<128> RealPath;
++    if (!llvm::sys::fs::real_path(Dir, RealPath)
++        && RealPath == "/opt/fil/bin")
++      HasOptfil = true;
++  }
++
+   if ((!SysRoot.empty()) && llvm::sys::path::is_relative(SysRoot)) {
+     // Prepend InstalledDir if SysRoot is relative
+     SmallString<128> P(Dir);
+@@ -1479,6 +1494,26 @@ Compilation *Driver::BuildCompilation(ArrayRef<const char *> ArgList) {
+     if (VFS->setCurrentWorkingDirectory(WD->getValue()))
+       Diag(diag::err_drv_unable_to_set_working_directory) << WD->getValue();
+ 
++  // Check for Fil-C resource directory override
++  if (Arg *A = Args.getLastArg(options::OPT_filc_resource_dir)) {
++    A->claim();
++    PizfixRoot = A->getValue();
++    HasPizfix = true;  // Trust the user-provided path
++  } else if (Arg *A = Args.getLastArg(options::OPT_filc_crt_path)) {
++    // If any filc flag is set, we're in filc mode
++    A->claim();
++    HasPizfix = true;
++  }
++
++  // -enable-filc-jit / --filc-enable-jit is consumed by the link job (see
++  // tools::gnutools::Linker::ConstructJob, which selects filc_jit_crt.o or
++  // filc_jit_mincrt.o); claim it up front so that invocations that never
++  // reach a link (like compile-only ones) do not get an unused-argument
++  // warning. Claim both spellings.
++  if (Arg *A = Args.getLastArg(options::OPT_enable_filc_jit,
++                               options::OPT_filc_enable_jit))
++    A->claim();
++
+   // Check for missing include directories.
+   if (!Diags.isIgnored(diag::warn_missing_include_dirs, SourceLocation())) {
+     for (auto IncludeDir : Args.getAllArgValues(options::OPT_I_Group)) {
+@@ -1591,8 +1626,10 @@ Compilation *Driver::BuildCompilation(ArrayRef<const char *> ArgList) {
+       CompilerPath = Split.second;
+     }
+   }
+-  if (const Arg *A = Args.getLastArg(options::OPT__sysroot_EQ))
++  if (const Arg *A = Args.getLastArg(options::OPT__sysroot_EQ)) {
+     SysRoot = A->getValue();
++    //Diags.Report(diag::err_drv_invalid_value) << A->getAsString(Args) << "sysroot";
++  }
+   if (const Arg *A = Args.getLastArg(options::OPT__dyld_prefix_EQ))
+     DyldPrefix = A->getValue();
+ 
+@@ -5296,6 +5333,12 @@ void Driver::BuildJobs(Compilation &C) const {
+   (void)C.getArgs().hasArg(options::OPT_driver_mode);
+   (void)C.getArgs().hasArg(options::OPT_rsp_quoting);
+ 
++  // Claim -yolo-assembler here. It is consumed by the driver when it selects
++  // the assembler tool (see ToolChain::SelectTool) and by the sarcasm
++  // assembler; it never belongs to any individual cc1 job, so claim it
++  // unconditionally to avoid "argument unused" warnings on any invocation.
++  (void)C.getArgs().hasArg(options::OPT_yolo_assembler);
++
+   bool HasAssembleJob = llvm::any_of(C.getJobs(), [](auto &J) {
+     // Match ClangAs and other derived assemblers of Tool. ClangAs uses a
+     // longer ShortName "clang integrated assembler" while other assemblers just
+diff --git a/clang/lib/Driver/ToolChain.cpp b/clang/lib/Driver/ToolChain.cpp
+index acf9d264d631..504a5bccb8b5 100644
+--- a/clang/lib/Driver/ToolChain.cpp
++++ b/clang/lib/Driver/ToolChain.cpp
+@@ -582,6 +582,12 @@ Tool *ToolChain::getClangAs() const {
+   return Assemble.get();
+ }
+ 
++Tool *ToolChain::getSarcasmAs() const {
++  if (!SarcasmAs)
++    SarcasmAs.reset(new tools::SarcasmAs(*this));
++  return SarcasmAs.get();
++}
++
+ Tool *ToolChain::getLink() const {
+   if (!Link)
+     Link.reset(buildLinker());
+@@ -952,9 +958,19 @@ Tool *ToolChain::SelectTool(const JobAction &JA) const {
+   if (D.IsFlangMode() && getDriver().ShouldUseFlangCompiler(JA)) return getFlang();
+   if (getDriver().ShouldUseClangCompiler(JA)) return getClang();
+   Action::ActionClass AC = JA.getKind();
+-  if (AC == Action::AssembleJobClass && useIntegratedAs() &&
+-      !getTriple().isOSAIX())
+-    return getClangAs();
++  if (AC == Action::AssembleJobClass) {
++    // Fil-C: on the targets that sarcasm supports, assembly is assembled by
++    // sarcasm, which rewrites annotated Yolo-C assembly into memory-safe,
++    // Fil-C-linkable assembly. -yolo-assembler opts out of this and retains
++    // the previous behavior.
++    llvm::Triple::ArchType Arch = getTriple().getArch();
++    bool SarcasmTarget =
++        Arch == llvm::Triple::x86_64 || Arch == llvm::Triple::aarch64;
++    if (SarcasmTarget && !Args.hasArg(options::OPT_yolo_assembler))
++      return getSarcasmAs();
++    if (useIntegratedAs() && !getTriple().isOSAIX())
++      return getClangAs();
++  }
+   return getTool(AC);
+ }
+ 
+@@ -1393,6 +1409,7 @@ void ToolChain::AddCXXStdlibLibArgs(const ArgList &Args,
+     CmdArgs.push_back("-lc++");
+     if (Args.hasArg(options::OPT_fexperimental_library))
+       CmdArgs.push_back("-lc++experimental");
++    CmdArgs.push_back("-lc++abi");
+     break;
+ 
+   case ToolChain::CST_Libstdcxx:
+diff --git a/clang/lib/Driver/ToolChains/Arch/X86.cpp b/clang/lib/Driver/ToolChains/Arch/X86.cpp
+index 47c2c3e23f9f..ed97cca97b91 100644
+--- a/clang/lib/Driver/ToolChains/Arch/X86.cpp
++++ b/clang/lib/Driver/ToolChains/Arch/X86.cpp
+@@ -100,7 +100,7 @@ std::string x86::getX86TargetCPU(const Driver &D, const ArgList &Args,
+ 
+   // Everything else goes to x86-64 in 64-bit mode.
+   if (Is64Bit)
+-    return "x86-64";
++    return "x86-64-v2";
+ 
+   switch (Triple.getOS()) {
+   case llvm::Triple::NetBSD:
+diff --git a/clang/lib/Driver/ToolChains/Clang.cpp b/clang/lib/Driver/ToolChains/Clang.cpp
+index 57b7d2b..b3adfa0 100644
+--- a/clang/lib/Driver/ToolChains/Clang.cpp
++++ b/clang/lib/Driver/ToolChains/Clang.cpp
+@@ -1216,6 +1216,10 @@ void Clang::AddPreprocessingOptions(Compilation &C, const JobAction &JA,
+     } else if (A->getOption().matches(options::OPT_ibuiltininc)) {
+       // This is used only by the driver. No need to pass to cc1.
+       continue;
++    } else if (A->getOption().matches(options::OPT_isysroot)) {
++      // In FilC, we ignore isysroot, except for the linker (which I think only happens on Darwin,
++      // elsewhere it's jsut plain ignored).
++      continue;
+     }
+ 
+     // Not translated, render as usual.
+@@ -1240,13 +1244,15 @@ void Clang::AddPreprocessingOptions(Compilation &C, const JobAction &JA,
+   if (Arg *A = Args.getLastArg(options::OPT_I_))
+     D.Diag(diag::err_drv_I_dash_not_supported) << A->getAsString(Args);
+ 
+-  // If we have a --sysroot, and don't have an explicit -isysroot flag, add an
+-  // -isysroot to the CC1 invocation.
+-  StringRef sysroot = C.getSysRoot();
+-  if (sysroot != "") {
+-    if (!Args.hasArg(options::OPT_isysroot)) {
+-      CmdArgs.push_back("-isysroot");
+-      CmdArgs.push_back(C.getArgs().MakeArgString(sysroot));
++  if ((false)) {
++    // If we have a --sysroot, and don't have an explicit -isysroot flag, add an
++    // -isysroot to the CC1 invocation.
++    StringRef sysroot = C.getSysRoot();
++    if (sysroot != "") {
++      if (!Args.hasArg(options::OPT_isysroot)) {
++        CmdArgs.push_back("-isysroot");
++        CmdArgs.push_back(C.getArgs().MakeArgString(sysroot));
++      }
+     }
+   }
+ 
+@@ -2353,7 +2359,7 @@ void Clang::AddX86TargetArgs(const ArgList &Args,
+ 
+   // Default to "generic" unless -march is present or targetting the PS4/PS5.
+   std::string TuneCPU;
+-  if (!Args.hasArg(clang::driver::options::OPT_march_EQ) &&
++  if ((false) && !Args.hasArg(clang::driver::options::OPT_march_EQ) &&
+       !getToolChain().getTriple().isPS())
+     TuneCPU = "generic";
+ 
+@@ -7046,7 +7052,9 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
+ 
+   Args.AddLastArg(CmdArgs, options::OPT_fstrict_flex_arrays_EQ);
+ 
+-  Args.AddLastArg(CmdArgs, options::OPT_pthread);
++  // Claim the -pthread arg even though we make it unconditional.
++  Args.ClaimAllArgs(options::OPT_pthread);
++  CmdArgs.push_back("-pthread");
+ 
+   Args.addOptInFlag(CmdArgs, options::OPT_mspeculative_load_hardening,
+                     options::OPT_mno_speculative_load_hardening);
+@@ -7806,6 +7814,14 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
+     }
+   }
+ 
++  if (Args.hasArg(options::OPT_yolo_assembler)) {
++    // Tell the FilPizlonator pass to recognize the zunsafe_call, zunsafe_fast_call, and
++    // zunsafe_buf_call intrinsics. This mirrors ToolChain::SelectTool, where
++    // -yolo-assembler opts out of the sarcasm assembler for .s files.
++    CmdArgs.push_back("-mllvm");
++    CmdArgs.push_back("-yolo-assembler");
++  }
++
+   // This needs to run after -Xclang argument forwarding to pick up the target
+   // features enabled through -Xclang -target-feature flags.
+   SanitizeArgs.addArgs(TC, Args, CmdArgs, InputType);
+@@ -8977,6 +8993,82 @@ void ClangAs::ConstructJob(Compilation &C, const JobAction &JA,
+   }
+ }
+ 
++// Begin SarcasmAs
++
++void SarcasmAs::ConstructJob(Compilation &C, const JobAction &JA,
++                             const InputInfo &Output,
++                             const InputInfoList &Inputs,
++                             const ArgList &Args,
++                             const char *LinkingOutput) const {
++  const auto &D = getToolChain().getDriver();
++
++  ArgStringList CmdArgs;
++
++  assert(Inputs.size() == 1 && "Unexpected number of inputs.");
++  const InputInfo &Input = Inputs[0];
++
++  // -yolo-assembler is consumed by the driver when it selects the assembler
++  // tool (see ToolChain::SelectTool); claim it here as well so that it never
++  // warns as unused.
++  Args.ClaimAllArgs(options::OPT_yolo_assembler);
++
++  // sarcasm provides no way to pass options down to the assembler it invokes,
++  // so there is nothing sensible we could do with these.
++  for (const Arg *A : Args.filtered(options::OPT_Wa_COMMA,
++                                    options::OPT_Xassembler))
++    D.Diag(diag::err_drv_sarcasm_unsupported_option) << A->getAsString(Args);
++  Args.ClaimAllArgs(options::OPT_Wa_COMMA);
++  Args.ClaimAllArgs(options::OPT_Xassembler);
++
++  // Resolve the sarcasm executable. In pizfix mode it lives next to the other
++  // Fil-C tools; in /opt/fil mode it lives in the same directory as the
++  // compiler; when installed pizlix style it is found on PATH.
++  SmallString<128> SarcasmPath;
++  if (D.HasPizfix) {
++    SarcasmPath = D.PizfixRoot;
++    llvm::sys::path::append(SarcasmPath, "bin");
++    llvm::sys::path::append(SarcasmPath, "sarcasm");
++  } else if (D.HasOptfil) {
++    SarcasmPath = D.Dir;
++    llvm::sys::path::append(SarcasmPath, "sarcasm");
++  } else {
++    SarcasmPath = getToolChain().GetProgramPath("sarcasm");
++  }
++
++  if ((D.HasPizfix || D.HasOptfil) &&
++      (!llvm::sys::fs::is_regular_file(SarcasmPath) ||
++       !llvm::sys::fs::can_execute(SarcasmPath))) {
++    D.Diag(diag::err_drv_sarcasm_missing) << std::string(SarcasmPath.str());
++    return;
++  }
++
++  // Forward -g so that sarcasm emits Fil-C origins that point at the input
++  // assembly for better runtime diagnostics.
++  if (Args.hasArg(options::OPT_g_Group)) {
++    Args.ClaimAllArgs(options::OPT_g_Group);
++    CmdArgs.push_back("-g");
++  }
++
++  // Pass the target architecture explicitly: the driver knows the triple
++  // (ToolChain::SelectTool only picks SarcasmAs on x86_64/aarch64), and the
++  // input alone may not carry enough markers for sarcasm's autodetection.
++  if (getToolChain().getTriple().getArch() == llvm::Triple::x86_64) {
++    CmdArgs.push_back("--x86_64");
++  } else {
++    CmdArgs.push_back("--arm64");
++  }
++
++  assert(Input.isFilename() && "Invalid input.");
++  CmdArgs.push_back(Input.getFilename());
++
++  CmdArgs.push_back("-o");
++  CmdArgs.push_back(Output.getFilename());
++
++  const char *Exec = Args.MakeArgString(SarcasmPath);
++  C.addCommand(std::make_unique<Command>(JA, *this, ResponseFileSupport::None(),
++                                         Exec, CmdArgs, Inputs, Output));
++}
++
+ // Begin OffloadBundler
+ void OffloadBundler::ConstructJob(Compilation &C, const JobAction &JA,
+                                   const InputInfo &Output,
+diff --git a/clang/lib/Driver/ToolChains/Clang.h b/clang/lib/Driver/ToolChains/Clang.h
+index 18f6c5ed06a5..711b2ed3f0cb 100644
+--- a/clang/lib/Driver/ToolChains/Clang.h
++++ b/clang/lib/Driver/ToolChains/Clang.h
+@@ -141,6 +141,26 @@ public:
+                     const char *LinkingOutput) const override;
+ };
+ 
++/// Fil-C sarcasm assembler tool. Runs the sarcasm (SAfe Runtime
++/// Capability-enforced Assembler) program on the assembly input. sarcasm
++/// rewrites annotated Yolo-C assembly into memory-safe, Fil-C-linkable
++/// assembly and assembles it. This is the default assembler for .s inputs on
++/// targets that sarcasm supports; -yolo-assembler opts back into the
++/// integrated assembler.
++class LLVM_LIBRARY_VISIBILITY SarcasmAs : public Tool {
++public:
++  SarcasmAs(const ToolChain &TC)
++      : Tool("sarcasm", "sarcasm assembler", TC) {}
++  bool hasGoodDiagnostics() const override { return false; }
++  bool hasIntegratedAssembler() const override { return false; }
++  bool hasIntegratedCPP() const override { return false; }
++
++  void ConstructJob(Compilation &C, const JobAction &JA,
++                    const InputInfo &Output, const InputInfoList &Inputs,
++                    const llvm::opt::ArgList &TCArgs,
++                    const char *LinkingOutput) const override;
++};
++
+ /// Offload bundler tool.
+ class LLVM_LIBRARY_VISIBILITY OffloadBundler final : public Tool {
+ public:
+diff --git a/clang/lib/Driver/ToolChains/Gnu.cpp b/clang/lib/Driver/ToolChains/Gnu.cpp
+index f56eeda..aba7b2e 100644
+--- a/clang/lib/Driver/ToolChains/Gnu.cpp
++++ b/clang/lib/Driver/ToolChains/Gnu.cpp
+@@ -34,6 +34,8 @@
+ #include "llvm/TargetParser/RISCVISAInfo.h"
+ #include "llvm/TargetParser/TargetParser.h"
+ #include <system_error>
++#include <fstream>
++#include <sstream>
+ 
+ using namespace clang::driver;
+ using namespace clang::driver::toolchains;
+@@ -71,6 +73,8 @@ void tools::gcc::Common::ConstructJob(Compilation &C, const JobAction &JA,
+                                       const InputInfoList &Inputs,
+                                       const ArgList &Args,
+                                       const char *LinkingOutput) const {
++  llvm_unreachable("Refusing to construct GCC job");
++  
+   const Driver &D = getToolChain().getDriver();
+   ArgStringList CmdArgs;
+ 
+@@ -176,7 +180,7 @@ void tools::gcc::Common::ConstructJob(Compilation &C, const JobAction &JA,
+     GCCName = "g++";
+   } else
+     GCCName = "gcc";
+-
++  
+   const char *Exec = Args.MakeArgString(getToolChain().GetProgramPath(GCCName));
+   C.addCommand(std::make_unique<Command>(JA, *this,
+                                          ResponseFileSupport::AtFileCurCP(),
+@@ -292,7 +296,11 @@ static const char *getLDMOption(const llvm::Triple &T, const ArgList &Args) {
+ }
+ 
+ static bool getStaticPIE(const ArgList &Args, const ToolChain &TC) {
+-  bool HasStaticPIE = Args.hasArg(options::OPT_static_pie);
++  // We turn -static into -static-pie to ensure that global variables are mapped above the low
++  // 4GB. This is necessary for filc_call_syscall_with_guarded_ptr to work right without using a
++  // smaller min_address setting (and if we use a smaller min_address setting then ioctls like
++  // CDROM_DRIVE_STATUS, CDSL_CURRENT stop working because CDSL_CURRENT is INT_MAX).
++  bool HasStaticPIE = Args.hasArg(options::OPT_static_pie) || Args.hasArg(options::OPT_static);
+   if (HasStaticPIE && Args.hasArg(options::OPT_no_pie)) {
+     const Driver &D = TC.getDriver();
+     const llvm::opt::OptTable &Opts = D.getOpts();
+@@ -304,8 +312,7 @@ static bool getStaticPIE(const ArgList &Args, const ToolChain &TC) {
+ }
+ 
+ static bool getStatic(const ArgList &Args) {
+-  return Args.hasArg(options::OPT_static) &&
+-      !Args.hasArg(options::OPT_static_pie);
++  return false;
+ }
+ 
+ void tools::gnutools::StaticLibTool::ConstructJob(
+@@ -352,6 +359,135 @@ void tools::gnutools::StaticLibTool::ConstructJob(
+                                          Exec, CmdArgs, Inputs, Output));
+ }
+ 
++namespace {
++
++std::string PizlonateVersionScript(const std::string& Input) {
++  size_t InputIndex = 0;
++
++  std::ostringstream Output;
++
++  auto fail = [&] (const std::string& Reason) {
++    llvm::errs() << "Failed to parse version script: " << Input << "\n";
++    llvm::errs() << "Failed at byte index " << InputIndex << "\n";
++    llvm::errs() << "Reason: " << Reason << "\n";
++    llvm::errs() << "Output so far: " << Output.str() << "\n";
++    llvm_unreachable("Failed to parse version script.");
++  };
++
++  auto atEnd = [&] () {
++    assert(InputIndex <= Input.size());
++    return InputIndex == Input.size();
++  };
++
++  auto peek = [&] () {
++    assert(InputIndex < Input.size());
++    return Input[InputIndex];
++  };
++
++  auto take = [&] () {
++    if (atEnd())
++      llvm_unreachable("Unexpected end of file");
++    return Input[InputIndex++];
++  };
++
++  auto skipWhitespace = [&] () {
++    while (!atEnd()) {
++      if (isspace(peek())) {
++        take();
++        continue;
++      }
++      if (peek() == '/' && InputIndex + 1 < Input.size() && Input[InputIndex + 1] == '*') {
++        InputIndex += 2;
++        assert(InputIndex <= Input.size());
++        for (;;) {
++          if (take() == '*' && take() == '/')
++            break;
++        }
++      } else if (peek() == '#') {
++        InputIndex++;
++        while (take() != '\n');
++      } else
++        break;
++    }
++  };
++
++  auto skipID = [&] () {
++    while (!atEnd() && (isalnum(peek()) ||
++                        peek() == '_' ||
++                        peek() == '$' ||
++                        peek() == '@' ||
++                        peek() == '.' ||
++                        peek() == '*'))
++      take();
++  };
++
++  auto parseID = [&] () -> std::string {
++    skipWhitespace();
++    size_t Start = InputIndex;
++    skipID();
++    size_t End = InputIndex;
++    if (End == Start)
++      fail("Expected identifier");
++    return Input.substr(Start, End - Start);
++  };
++
++  auto parseSymbol = [&] (char symbol) {
++    skipWhitespace();
++    if (atEnd() || peek() != symbol)
++      fail(std::string("Expected ") + symbol);
++    InputIndex++;
++  };
++
++  for (;;) {
++    skipWhitespace();
++    if (atEnd())
++      break;
++    if (peek() != '{')
++      Output << " " << parseID();
++    parseSymbol('{');
++    Output << " {";
++    for (;;) {
++      skipWhitespace();
++      if (atEnd())
++        fail("Unexpected end of file (expected group)");
++      if (peek() == '}') {
++        take();
++        Output << " }";
++        break;
++      }
++      std::string ID = parseID();
++      skipWhitespace();
++      if (atEnd())
++        fail("Unexpected end of file (expected ; or :)");
++      if (peek() == ':') {
++        take();
++        Output << " " << ID << ":";
++        continue;
++      }
++      parseSymbol(';');
++      if (ID == "*")
++        Output << "*";
++      else
++        Output << " pizlonated_" << ID;
++      Output << ";";
++    }
++    skipWhitespace();
++    if (atEnd())
++      fail("Unexpected end of file (expected version or ;)");
++    if (peek() == ';') {
++      take();
++      Output << ";";
++      continue;
++    }
++    Output << " " << parseID() << ";";
++    parseSymbol(';');
++  }
++
++  return Output.str();
++}
++
++} // anonymous namespace
++
+ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+                                            const InputInfo &Output,
+                                            const InputInfoList &Inputs,
+@@ -428,6 +564,8 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+       CmdArgs.push_back("--no-relax");
+   }
+ 
++  CmdArgs.push_back("-nostdlib");
++
+   const bool IsShared = Args.hasArg(options::OPT_shared);
+   if (IsShared)
+     CmdArgs.push_back("-shared");
+@@ -457,6 +595,40 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+   CmdArgs.push_back("-o");
+   CmdArgs.push_back(Output.getFilename());
+ 
++  auto GetYoloLibPath = [&] (const StringRef str) -> std::string {
++    if (ToolChain.getDriver().HasPizfix) {
++      std::string BasePath;
++      if (Arg *A = Args.getLastArg(options::OPT_filc_crt_path)) {
++        A->claim();
++        BasePath = A->getValue();
++      } else {
++        SmallString<128> P(ToolChain.getDriver().PizfixRoot);
++        llvm::sys::path::append(P, "lib");
++        BasePath = std::string(P);
++      }
++      SmallString<128> FullPath(BasePath);
++      llvm::sys::path::append(FullPath, str);
++      return std::string(FullPath);
++    }
++    if (ToolChain.getDriver().HasOptfil) {
++      SmallString<128> P("/opt/fil/lib");
++      llvm::sys::path::append(P, str);
++      return std::string(P);
++    }
++    SmallString<128> P("/usr/lib");
++    llvm::sys::path::append(P, str);
++    return std::string(P);
++  };
++
++  auto GetGCCLibPath = [&] (const char* str) -> std::string {
++    if (ToolChain.getDriver().HasPizfix || ToolChain.getDriver().HasOptfil)
++      return ToolChain.GetFilePath(str);
++    // FIXME LMAO
++    SmallString<128> P("/yolo/lib/gcc/x86_64-lfs-linux-gnu/14.2.0");
++    llvm::sys::path::append(P, str);
++    return std::string(P);
++  };
++
+   if (!Args.hasArg(options::OPT_nostdlib, options::OPT_nostartfiles,
+                    options::OPT_r)) {
+     if (!isAndroid && !IsIAMCU) {
+@@ -472,9 +644,9 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+           crt1 = "crt1.o";
+       }
+       if (crt1)
+-        CmdArgs.push_back(Args.MakeArgString(ToolChain.GetFilePath(crt1)));
++        CmdArgs.push_back(Args.MakeArgString(GetYoloLibPath(crt1)));
+ 
+-      CmdArgs.push_back(Args.MakeArgString(ToolChain.GetFilePath("crti.o")));
++      CmdArgs.push_back(Args.MakeArgString(GetYoloLibPath("crti.o")));
+     }
+ 
+     if (IsVE) {
+@@ -483,11 +655,13 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+     }
+ 
+     if (IsIAMCU)
+-      CmdArgs.push_back(Args.MakeArgString(ToolChain.GetFilePath("crt0.o")));
++      CmdArgs.push_back(Args.MakeArgString(GetGCCLibPath("crt0.o")));
+     else if (HasCRTBeginEndFiles) {
+       std::string P;
+-      if (ToolChain.GetRuntimeLibType(Args) == ToolChain::RLT_CompilerRT &&
+-          !isAndroid) {
++      if ((true))
++        P = GetYoloLibPath("crtbegin.o");
++      else if (ToolChain.GetRuntimeLibType(Args) == ToolChain::RLT_CompilerRT &&
++               !isAndroid) {
+         std::string crtbegin = ToolChain.getCompilerRT(Args, "crtbegin",
+                                                        ToolChain::FT_Object);
+         if (ToolChain.getVFS().exists(crtbegin))
+@@ -503,7 +677,7 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+           crtbegin = isAndroid ? "crtbegin_dynamic.o" : "crtbeginS.o";
+         else
+           crtbegin = isAndroid ? "crtbegin_dynamic.o" : "crtbegin.o";
+-        P = ToolChain.GetFilePath(crtbegin);
++        P = GetGCCLibPath(crtbegin);
+       }
+       CmdArgs.push_back(Args.MakeArgString(P));
+     }
+@@ -517,9 +691,56 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+           Args.MakeArgString(ToolChain.GetFilePath("crt_pad_segment.o")));
+   }
+ 
+-  Args.addAllArgs(CmdArgs, {options::OPT_L, options::OPT_u});
++  Args.AddAllArgs(CmdArgs, options::OPT_L);
++
++  if (ToolChain.getDriver().HasPizfix) {
++    std::string BasePath;
++    if (Arg *A = Args.getLastArg(options::OPT_filc_crt_path)) {
++      A->claim();
++      BasePath = A->getValue();
++    } else {
++      SmallString<128> P(ToolChain.getDriver().PizfixRoot);
++      llvm::sys::path::append(P, "lib");
++      BasePath = std::string(P);
++    }
++
++    const char* DashRPath;
++    if (IsStaticPIE)
++      DashRPath = "-rpath-link";
++    else
++      DashRPath = "-rpath";
++    
++    {
++      SmallString<128> P(BasePath);
++      llvm::sys::path::remove_filename(P);
++      llvm::sys::path::append(P, "lib64");
++      if (llvm::sys::fs::is_directory(P)) {
++        CmdArgs.push_back(Args.MakeArgString("-L" + P));
++        CmdArgs.push_back(DashRPath);
++        CmdArgs.push_back(Args.MakeArgString(P));
++      }
++    }
++    {
++      CmdArgs.push_back(Args.MakeArgString("-L" + BasePath));
++      CmdArgs.push_back(DashRPath);
++      CmdArgs.push_back(Args.MakeArgString(BasePath));
++    }
++  } else if (ToolChain.getDriver().HasOptfil) {
++    CmdArgs.push_back("-L/opt/fil/lib");
++    CmdArgs.push_back("-rpath-link");
++    CmdArgs.push_back("/opt/fil/lib");
++  } else {
++    CmdArgs.push_back("-L/usr/lib");
++    // This hack is needed for when we're using /yolo/bin/ld. And it's harmelss after that.
++    CmdArgs.push_back("-rpath-link");
++    CmdArgs.push_back("/usr/lib");
++  }
++  
++  Args.AddAllArgs(CmdArgs, options::OPT_u);
+ 
+-  ToolChain.AddFilePathLibArgs(Args, CmdArgs);
++  // This is such a hack!!! But so is everything else I'm doing in this file, so like whatever.
++  if ((false))
++    ToolChain.AddFilePathLibArgs(Args, CmdArgs);
+ 
+   if (D.isUsingLTO()) {
+     assert(!Inputs.empty() && "Must have at least one input.");
+@@ -541,14 +762,96 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+   bool NeedsSanitizerDeps = addSanitizerRuntimes(ToolChain, Args, CmdArgs);
+   bool NeedsXRayDeps = addXRayRuntime(ToolChain, Args, CmdArgs);
+   addLinkerCompressDebugSectionsOption(ToolChain, Args, CmdArgs);
++  
++  if (Args.hasArg(options::OPT_shared)) {
++    // -shared links never reach the Fil-C CRT selection below, so
++    // -enable-filc-jit (alias --filc-enable-jit) would be silently ignored
++    // there. Warn instead of silently dropping it. (-pie links still select
++    // a CRT object, so the flag keeps its meaning for them. -r links select
++    // a CRT object too, but embedding it in a relocatable object is wrong;
++    // that gets its own warning below.)
++    if (Arg *JitArg = Args.getLastArg(options::OPT_enable_filc_jit,
++                                      options::OPT_filc_enable_jit))
++      D.Diag(diag::warn_drv_filc_jit_ignored_with_shared)
++          << JitArg->getSpelling()
++          << D.getOpts().getOptionName(options::OPT_shared);
++  }
++  if (!Args.hasArg(options::OPT_shared)) {
++    // -enable-filc-jit (alias --filc-enable-jit) selects the JIT-enabled
++    // CRT objects, whose entry point calls filc_start_program_with_jit
++    // (setting the filc_allow_jit gate consumed by the filc_llvm_jit.c
++    // wrappers) instead of filc_start_program. The jit CRT refuses to run
++    // setuid/setgid processes.
++    Arg *JitArg = Args.getLastArg(options::OPT_enable_filc_jit,
++                                  options::OPT_filc_enable_jit);
++    bool FilCJit = (JitArg != nullptr);
++    if (FilCJit) {
++      // -r (relocatable) links still select a CRT object below; embedding
++      // the JIT CRT in a .o is never right (the final executable link
++      // selects its own CRT), so warn instead of silently doing it.
++      if (Arg *RArg = Args.getLastArg(options::OPT_r))
++        D.Diag(diag::warn_drv_filc_jit_with_relocatable)
++            << JitArg->getSpelling()
++            << RArg->getSpelling();
++    }
++    if (!Args.hasArg(options::OPT_nostdlib, options::OPT_nodefaultlibs,
++                     options::OPT_r) ||
++        Args.hasArg(options::OPT_normalcrt)) {
++      if (ToolChain.getDriver().HasPizfix) {
++        CmdArgs.push_back(Args.MakeArgString(
++            GetYoloLibPath(FilCJit ? "filc_jit_crt.o" : "filc_crt.o")));
++      } else if (ToolChain.getDriver().HasOptfil)
++        CmdArgs.push_back(FilCJit ? "/opt/fil/lib/filc_jit_crt.o"
++                                  : "/opt/fil/lib/filc_crt.o");
++      else
++        CmdArgs.push_back(FilCJit ? "/usr/lib/filc_jit_crt.o"
++                                  : "/usr/lib/filc_crt.o");
++    } else {
++      if (ToolChain.getDriver().HasPizfix) {
++        CmdArgs.push_back(Args.MakeArgString(
++            GetYoloLibPath(FilCJit ? "filc_jit_mincrt.o" : "filc_mincrt.o")));
++      } else if (ToolChain.getDriver().HasOptfil)
++        CmdArgs.push_back(FilCJit ? "/opt/fil/lib/filc_jit_mincrt.o"
++                                  : "/opt/fil/lib/filc_mincrt.o");
++      else
++        CmdArgs.push_back(FilCJit ? "/usr/lib/filc_jit_mincrt.o"
++                                  : "/usr/lib/filc_mincrt.o");
++    }
++  }
++
+   AddLinkerInputs(ToolChain, Inputs, Args, CmdArgs, JA);
+ 
++  for (auto InputVersionScriptFilename : Args.getAllArgValues(options::OPT_version_script_EQ)) {
++    const char* OutputVersionScriptFilename =
++      ToolChain.getDriver().CreateTempFile(C, "version-script", "ld");
++    std::string InputVersionScript;
++    {
++      std::ifstream InputStream(InputVersionScriptFilename);
++      if (!InputStream.good()) {
++        // LMAO should turn this into a proper diagnostic maybe?
++        llvm_unreachable(("Could not open " + InputVersionScriptFilename).c_str());
++      }
++      std::ostringstream InputBuffer;
++      InputBuffer << InputStream.rdbuf();
++      std::string Input = InputBuffer.str();
++      std::string Output = PizlonateVersionScript(Input);
++      std::ofstream OutputStream(OutputVersionScriptFilename);
++      OutputStream << Output;
++      if (!OutputStream.good())
++        llvm_unreachable((std::string("Could not write ") + OutputVersionScriptFilename).c_str());
++    }
++    CmdArgs.push_back(
++      Args.MakeArgString(std::string("--version-script=") + OutputVersionScriptFilename));
++  }
++
+   addHIPRuntimeLibArgs(ToolChain, C, Args, CmdArgs);
+ 
+   // The profile runtime also needs access to system libraries.
+   getToolChain().addProfileRTLibs(Args, CmdArgs);
+ 
+-  if (D.CCCIsCXX() &&
++  Args.ClaimAllArgs(options::OPT_pthread);
++
++  if ((false) && D.CCCIsCXX() &&
+       !Args.hasArg(options::OPT_nostdlib, options::OPT_nodefaultlibs,
+                    options::OPT_r)) {
+     if (ToolChain.ShouldLinkCXXStdlib(Args)) {
+@@ -578,7 +881,25 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+   }
+ 
+   if (!Args.hasArg(options::OPT_nostdlib, options::OPT_r)) {
+-    if (!Args.hasArg(options::OPT_nodefaultlibs)) {
++    if ((true)) {
++      if (ToolChain.ShouldLinkCXXStdlib(Args))
++        ToolChain.AddCXXStdlibLibArgs(Args, CmdArgs);
++      if (!Args.hasArg(options::OPT_nodefaultlibs)) {
++        CmdArgs.push_back("-lc");
++        if (D.CCCIsCXX())
++          CmdArgs.push_back("-lm");
++      }
++      CmdArgs.push_back("-lpizlo");
++      if (IsStatic || IsStaticPIE)
++        CmdArgs.push_back("--start-group");
++      CmdArgs.push_back("-lyolort");
++      CmdArgs.push_back("-lyoloc");
++      CmdArgs.push_back("-lyolom");
++      CmdArgs.push_back("-lyolort");
++      CmdArgs.push_back("-lyolounwind");
++      if (IsStatic || IsStaticPIE)
++        CmdArgs.push_back("--end-group");
++    } else if (!Args.hasArg(options::OPT_nodefaultlibs)) {
+       if (IsStatic || IsStaticPIE)
+         CmdArgs.push_back("--start-group");
+ 
+@@ -647,8 +968,10 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+     if (!Args.hasArg(options::OPT_nostartfiles) && !IsIAMCU) {
+       if (HasCRTBeginEndFiles) {
+         std::string P;
+-        if (ToolChain.GetRuntimeLibType(Args) == ToolChain::RLT_CompilerRT &&
+-            !isAndroid) {
++        if ((true))
++          P = GetYoloLibPath("crtend.o");
++        else if (ToolChain.GetRuntimeLibType(Args) == ToolChain::RLT_CompilerRT &&
++                 !isAndroid) {
+           std::string crtend = ToolChain.getCompilerRT(Args, "crtend",
+                                                        ToolChain::FT_Object);
+           if (ToolChain.getVFS().exists(crtend))
+@@ -662,12 +985,12 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+             crtend = isAndroid ? "crtend_android.o" : "crtendS.o";
+           else
+             crtend = isAndroid ? "crtend_android.o" : "crtend.o";
+-          P = ToolChain.GetFilePath(crtend);
++          P = GetGCCLibPath(crtend);
+         }
+         CmdArgs.push_back(Args.MakeArgString(P));
+       }
+       if (!isAndroid)
+-        CmdArgs.push_back(Args.MakeArgString(ToolChain.GetFilePath("crtn.o")));
++        CmdArgs.push_back(Args.MakeArgString(GetYoloLibPath("crtn.o")));
+     }
+   }
+ 
+@@ -677,6 +1000,7 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+   C.addCommand(std::make_unique<Command>(JA, *this,
+                                          ResponseFileSupport::AtFileCurCP(),
+                                          Exec, CmdArgs, Inputs, Output));
++
+ }
+ 
+ void tools::gnutools::Assembler::ConstructJob(Compilation &C,
+@@ -3062,15 +3386,7 @@ Generic_GCC::getDefaultUnwindTableLevel(const ArgList &Args) const {
+ }
+ 
+ bool Generic_GCC::isPICDefault() const {
+-  switch (getArch()) {
+-  case llvm::Triple::x86_64:
+-    return getTriple().isOSWindows();
+-  case llvm::Triple::mips64:
+-  case llvm::Triple::mips64el:
+-    return true;
+-  default:
+-    return false;
+-  }
++  return true;
+ }
+ 
+ bool Generic_GCC::isPIEDefault(const llvm::opt::ArgList &Args) const {
+@@ -3233,6 +3549,24 @@ void
+ Generic_GCC::addLibCxxIncludePaths(const llvm::opt::ArgList &DriverArgs,
+                                    llvm::opt::ArgStringList &CC1Args) const {
+   const Driver &D = getDriver();
++
++  if ((true)) {
++    {
++      llvm::SmallString<128> P =
++        llvm::StringRef(getDriver().Dir); // <install>/bin
++      llvm::sys::path::append(P, "..", "include", getTripleString());
++      llvm::sys::path::append(P, "c++", "v1");
++      addSystemInclude(DriverArgs, CC1Args, P);
++    }
++    {
++      llvm::SmallString<128> P =
++        llvm::StringRef(getDriver().Dir); // <install>/bin
++      llvm::sys::path::append(P, "..", "include", "c++", "v1");
++      addSystemInclude(DriverArgs, CC1Args, P);
++    }
++    return;
++  }
++  
+   std::string SysRoot = computeSysRoot();
+   if (SysRoot.empty())
+     SysRoot = llvm::sys::path::get_separator();
+diff --git a/clang/lib/Driver/ToolChains/Linux.cpp b/clang/lib/Driver/ToolChains/Linux.cpp
+index 0767fe6..21698b5 100644
+--- a/clang/lib/Driver/ToolChains/Linux.cpp
++++ b/clang/lib/Driver/ToolChains/Linux.cpp
+@@ -221,6 +221,9 @@ Linux::Linux(const Driver &D, const llvm::Triple &Triple, const ArgList &Args)
+ 
+   Generic_GCC::PushPPaths(PPaths);
+ 
++  if (D.HasOptfil)
++    PPaths.push_back("/opt/fil/bin");
++
+   Distro Distro(D.getVFS(), Triple);
+ 
+   if (Distro.IsAlpineLinux() || Triple.isAndroid()) {
+@@ -376,6 +379,8 @@ unsigned Linux::GetDefaultDwarfVersion() const {
+ }
+ 
+ ToolChain::CXXStdlibType Linux::GetDefaultCXXStdlibType() const {
++  if ((true))
++    return ToolChain::CST_Libcxx;
+   if (getTriple().isAndroid())
+     return ToolChain::CST_Libcxx;
+   return ToolChain::CST_Libstdcxx;
+@@ -451,6 +456,24 @@ std::string Linux::getDynamicLinker(const ArgList &Args) const {
+   const llvm::Triple::ArchType Arch = getArch();
+   const llvm::Triple &Triple = getTriple();
+ 
++  if ((true)) {
++    // Check for explicit override flag
++    if (Arg *A = Args.getLastArg(options::OPT_filc_dynamic_linker)) {
++      A->claim();
++      return std::string(A->getValue());
++    }
++    
++    SmallString<128> P;
++    if (getDriver().HasPizfix)
++      P = getDriver().PizfixRoot;
++    else if (getDriver().HasOptfil)
++      P = "/opt/fil";
++    else
++      P = "/";
++    llvm::sys::path::append(P, "lib", "ld-fil1-" + Triple.getArchName().str() + ".so");
++    return std::string(P);
++  }
++
+   const Distro Distro(getDriver().getVFS(), Triple);
+ 
+   if (Triple.isAndroid()) {
+@@ -637,6 +660,60 @@ void Linux::AddClangSystemIncludeArgs(const ArgList &DriverArgs,
+   const Driver &D = getDriver();
+   std::string SysRoot = computeSysRoot();
+ 
++  if (D.HasPizfix) {
++    {
++      std::string P;
++      if (Arg *A = DriverArgs.getLastArg(options::OPT_filc_stdfil_include)) {
++        A->claim();
++        P = A->getValue();
++      } else {
++        SmallString<128> Path(D.PizfixRoot);
++        llvm::sys::path::append(Path, "stdfil-include");
++        P = std::string(Path);
++      }
++      addSystemInclude(DriverArgs, CC1Args, P);
++    }
++    
++    {
++      std::string P;
++      if (Arg *A = DriverArgs.getLastArg(options::OPT_filc_os_include)) {
++        A->claim();
++        P = A->getValue();
++      } else {
++        SmallString<128> Path(D.PizfixRoot);
++        llvm::sys::path::append(Path, "os-include");
++        P = std::string(Path);
++      }
++      addSystemInclude(DriverArgs, CC1Args, P);
++    }
++    
++    if (!DriverArgs.hasArg(clang::driver::options::OPT_nostdinc)
++        && !DriverArgs.hasArg(options::OPT_nostdlibinc)) {
++      std::string P;
++      if (Arg *A = DriverArgs.getLastArg(options::OPT_filc_include)) {
++        A->claim();
++        P = A->getValue();
++      } else {
++        SmallString<128> Path(D.PizfixRoot);
++        llvm::sys::path::append(Path, "include");
++        P = std::string(Path);
++      }
++      addSystemInclude(DriverArgs, CC1Args, P);
++    }
++  } else if (D.HasOptfil)
++    addSystemInclude(DriverArgs, CC1Args, "/opt/fil/include");
++  else
++    addSystemInclude(DriverArgs, CC1Args, "/usr/include");
++
++  SmallString<128> ResourceDirInclude(D.ResourceDir);
++  llvm::sys::path::append(ResourceDirInclude, "include");
++  if (!DriverArgs.hasArg(clang::driver::options::OPT_nostdinc)
++      && !DriverArgs.hasArg(options::OPT_nobuiltininc))
++    addSystemInclude(DriverArgs, CC1Args, ResourceDirInclude);
++
++  if ((true))
++    return;
++
+   if (DriverArgs.hasArg(clang::driver::options::OPT_nostdinc))
+     return;
+ 
+@@ -644,8 +721,6 @@ void Linux::AddClangSystemIncludeArgs(const ArgList &DriverArgs,
+   // GCC_INCLUDE_DIR (private headers) in GCC. Note: the include directory
+   // contains some files conflicting with system /usr/include. musl systems
+   // prefer the /usr/include copies which are more relevant.
+-  SmallString<128> ResourceDirInclude(D.ResourceDir);
+-  llvm::sys::path::append(ResourceDirInclude, "include");
+   if (!DriverArgs.hasArg(options::OPT_nobuiltininc) &&
+       (!getTriple().isMusl() || DriverArgs.hasArg(options::OPT_nostdlibinc)))
+     addSystemInclude(DriverArgs, CC1Args, ResourceDirInclude);

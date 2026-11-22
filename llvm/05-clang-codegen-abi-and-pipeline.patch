@@ -1,5 +1,5 @@
 Subject: Clang CodeGen ABI, record/constant lowering, and Fil-C pass pipeline wiring
-Upstream-Base: llvmorg-23.1.6 (5b10d2d74929eae78912771222c9855af97496f4)
+Upstream-Base: LLVM main (1bd1774757f8fb19c0a06f84cbb53076b75eafbb)
 Fil-C-Head: cede3de02b42b58a14acc9ce39c9894ab952a915 (branch deluge)
 
 Hooks RegisterFilPasses into BackendUtil, preserves pre-/post-Fil-C
@@ -55,9 +55,16 @@ Rebase-Notes (llvmorg-22.1.8 -> llvmorg-23.1.6):
   - CodeGenAction.cpp: context updated for scope_exit diagnostic handler restoration.
   - Targets/X86.cpp: re-applied EmitVAArg -> EmitVAArgInstr override against updated X86_64ABIInfo::EmitVAArg.
 
+
+Rebase-Notes (llvmorg-23.1.6 -> LLVM main 1bd1774757f8):
+  - BackendUtil.cpp, CodeGenAction.cpp, ObjectFilePCHContainerWriter.cpp: LLVM main removed the DataLayout parameter from emitBackendOutput() and only sets DataLayout if default in emitAssembly(); dropped obsolete emitBackendOutput DataLayout hunks in CodeGenAction.cpp and ObjectFilePCHContainerWriter.cpp, and updated BackendUtil.cpp's post-emit DataLayout verification to check DataLayoutAfterFilC when present.
+  - CGBuiltin.cpp: context updated for SyncScope::ID SSID parameter in MakeAtomicCmpXchgValue.
+  - CGExprConstant.cpp: updated isEmptyRecordForLayout/isEmptyFieldForLayout calls to CodeGenUtils:: namespace.
+  - Targets/AArch64.cpp: re-applied <=16B aggregate pointer-array coercion against upstream Size < 64 fast path.
+
 ---
 diff --git a/clang/lib/CodeGen/BackendUtil.cpp b/clang/lib/CodeGen/BackendUtil.cpp
-index e3ae446fb..23a57248e 100644
+index a6c4e296f..44df0438d 100644
 --- a/clang/lib/CodeGen/BackendUtil.cpp
 +++ b/clang/lib/CodeGen/BackendUtil.cpp
 @@ -1,3 +1,4 @@
@@ -65,15 +72,15 @@ index e3ae446fb..23a57248e 100644
  //===--- BackendUtil.cpp - LLVM Backend Utilities -------------------------===//
  //
  // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
-@@ -42,6 +43,7 @@
+@@ -44,6 +45,7 @@
  #include "llvm/MC/TargetRegistry.h"
  #include "llvm/Object/OffloadBinary.h"
  #include "llvm/Passes/PassBuilder.h"
 +#include "llvm/Passes/RegisterFilPasses.h"
+ #include "llvm/Passes/RunCodeGen.h"
  #include "llvm/Passes/StandardInstrumentations.h"
  #include "llvm/Plugins/PassPlugin.h"
- #include "llvm/ProfileData/InstrProfCorrelator.h"
-@@ -1024,6 +1026,8 @@ void EmitAssemblyHelper::RunOptimizationPipeline(
+@@ -1032,6 +1034,8 @@ void EmitAssemblyHelper::RunOptimizationPipeline(
      const bool PrepareForThinLTO = CodeGenOpts.PrepareForThinLTO;
      const bool PrepareForLTO = CodeGenOpts.PrepareForLTO;
  
@@ -82,19 +89,23 @@ index e3ae446fb..23a57248e 100644
      if (LangOpts.ObjCAutoRefCount) {
        PB.registerPipelineStartEPCallback(
            [](ModulePassManager &MPM, OptimizationLevel Level) {
-@@ -1354,8 +1358,8 @@ void EmitAssemblyHelper::emitAssembly(BackendAction Action,
- 
-   if (RequiresCodeGen && !TM)
-     return;
--  if (TM)
--    TheModule->setDataLayout(TM->createDataLayout());
-+  //if (TM)
-+  //  TheModule->setDataLayout(TM->createDataLayout());
- 
-   // Before executing passes, print the final values of the LLVM options.
-   cl::PrintOptionValues();
+@@ -1629,9 +1633,12 @@ void clang::emitBackendOutput(CompilerInstance &CI, CodeGenOptions &CGOpts,
+   if (AsmHelper.TM) {
+     std::string TDesc = M->getTargetTriple().computeDataLayout(
+         AsmHelper.TM->getTargetABIName(*M));
+-    if (M->getDataLayout() != DataLayout(TDesc)) {
++    const DataLayout &CheckDL =
++        M->getDataLayoutAfterFilC().isDefault() ? M->getDataLayout()
++                                                : M->getDataLayoutAfterFilC();
++    if (CheckDL != DataLayout(TDesc)) {
+       Diags.Report(diag::err_data_layout_mismatch)
+-          << M->getDataLayout().getStringRepresentation() << TDesc;
++          << CheckDL.getStringRepresentation() << TDesc;
+     }
+   }
+ }
 diff --git a/clang/lib/CodeGen/CGAtomic.cpp b/clang/lib/CodeGen/CGAtomic.cpp
-index 61e13d492..0cbd89629 100644
+index cd7b278ea..52adedd12 100644
 --- a/clang/lib/CodeGen/CGAtomic.cpp
 +++ b/clang/lib/CodeGen/CGAtomic.cpp
 @@ -160,7 +160,10 @@ namespace {
@@ -109,7 +120,7 @@ index 61e13d492..0cbd89629 100644
      }
  
      /// Is the atomic size larger than the underlying value type?
-@@ -938,6 +941,22 @@ static void EmitAtomicOp(CodeGenFunction &CGF, AtomicExpr *Expr, Address Dest,
+@@ -941,6 +944,22 @@ static void EmitAtomicOp(CodeGenFunction &CGF, AtomicExpr *Expr, Address Dest,
    Builder.SetInsertPoint(ContBB);
  }
  
@@ -132,7 +143,7 @@ index 61e13d492..0cbd89629 100644
  RValue CodeGenFunction::EmitAtomicExpr(AtomicExpr *E) {
    ApplyAtomGroup Grp(getDebugInfo());
  
-@@ -981,6 +1000,8 @@ RValue CodeGenFunction::EmitAtomicExpr(AtomicExpr *E) {
+@@ -984,6 +1003,8 @@ RValue CodeGenFunction::EmitAtomicExpr(AtomicExpr *E) {
    llvm::Value *Order = EmitScalarExpr(E->getOrder());
    llvm::Value *Scope =
        E->getScopeModel() ? EmitScalarExpr(E->getScope()) : nullptr;
@@ -141,7 +152,7 @@ index 61e13d492..0cbd89629 100644
  
    switch (E->getOp()) {
    case AtomicExpr::AO__c11_atomic_init:
-@@ -1043,6 +1064,7 @@ RValue CodeGenFunction::EmitAtomicExpr(AtomicExpr *E) {
+@@ -1046,6 +1067,7 @@ RValue CodeGenFunction::EmitAtomicExpr(AtomicExpr *E) {
    case AtomicExpr::AO__opencl_atomic_fetch_add:
    case AtomicExpr::AO__opencl_atomic_fetch_sub:
      if (MemTy->isPointerType()) {
@@ -149,7 +160,7 @@ index 61e13d492..0cbd89629 100644
        // For pointer arithmetic, we're required to do a bit of math:
        // adding 1 to an int* is not the same as adding 1 to a uintptr_t.
        // ... but only for the C11 builtins. The GNU builtins expect the
-@@ -1145,7 +1167,15 @@ RValue CodeGenFunction::EmitAtomicExpr(AtomicExpr *E) {
+@@ -1148,7 +1170,15 @@ RValue CodeGenFunction::EmitAtomicExpr(AtomicExpr *E) {
    AtomicInfo Atomics(*this, AtomicVal);
  
    Address OriginalVal1 = Val1;
@@ -166,7 +177,7 @@ index 61e13d492..0cbd89629 100644
      Ptr = Atomics.castToAtomicIntPointer(Ptr);
      if (Val1.isValid())
        Val1 = Atomics.convertToAtomicIntPointer(Val1);
-@@ -1153,13 +1183,17 @@ RValue CodeGenFunction::EmitAtomicExpr(AtomicExpr *E) {
+@@ -1156,13 +1186,17 @@ RValue CodeGenFunction::EmitAtomicExpr(AtomicExpr *E) {
        Val2 = Atomics.convertToAtomicIntPointer(Val2);
    }
    if (Dest.isValid()) {
@@ -187,10 +198,10 @@ index 61e13d492..0cbd89629 100644
    }
  
 diff --git a/clang/lib/CodeGen/CGBuiltin.cpp b/clang/lib/CodeGen/CGBuiltin.cpp
-index 37846bbb0..9d9a3e21b 100644
+index bdcd9ee43..64e0e87f1 100644
 --- a/clang/lib/CodeGen/CGBuiltin.cpp
 +++ b/clang/lib/CodeGen/CGBuiltin.cpp
-@@ -313,6 +313,12 @@ Value *MakeBinaryAtomicValue(
+@@ -290,6 +290,12 @@ Value *MakeBinaryAtomicValue(CodeGenFunction &CGF,
  
    llvm::Value *Val = CGF.EmitScalarExpr(E->getArg(1));
    llvm::Type *ValueType = Val->getType();
@@ -203,7 +214,7 @@ index 37846bbb0..9d9a3e21b 100644
    Val = EmitToInt(CGF, Val, T, IntType);
  
    llvm::Value *Result =
-@@ -408,8 +414,13 @@ Value *MakeAtomicCmpXchgValue(CodeGenFunction &CGF, const CallExpr *E,
+@@ -386,8 +392,13 @@ Value *MakeAtomicCmpXchgValue(CodeGenFunction &CGF, const CallExpr *E,
  
    Value *Cmp = CGF.EmitScalarExpr(E->getArg(1));
    llvm::Type *ValueType = Cmp->getType();
@@ -218,8 +229,8 @@ index 37846bbb0..9d9a3e21b 100644
 +  }
  
    Value *Pair = CGF.Builder.CreateAtomicCmpXchg(
-       DestAddr, Cmp, New, SuccessOrdering, FailureOrdering);
-@@ -417,6 +428,8 @@ Value *MakeAtomicCmpXchgValue(CodeGenFunction &CGF, const CallExpr *E,
+       DestAddr, Cmp, New, SuccessOrdering, FailureOrdering, SSID);
+@@ -395,6 +406,8 @@ Value *MakeAtomicCmpXchgValue(CodeGenFunction &CGF, const CallExpr *E,
      // Extract boolean success flag and zext it to int.
      return CGF.Builder.CreateZExt(CGF.Builder.CreateExtractValue(Pair, 1),
                                    CGF.ConvertType(E->getType()));
@@ -228,7 +239,7 @@ index 37846bbb0..9d9a3e21b 100644
    else
      // Extract old value and emit it using the same type as compare value.
      return EmitFromInt(CGF, CGF.Builder.CreateExtractValue(Pair, 0), T,
-@@ -5064,7 +5077,16 @@ RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
+@@ -4936,7 +4949,16 @@ RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
      Value *SizeVal = EmitScalarExpr(E->getArg(2));
      EmitArgCheck(TCK_Store, Dest, E->getArg(0), 0);
      EmitArgCheck(TCK_Load, Src, E->getArg(1), 1);
@@ -246,7 +257,7 @@ index 37846bbb0..9d9a3e21b 100644
      addInstToNewSourceAtom(I, nullptr);
      if (BuiltinID == Builtin::BImempcpy ||
          BuiltinID == Builtin::BI__builtin_mempcpy)
-@@ -5151,7 +5173,15 @@ RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
+@@ -5023,7 +5045,15 @@ RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
                    .getQuantity()));
      EmitArgCheck(TCK_Store, Dest, E->getArg(0), 0);
      EmitArgCheck(TCK_Load, Src, E->getArg(1), 1);
@@ -264,10 +275,10 @@ index 37846bbb0..9d9a3e21b 100644
      return RValue::get(Dest, *this);
    }
 diff --git a/clang/lib/CodeGen/CGDecl.cpp b/clang/lib/CodeGen/CGDecl.cpp
-index e84e05e8e..52255a213 100644
+index 07dfacf4d..3331b1333 100644
 --- a/clang/lib/CodeGen/CGDecl.cpp
 +++ b/clang/lib/CodeGen/CGDecl.cpp
-@@ -1740,7 +1740,7 @@ CodeGenFunction::EmitAutoVarAlloca(const VarDecl &D) {
+@@ -1777,7 +1777,7 @@ CodeGenFunction::EmitAutoVarAlloca(const VarDecl &D) {
                                          UsePointerValue);
    }
  
@@ -276,7 +287,7 @@ index e84e05e8e..52255a213 100644
      EmitVarAnnotations(&D, address.emitRawPointer(*this));
  
    // Make sure we call @llvm.lifetime.end.
-@@ -2874,8 +2874,7 @@ void CodeGenFunction::EmitParmDecl(const VarDecl &D, ParamValue Arg,
+@@ -2937,8 +2937,7 @@ void CodeGenFunction::EmitParmDecl(const VarDecl &D, ParamValue Arg,
      }
    }
  
@@ -287,10 +298,10 @@ index e84e05e8e..52255a213 100644
    // We can only check return value nullability if all arguments to the
    // function satisfy their nullability preconditions. This makes it necessary
 diff --git a/clang/lib/CodeGen/CGExpr.cpp b/clang/lib/CodeGen/CGExpr.cpp
-index d642d46e2..9d8d6720f 100644
+index ae4b40b32..7bb39ca23 100644
 --- a/clang/lib/CodeGen/CGExpr.cpp
 +++ b/clang/lib/CodeGen/CGExpr.cpp
-@@ -108,13 +108,14 @@ static llvm::StringRef GetUBSanTrapForHandler(SanitizerHandler ID) {
+@@ -112,13 +112,14 @@ static llvm::StringRef GetUBSanTrapForHandler(SanitizerHandler ID) {
  RawAddress
  CodeGenFunction::CreateTempAllocaWithoutCast(llvm::Type *Ty, CharUnits Align,
                                               const Twine &Name,
@@ -307,7 +318,7 @@ index d642d46e2..9d8d6720f 100644
    Alloca->setAlignment(Align.getAsAlign());
    return RawAddress(Alloca, Ty, Align, KnownNonNull);
  }
-@@ -147,8 +148,9 @@ RawAddress CodeGenFunction::MaybeCastStackAddressSpace(RawAddress Alloca,
+@@ -151,8 +152,9 @@ RawAddress CodeGenFunction::MaybeCastStackAddressSpace(RawAddress Alloca,
  RawAddress CodeGenFunction::CreateTempAlloca(llvm::Type *Ty, LangAS DestLangAS,
                                               CharUnits Align, const Twine &Name,
                                               llvm::Value *ArraySize,
@@ -319,7 +330,7 @@ index d642d46e2..9d8d6720f 100644
    if (AllocaAddr)
      *AllocaAddr = Alloca;
    return MaybeCastStackAddressSpace(Alloca, DestLangAS, ArraySize);
-@@ -159,7 +161,8 @@ RawAddress CodeGenFunction::CreateTempAlloca(llvm::Type *Ty, LangAS DestLangAS,
+@@ -163,7 +165,8 @@ RawAddress CodeGenFunction::CreateTempAlloca(llvm::Type *Ty, LangAS DestLangAS,
  /// insertion point of the builder.
  llvm::AllocaInst *CodeGenFunction::CreateTempAlloca(llvm::Type *Ty,
                                                      const Twine &Name,
@@ -329,7 +340,7 @@ index d642d46e2..9d8d6720f 100644
    llvm::AllocaInst *Alloca;
    if (ArraySize)
      Alloca = Builder.CreateAlloca(Ty, ArraySize, Name);
-@@ -167,6 +170,12 @@ llvm::AllocaInst *CodeGenFunction::CreateTempAlloca(llvm::Type *Ty,
+@@ -171,6 +174,12 @@ llvm::AllocaInst *CodeGenFunction::CreateTempAlloca(llvm::Type *Ty,
      Alloca =
          new llvm::AllocaInst(Ty, CGM.getDataLayout().getAllocaAddrSpace(),
                               ArraySize, Name, AllocaInsertPt->getIterator());
@@ -342,7 +353,7 @@ index d642d46e2..9d8d6720f 100644
    if (SanOpts.Mask & SanitizerKind::Address) {
      Alloca->addAnnotationMetadata({"alloca_name_altered", Name.str()});
    }
-@@ -190,7 +199,7 @@ RawAddress CodeGenFunction::CreateDefaultAlignTempAlloca(llvm::Type *Ty,
+@@ -194,7 +203,7 @@ RawAddress CodeGenFunction::CreateDefaultAlignTempAlloca(llvm::Type *Ty,
  RawAddress CodeGenFunction::CreateIRTempWithoutCast(QualType Ty,
                                                      const Twine &Name) {
    CharUnits Align = getContext().getTypeAlignInChars(Ty);
@@ -351,7 +362,7 @@ index d642d46e2..9d8d6720f 100644
  }
  
  RawAddress CodeGenFunction::CreateMemTemp(QualType Ty, const Twine &Name,
-@@ -204,7 +213,7 @@ RawAddress CodeGenFunction::CreateMemTemp(QualType Ty, CharUnits Align,
+@@ -208,7 +217,7 @@ RawAddress CodeGenFunction::CreateMemTemp(QualType Ty, CharUnits Align,
                                            RawAddress *Alloca) {
    RawAddress Result =
        CreateTempAlloca(ConvertTypeForMem(Ty), Ty.getAddressSpace(), Align, Name,
@@ -360,7 +371,7 @@ index d642d46e2..9d8d6720f 100644
  
    if (Ty->isConstantMatrixType()) {
      auto *ArrayTy = cast<llvm::ArrayType>(Result.getElementType());
-@@ -226,7 +235,7 @@ RawAddress CodeGenFunction::CreateMemTemp(QualType Ty, CharUnits Align,
+@@ -230,7 +239,7 @@ RawAddress CodeGenFunction::CreateMemTemp(QualType Ty, CharUnits Align,
  RawAddress CodeGenFunction::CreateMemTempWithoutCast(QualType Ty,
                                                       CharUnits Align,
                                                       const Twine &Name) {
@@ -370,10 +381,10 @@ index d642d46e2..9d8d6720f 100644
  
  RawAddress CodeGenFunction::CreateMemTempWithoutCast(QualType Ty,
 diff --git a/clang/lib/CodeGen/CGExprConstant.cpp b/clang/lib/CodeGen/CGExprConstant.cpp
-index 27b7423a4..f8179e088 100644
+index e2ec07bba..f3a785bb0 100644
 --- a/clang/lib/CodeGen/CGExprConstant.cpp
 +++ b/clang/lib/CodeGen/CGExprConstant.cpp
-@@ -2770,27 +2770,102 @@ static llvm::Constant *EmitNullConstantForBase(CodeGenModule &CGM,
+@@ -2820,27 +2820,102 @@ static llvm::Constant *EmitNullConstantForBase(CodeGenModule &CGM,
                                                 llvm::Type *baseType,
                                                 const CXXRecordDecl *base);
  
@@ -470,7 +481,7 @@ index 27b7423a4..f8179e088 100644
 +      for (const auto &I : CXXR->vbases()) {
 +        const auto *base = I.getType()->castAsCXXRecordDecl();
 +        // Ignore empty bases.
-+        if (isEmptyRecordForLayout(CGM.getContext(), I.getType()))
++        if (CodeGenUtils::isEmptyRecordForLayout(CGM.getContext(), I.getType()))
 +          continue;
 +        FixFilPtrUnionConstantForBase(
 +          CGM, base, offset + RL.getVBaseClassOffset(base).getQuantity(), elements);
@@ -485,8 +496,8 @@ index 27b7423a4..f8179e088 100644
 -
        const auto *base = I.getType()->castAsCXXRecordDecl();
        // Ignore empty bases.
-       if (isEmptyRecordForLayout(CGM.getContext(), I.getType()) ||
-@@ -2799,10 +2874,8 @@ static llvm::Constant *EmitNullConstant(CodeGenModule &CGM,
+       if (CodeGenUtils::isEmptyRecordForLayout(CGM.getContext(), I.getType()) ||
+@@ -2849,10 +2924,8 @@ static llvm::Constant *EmitNullConstant(CodeGenModule &CGM,
                .getNonVirtualSize()
                .isZero())
          continue;
@@ -499,14 +510,14 @@ index 27b7423a4..f8179e088 100644
      }
    }
  
-@@ -2811,11 +2884,14 @@ static llvm::Constant *EmitNullConstant(CodeGenModule &CGM,
+@@ -2861,11 +2934,14 @@ static llvm::Constant *EmitNullConstant(CodeGenModule &CGM,
      // Fill in non-bitfields. (Bitfields always use a zero pattern, which we
      // will fill in later.)
      if (!Field->isBitField() &&
--        !isEmptyFieldForLayout(CGM.getContext(), Field)) {
+-        !CodeGenUtils::isEmptyFieldForLayout(CGM.getContext(), Field)) {
 -      unsigned fieldIndex = layout.getLLVMFieldNo(Field);
 -      elements[fieldIndex] = CGM.EmitNullConstant(Field->getType());
-+        !isEmptyFieldForLayout(CGM.getContext(), Field) &&
++        !CodeGenUtils::isEmptyFieldForLayout(CGM.getContext(), Field) &&
 +        (!record->isUnion() || Field->getIdentifier())) {
 +      if (filVerbose)
 +        llvm::errs() << "dealing with field " << *Field << " at offset " << RL.getFieldOffset(Field->getFieldIndex()) << "\n";
@@ -518,7 +529,7 @@ index 27b7423a4..f8179e088 100644
      // For unions, stop after the first named field.
      if (record->isUnion()) {
        if (Field->getIdentifier())
-@@ -2825,31 +2901,113 @@ static llvm::Constant *EmitNullConstant(CodeGenModule &CGM,
+@@ -2875,31 +2951,113 @@ static llvm::Constant *EmitNullConstant(CodeGenModule &CGM,
            break;
      }
    }
@@ -529,7 +540,7 @@ index 27b7423a4..f8179e088 100644
 -    for (const auto &I : CXXR->vbases()) {
 -      const auto *base = I.getType()->castAsCXXRecordDecl();
 -      // Ignore empty bases.
--      if (isEmptyRecordForLayout(CGM.getContext(), I.getType()))
+-      if (CodeGenUtils::isEmptyRecordForLayout(CGM.getContext(), I.getType()))
 -        continue;
 +static llvm::Constant *EmitNullConstant(CodeGenModule &CGM,
 +                                        const RecordDecl *record,
@@ -552,12 +563,9 @@ index 27b7423a4..f8179e088 100644
 +    for (unsigned fieldIndex = 0; fieldIndex < numSubElements; ++fieldIndex)
 +      subElements[fieldIndex] =
 +        llvm::Constant::getNullValue(subStructure->getElementType(fieldIndex));
- 
--      unsigned fieldIndex = layout.getVirtualBaseIndex(base);
++
 +    FixFilPtrUnionConstant(CGM, record, asCompleteObject, 0, subElements);
- 
--      // We might have already laid this field out.
--      if (elements[fieldIndex]) continue;
++
 +    elements[0] = llvm::ConstantStruct::get(subStructure, subElements);
 +  } else {
 +    if (filVerbose)
@@ -572,11 +580,10 @@ index 27b7423a4..f8179e088 100644
 +          continue;
 +        }
  
--      llvm::Type *baseType = structure->getElementType(fieldIndex);
--      elements[fieldIndex] = EmitNullConstantForBase(CGM, baseType, base);
+-      unsigned fieldIndex = layout.getVirtualBaseIndex(base);
 +        const auto *base = I.getType()->castAsCXXRecordDecl();
 +        // Ignore empty bases.
-+        if (isEmptyRecordForLayout(CGM.getContext(), I.getType()) ||
++        if (CodeGenUtils::isEmptyRecordForLayout(CGM.getContext(), I.getType()) ||
 +            CGM.getContext()
 +                .getASTRecordLayout(base)
 +                .getNonVirtualSize()
@@ -587,23 +594,22 @@ index 27b7423a4..f8179e088 100644
 +        llvm::Type *baseType = structure->getElementType(fieldIndex);
 +        elements[fieldIndex] = EmitNullConstantForBase(CGM, baseType, base);
 +      }
-     }
--  }
++    }
  
--  // Now go through all other fields and zero them out.
--  for (unsigned i = 0; i != numElements; ++i) {
--    if (!elements[i])
--      elements[i] = llvm::Constant::getNullValue(structure->getElementType(i));
+-      // We might have already laid this field out.
+-      if (elements[fieldIndex]) continue;
 +    // Fill in all the fields.
 +    for (const auto *Field : record->fields()) {
 +      // Fill in non-bitfields. (Bitfields always use a zero pattern, which we
 +      // will fill in later.)
 +      if (!Field->isBitField() &&
-+          !isEmptyFieldForLayout(CGM.getContext(), Field)) {
++          !CodeGenUtils::isEmptyFieldForLayout(CGM.getContext(), Field)) {
 +        unsigned fieldIndex = layout.getLLVMFieldNo(Field);
 +        elements[fieldIndex] = CGM.EmitNullConstant(Field->getType());
 +      }
-+
+ 
+-      llvm::Type *baseType = structure->getElementType(fieldIndex);
+-      elements[fieldIndex] = EmitNullConstantForBase(CGM, baseType, base);
 +      // For unions, stop after the first named field.
 +      if (record->isUnion()) {
 +        if (Field->getIdentifier())
@@ -612,14 +618,19 @@ index 27b7423a4..f8179e088 100644
 +          if (FieldRD->findFirstNamedDataMember())
 +            break;
 +      }
-+    }
-+
+     }
+-  }
+ 
+-  // Now go through all other fields and zero them out.
+-  for (unsigned i = 0; i != numElements; ++i) {
+-    if (!elements[i])
+-      elements[i] = llvm::Constant::getNullValue(structure->getElementType(i));
 +    // Fill in the virtual bases, if we're working with the complete object.
 +    if (CXXR && asCompleteObject) {
 +      for (const auto &I : CXXR->vbases()) {
 +        const auto *base = I.getType()->castAsCXXRecordDecl();
 +        // Ignore empty bases.
-+        if (isEmptyRecordForLayout(CGM.getContext(), I.getType()))
++        if (CodeGenUtils::isEmptyRecordForLayout(CGM.getContext(), I.getType()))
 +          continue;
 +
 +        unsigned fieldIndex = layout.getVirtualBaseIndex(base);
@@ -650,10 +661,10 @@ index 27b7423a4..f8179e088 100644
  }
  
 diff --git a/clang/lib/CodeGen/CGRecordLayout.h b/clang/lib/CodeGen/CGRecordLayout.h
-index 44e888c93..2cde5d937 100644
+index a97c25891..943b3032c 100644
 --- a/clang/lib/CodeGen/CGRecordLayout.h
 +++ b/clang/lib/CodeGen/CGRecordLayout.h
-@@ -158,16 +158,21 @@ private:
+@@ -167,16 +167,21 @@ private:
    /// considered as a base subobject, requires a non-zero bitpattern
    /// when zero-initialized.
    bool IsZeroInitializableAsBase : 1;
@@ -677,7 +688,7 @@ index 44e888c93..2cde5d937 100644
  
    /// Return the "complete object" LLVM type associated with
    /// this record.
-@@ -193,6 +198,11 @@ public:
+@@ -202,6 +207,11 @@ public:
      return IsZeroInitializableAsBase;
    }
  
@@ -690,10 +701,10 @@ index 44e888c93..2cde5d937 100644
      return FieldInfo.count(FD) != 0;
    }
 diff --git a/clang/lib/CodeGen/CGRecordLayoutBuilder.cpp b/clang/lib/CodeGen/CGRecordLayoutBuilder.cpp
-index e9205c68c..242ac845b 100644
+index 47ef6ea0d..2df31f2b6 100644
 --- a/clang/lib/CodeGen/CGRecordLayoutBuilder.cpp
 +++ b/clang/lib/CodeGen/CGRecordLayoutBuilder.cpp
-@@ -24,6 +24,7 @@
+@@ -26,6 +26,7 @@
  #include "llvm/IR/DataLayout.h"
  #include "llvm/IR/DerivedTypes.h"
  #include "llvm/IR/Type.h"
@@ -701,7 +712,7 @@ index e9205c68c..242ac845b 100644
  #include "llvm/Support/Debug.h"
  #include "llvm/Support/MathExtras.h"
  #include "llvm/Support/raw_ostream.h"
-@@ -222,6 +223,7 @@ struct CGRecordLowering {
+@@ -198,6 +199,7 @@ struct CGRecordLowering {
    llvm::DenseMap<const CXXRecordDecl *, unsigned> VirtualBases;
    bool IsZeroInitializable : 1;
    bool IsZeroInitializableAsBase : 1;
@@ -709,7 +720,7 @@ index e9205c68c..242ac845b 100644
    bool Packed : 1;
  private:
    CGRecordLowering(const CGRecordLowering &) = delete;
-@@ -235,7 +237,7 @@ CGRecordLowering::CGRecordLowering(CodeGenTypes &Types, const RecordDecl *D,
+@@ -211,7 +213,7 @@ CGRecordLowering::CGRecordLowering(CodeGenTypes &Types, const RecordDecl *D,
        RD(dyn_cast<CXXRecordDecl>(D)),
        Layout(Types.getContext().getASTRecordLayout(D)),
        DataLayout(Types.getDataLayout()), IsZeroInitializable(true),
@@ -718,7 +729,7 @@ index e9205c68c..242ac845b 100644
  
  void CGRecordLowering::setBitFieldInfo(
      const FieldDecl *FD, CharUnits StartOffset, llvm::Type *StorageType) {
-@@ -310,11 +312,51 @@ void CGRecordLowering::lower(bool NVBaseType) {
+@@ -286,11 +288,51 @@ void CGRecordLowering::lower(bool NVBaseType) {
    computeVolatileBitfields();
  }
  
@@ -770,7 +781,7 @@ index e9205c68c..242ac845b 100644
    // Iterate through the fields setting bitFieldInfo and the Fields array. Also
    // locate the "most appropriate" storage type.  The heuristic for finding the
    // storage type isn't necessary, the first (non-0-length-bitfield) field's
-@@ -331,6 +373,7 @@ void CGRecordLowering::lowerUnion(bool isNonVirtualBaseType) {
+@@ -307,6 +349,7 @@ void CGRecordLowering::lowerUnion(bool isNonVirtualBaseType) {
      }
      Fields[Field->getCanonicalDecl()] = 0;
      llvm::Type *FieldType = getStorageType(Field);
@@ -778,7 +789,7 @@ index e9205c68c..242ac845b 100644
      // Compute zero-initializable status.
      // This union might not be zero initialized: it may contain a pointer to
      // data member which might have some exotic initialization sequence.
-@@ -355,9 +398,33 @@ void CGRecordLowering::lowerUnion(bool isNonVirtualBaseType) {
+@@ -331,9 +374,33 @@ void CGRecordLowering::lowerUnion(bool isNonVirtualBaseType) {
      if (!StorageType ||
          getAlignment(FieldType) >  getAlignment(StorageType) ||
          (getAlignment(FieldType) == getAlignment(StorageType) &&
@@ -813,7 +824,7 @@ index e9205c68c..242ac845b 100644
    // If we have no storage type just pad to the appropriate size and return.
    if (!StorageType)
      return appendPaddingBytes(LayoutSize);
-@@ -1098,6 +1165,8 @@ CodeGenTypes::ComputeRecordLayout(const RecordDecl *D, llvm::StructType *Ty) {
+@@ -1063,6 +1130,8 @@ CodeGenTypes::ComputeRecordLayout(const RecordDecl *D, llvm::StructType *Ty) {
        // on both of them with the same index.
        assert(Builder.Packed == BaseBuilder.Packed &&
               "Non-virtual and complete types must agree on packedness");
@@ -822,7 +833,7 @@ index e9205c68c..242ac845b 100644
      }
    }
  
-@@ -1108,7 +1177,8 @@ CodeGenTypes::ComputeRecordLayout(const RecordDecl *D, llvm::StructType *Ty) {
+@@ -1073,7 +1142,8 @@ CodeGenTypes::ComputeRecordLayout(const RecordDecl *D, llvm::StructType *Ty) {
  
    auto RL = std::make_unique<CGRecordLayout>(
        Ty, BaseTy, (bool)Builder.IsZeroInitializable,
@@ -832,7 +843,7 @@ index e9205c68c..242ac845b 100644
  
    RL->NonVirtualBases.swap(Builder.NonVirtualBases);
    RL->CompleteObjectVirtualBases.swap(Builder.VirtualBases);
-@@ -1215,6 +1285,7 @@ void CGRecordLayout::print(raw_ostream &OS) const {
+@@ -1180,6 +1250,7 @@ void CGRecordLayout::print(raw_ostream &OS) const {
    if (BaseSubobjectType)
      OS << "  NonVirtualBaseLLVMType:" << *BaseSubobjectType << "\n";
    OS << "  IsZeroInitializable:" << IsZeroInitializable << "\n";
@@ -840,33 +851,11 @@ index e9205c68c..242ac845b 100644
    OS << "  BitFields:[\n";
  
    // Print bit-field infos in declaration order.
-diff --git a/clang/lib/CodeGen/CodeGenAction.cpp b/clang/lib/CodeGen/CodeGenAction.cpp
-index 6911cab37..c36ffa85d 100644
---- a/clang/lib/CodeGen/CodeGenAction.cpp
-+++ b/clang/lib/CodeGen/CodeGenAction.cpp
-@@ -320,7 +320,7 @@ void BackendConsumer::HandleTranslationUnit(ASTContext &C) {
-   EmbedBitcode(getModule(), CodeGenOpts, llvm::MemoryBufferRef());
- 
-   emitBackendOutput(CI, CI.getCodeGenOpts(),
--                    C.getTargetInfo().getDataLayoutString(), getModule(),
-+                    C.getTargetInfo().getDataLayoutStringAfterFilC(), getModule(),
-                     Action, FS, std::move(AsmOutStream), this);
- 
-   if (OptRecordFile)
-@@ -1240,7 +1240,7 @@ void CodeGenAction::ExecuteAction() {
-   LLVMRemarkFileHandle OptRecordFile = std::move(*OptRecordFileOrErr);
- 
-   emitBackendOutput(CI, CI.getCodeGenOpts(),
--                    CI.getTarget().getDataLayoutString(), TheModule.get(), BA,
-+                    CI.getTarget().getDataLayoutStringAfterFilC(), TheModule.get(), BA,
-                     CI.getFileManager().getVirtualFileSystemPtr(),
-                     std::move(OS));
-   if (OptRecordFile)
 diff --git a/clang/lib/CodeGen/CodeGenFunction.cpp b/clang/lib/CodeGen/CodeGenFunction.cpp
-index 7629b42dd..71088e71f 100644
+index 5d4de45a8..44a49a3cd 100644
 --- a/clang/lib/CodeGen/CodeGenFunction.cpp
 +++ b/clang/lib/CodeGen/CodeGenFunction.cpp
-@@ -2811,11 +2811,19 @@ llvm::Value *CodeGenFunction::EmitAnnotationCall(llvm::Function *AnnotationFn,
+@@ -2826,11 +2826,19 @@ llvm::Value *CodeGenFunction::EmitAnnotationCall(llvm::Function *AnnotationFn,
  }
  
  void CodeGenFunction::EmitVarAnnotations(const VarDecl *D, llvm::Value *V) {
@@ -892,10 +881,10 @@ index 7629b42dd..71088e71f 100644
  
  Address CodeGenFunction::EmitFieldAnnotations(const FieldDecl *D,
 diff --git a/clang/lib/CodeGen/CodeGenFunction.h b/clang/lib/CodeGen/CodeGenFunction.h
-index e7c24f1f3..45fc2e94b 100644
+index c46c33a19..afaf7d056 100644
 --- a/clang/lib/CodeGen/CodeGenFunction.h
 +++ b/clang/lib/CodeGen/CodeGenFunction.h
-@@ -2893,7 +2893,8 @@ public:
+@@ -2984,7 +2984,8 @@ public:
    /// The cast is not performed in CreateTempAllocaWithoutCast. This is
    /// more efficient if the caller knows that the address will not be exposed.
    llvm::AllocaInst *CreateTempAlloca(llvm::Type *Ty, const Twine &Name = "tmp",
@@ -905,7 +894,7 @@ index e7c24f1f3..45fc2e94b 100644
  
    /// CreateTempAlloca - This creates a alloca and inserts it into the entry
    /// block. The alloca is casted to the address space of \p UseAddrSpace if
-@@ -2901,7 +2902,8 @@ public:
+@@ -2992,7 +2993,8 @@ public:
    RawAddress CreateTempAlloca(llvm::Type *Ty, LangAS UseAddrSpace,
                                CharUnits align, const Twine &Name = "tmp",
                                llvm::Value *ArraySize = nullptr,
@@ -915,7 +904,7 @@ index e7c24f1f3..45fc2e94b 100644
  
    /// CreateTempAlloca - This creates a alloca and inserts it into the entry
    /// block. The alloca is casted to default address space if necessary.
-@@ -2911,14 +2913,16 @@ public:
+@@ -3002,14 +3004,16 @@ public:
    RawAddress CreateTempAlloca(llvm::Type *Ty, CharUnits align,
                                const Twine &Name = "tmp",
                                llvm::Value *ArraySize = nullptr,
@@ -936,10 +925,10 @@ index e7c24f1f3..45fc2e94b 100644
    /// CreateDefaultAlignedTempAlloca - This creates an alloca with the
    /// default ABI alignment of the given LLVM type.
 diff --git a/clang/lib/CodeGen/CodeGenModule.cpp b/clang/lib/CodeGen/CodeGenModule.cpp
-index a910e5e0c..02b882e57 100644
+index f0ea493e1..7a15712a4 100644
 --- a/clang/lib/CodeGen/CodeGenModule.cpp
 +++ b/clang/lib/CodeGen/CodeGenModule.cpp
-@@ -426,7 +426,7 @@ static void checkDataLayoutConsistency(const TargetInfo &Target,
+@@ -514,7 +514,7 @@ static void checkDataLayoutConsistency(const TargetInfo &Target,
      return;
  
    llvm::Triple Triple = Target.getTriple();
@@ -949,10 +938,10 @@ index a910e5e0c..02b882e57 100644
      llvm::Align DLAlign = DL.getABITypeAlign(Ty);
      llvm::Align ClangAlign(Alignment / 8);
 diff --git a/clang/lib/CodeGen/ItaniumCXXABI.cpp b/clang/lib/CodeGen/ItaniumCXXABI.cpp
-index 2f43eb6e1..1c6fd0acc 100644
+index 3fbee4dc6..b57b0dba2 100644
 --- a/clang/lib/CodeGen/ItaniumCXXABI.cpp
 +++ b/clang/lib/CodeGen/ItaniumCXXABI.cpp
-@@ -578,10 +578,8 @@ CodeGen::CGCXXABI *CodeGen::CreateItaniumCXXABI(CodeGenModule &CGM) {
+@@ -580,10 +580,8 @@ CodeGen::CGCXXABI *CodeGen::CreateItaniumCXXABI(CodeGenModule &CGM) {
    case TargetCXXABI::GenericARM:
    case TargetCXXABI::iOS:
    case TargetCXXABI::WatchOS:
@@ -964,7 +953,7 @@ index 2f43eb6e1..1c6fd0acc 100644
  
    case TargetCXXABI::Fuchsia:
      return new FuchsiaCXXABI(CGM);
-@@ -615,7 +613,7 @@ llvm::Type *
+@@ -617,7 +615,7 @@ llvm::Type *
  ItaniumCXXABI::ConvertMemberPointerType(const MemberPointerType *MPT) {
    if (MPT->isMemberDataPointer())
      return CGM.PtrDiffTy;
@@ -973,7 +962,7 @@ index 2f43eb6e1..1c6fd0acc 100644
  }
  
  /// In the Itanium and ARM ABIs, method pointers have the form:
-@@ -669,7 +667,8 @@ CGCallee ItaniumCXXABI::EmitLoadOfMemberFunctionPointer(
+@@ -671,7 +669,8 @@ CGCallee ItaniumCXXABI::EmitLoadOfMemberFunctionPointer(
    ThisPtrForCall = This;
  
    // Load the function pointer.
@@ -983,7 +972,7 @@ index 2f43eb6e1..1c6fd0acc 100644
  
    // If the LSB in the function pointer is 1, the function pointer points to
    // a virtual function.
-@@ -827,8 +826,7 @@ CGCallee ItaniumCXXABI::EmitLoadOfMemberFunctionPointer(
+@@ -829,8 +828,7 @@ CGCallee ItaniumCXXABI::EmitLoadOfMemberFunctionPointer(
    // In the non-virtual path, the function pointer is actually a
    // function pointer.
    CGF.EmitBlock(FnNonVirtual);
@@ -993,7 +982,7 @@ index 2f43eb6e1..1c6fd0acc 100644
  
    // Check the function pointer if CFI on member function pointers is enabled.
    if (ShouldEmitCFICheck) {
-@@ -1141,8 +1139,9 @@ ItaniumCXXABI::EmitNullMemberPointer(const MemberPointerType *MPT) {
+@@ -1143,8 +1141,9 @@ ItaniumCXXABI::EmitNullMemberPointer(const MemberPointerType *MPT) {
    if (MPT->isMemberDataPointer())
      return llvm::ConstantInt::get(CGM.PtrDiffTy, -1ULL, /*isSigned=*/true);
  
@@ -1005,7 +994,7 @@ index 2f43eb6e1..1c6fd0acc 100644
    return llvm::ConstantStruct::getAnon(Values);
  }
  
-@@ -1219,7 +1218,8 @@ llvm::Constant *ItaniumCXXABI::BuildMemberPointer(const CXXMethodDecl *MD,
+@@ -1221,7 +1220,8 @@ llvm::Constant *ItaniumCXXABI::BuildMemberPointer(const CXXMethodDecl *MD,
        //   For a virtual function, [the pointer field] is 1 plus the
        //   virtual table offset (in bytes) of the function,
        //   represented as a ptrdiff_t.
@@ -1015,7 +1004,7 @@ index 2f43eb6e1..1c6fd0acc 100644
        MemPtr[1] = llvm::ConstantInt::get(CGM.PtrDiffTy,
                                           ThisAdjustment.getQuantity());
      }
-@@ -1237,7 +1237,7 @@ llvm::Constant *ItaniumCXXABI::BuildMemberPointer(const CXXMethodDecl *MD,
+@@ -1239,7 +1239,7 @@ llvm::Constant *ItaniumCXXABI::BuildMemberPointer(const CXXMethodDecl *MD,
      }
      llvm::Constant *addr = CGM.getMemberFunctionPointer(MD, Ty);
  
@@ -1024,7 +1013,7 @@ index 2f43eb6e1..1c6fd0acc 100644
      MemPtr[1] = llvm::ConstantInt::get(CGM.PtrDiffTy,
                                         (UseARMMethodPtrABI ? 2 : 1) *
                                         ThisAdjustment.getQuantity());
-@@ -1332,7 +1332,8 @@ ItaniumCXXABI::EmitMemberPointerComparison(CodeGenFunction &CGF,
+@@ -1334,7 +1334,8 @@ ItaniumCXXABI::EmitMemberPointerComparison(CodeGenFunction &CGF,
      llvm::Value *One = llvm::ConstantInt::get(LPtr->getType(), 1);
  
      // Compute (l.adj | r.adj) & 1 and test it against zero.
@@ -1034,7 +1023,7 @@ index 2f43eb6e1..1c6fd0acc 100644
      llvm::Value *OrAdjAnd1 = Builder.CreateAnd(OrAdj, One);
      llvm::Value *OrAdjAnd1EqZero = Builder.CreateICmp(Eq, OrAdjAnd1, Zero,
                                                        "cmp.or.adj");
-@@ -1363,14 +1364,14 @@ ItaniumCXXABI::EmitMemberPointerIsNotNull(CodeGenFunction &CGF,
+@@ -1365,14 +1366,14 @@ ItaniumCXXABI::EmitMemberPointerIsNotNull(CodeGenFunction &CGF,
    // In Itanium, a member function pointer is not null if 'ptr' is not null.
    llvm::Value *Ptr = Builder.CreateExtractValue(MemPtr, 0, "memptr.ptr");
  
@@ -1051,7 +1040,7 @@ index 2f43eb6e1..1c6fd0acc 100644
      llvm::Value *VirtualBit = Builder.CreateAnd(Adj, One, "memptr.virtualbit");
      llvm::Value *IsVirtual = Builder.CreateICmpNE(VirtualBit, Zero,
                                                    "memptr.isvirtual");
-@@ -1897,8 +1898,9 @@ ItaniumCXXABI::GetVirtualBaseClassOffset(CodeGenFunction &CGF,
+@@ -1848,8 +1849,9 @@ ItaniumCXXABI::GetVirtualBaseClassOffset(CodeGenFunction &CGF,
          CGF.Int32Ty, VBaseOffsetPtr, CharUnits::fromQuantity(4),
          "vbase.offset");
    } else {
@@ -1078,7 +1067,7 @@ index 0b0036248..cd6c56914 100644
        if (!SDKVersion.empty())
          M->setSDKVersion(SDKVersion);
 diff --git a/clang/lib/CodeGen/ObjectFilePCHContainerWriter.cpp b/clang/lib/CodeGen/ObjectFilePCHContainerWriter.cpp
-index 074f2a520..bbc2e525b 100644
+index 5196c1de5..2ee428d8d 100644
 --- a/clang/lib/CodeGen/ObjectFilePCHContainerWriter.cpp
 +++ b/clang/lib/CodeGen/ObjectFilePCHContainerWriter.cpp
 @@ -177,7 +177,8 @@ public:
@@ -1100,29 +1089,11 @@ index 074f2a520..bbc2e525b 100644
  
      // PCH files don't have a signature field in the control block,
      // but LLVM detects DWO CUs by looking for a non-zero DWO id.
-@@ -322,7 +323,7 @@ public:
-       // Print the IR for the PCH container to the debug output.
-       llvm::SmallString<0> Buffer;
-       clang::emitBackendOutput(
--          CI, CodeGenOpts, Ctx.getTargetInfo().getDataLayoutString(), M.get(),
-+          CI, CodeGenOpts, Ctx.getTargetInfo().getDataLayoutStringAfterFilC(), M.get(),
-           BackendAction::Backend_EmitLL, FS,
-           std::make_unique<llvm::raw_svector_ostream>(Buffer));
-       llvm::dbgs() << Buffer;
-@@ -330,7 +331,7 @@ public:
- 
-     // Use the LLVM backend to emit the pch container.
-     clang::emitBackendOutput(CI, CodeGenOpts,
--                             Ctx.getTargetInfo().getDataLayoutString(), M.get(),
-+                             Ctx.getTargetInfo().getDataLayoutStringAfterFilC(), M.get(),
-                              BackendAction::Backend_EmitObj, FS, std::move(OS));
- 
-     // Free the memory for the temporary buffer.
 diff --git a/clang/lib/CodeGen/Targets/AArch64.cpp b/clang/lib/CodeGen/Targets/AArch64.cpp
-index 2d73dd8cc..08cf4c6df 100644
+index e493f717a..a16dcbc86 100644
 --- a/clang/lib/CodeGen/Targets/AArch64.cpp
 +++ b/clang/lib/CodeGen/Targets/AArch64.cpp
-@@ -90,15 +90,10 @@ private:
+@@ -91,15 +91,10 @@ private:
  
    RValue EmitVAArg(CodeGenFunction &CGF, Address VAListAddr, QualType Ty,
                     AggValueSlot Slot) const override {
@@ -1142,7 +1113,7 @@ index 2d73dd8cc..08cf4c6df 100644
    }
  
    RValue EmitMSVAArg(CodeGenFunction &CGF, Address VAListAddr, QualType Ty,
-@@ -464,6 +459,11 @@ ABIArgInfo AArch64ABIInfo::classifyArgumentType(QualType Ty, bool IsVariadicFn,
+@@ -466,6 +461,11 @@ ABIArgInfo AArch64ABIInfo::classifyArgumentType(QualType Ty, bool IsVariadicFn,
    bool IsWin64 = Kind == AArch64ABIKind::Win64 ||
                   CallingConvention == llvm::CallingConv::Win64;
    bool IsWinVariadic = IsWin64 && IsVariadicFn;
@@ -1154,7 +1125,7 @@ index 2d73dd8cc..08cf4c6df 100644
    // In variadic functions on Windows, all composite types are treated alike,
    // no special handling of HFAs/HVAs.
    if (!IsWinVariadic && isHomogeneousAggregate(Ty, Base, Members)) {
-@@ -472,11 +472,6 @@ ABIArgInfo AArch64ABIInfo::classifyArgumentType(QualType Ty, bool IsVariadicFn,
+@@ -474,11 +474,6 @@ ABIArgInfo AArch64ABIInfo::classifyArgumentType(QualType Ty, bool IsVariadicFn,
        return ABIArgInfo::getDirect(
            llvm::ArrayType::get(CGT.ConvertType(QualType(Base, 0)), Members));
  
@@ -1166,7 +1137,7 @@ index 2d73dd8cc..08cf4c6df 100644
      return ABIArgInfo::getDirect(
          llvm::ArrayType::get(CGT.ConvertType(QualType(Base, 0)), Members), 0,
          nullptr, true, Align);
-@@ -495,55 +490,47 @@ ABIArgInfo AArch64ABIInfo::classifyArgumentType(QualType Ty, bool IsVariadicFn,
+@@ -497,59 +492,47 @@ ABIArgInfo AArch64ABIInfo::classifyArgumentType(QualType Ty, bool IsVariadicFn,
  
    // Aggregates <= 16 bytes are passed directly in registers or on the stack.
    if (Size <= 128) {
@@ -1195,7 +1166,8 @@ index 2d73dd8cc..08cf4c6df 100644
 +      ABIArgInfo AI = ABIArgInfo::getDirect();
 +      AI.setCanBeFlattened(false);
 +      return AI;
-+    }
+     }
+-    if (Size < 64 && getDataLayout().isLittleEndian() && !isDarwinPCS())
 +    // Fil-C: it is only safe to represent this aggregate as an array of two
 +    // pointers if the two pointer-sized words will be 8-byte aligned in
 +    // memory. Use the adjusted alignment (getTypeAlignInChars), not the
@@ -1208,9 +1180,9 @@ index 2d73dd8cc..08cf4c6df 100644
 +    // use the pointer coercion because fil-c pointer accesses require 8-byte
 +    // alignment.
 +    if (getContext().getTypeAlignInChars(Ty).getQuantity() >= 8) {
-+      return ABIArgInfo::getDirect(
-+        llvm::ArrayType::get(llvm::PointerType::get(getVMContext(), 0), 2));
-     }
+       return ABIArgInfo::getDirect(
+-          llvm::IntegerType::get(getVMContext(), Size));
+-
 -    Size = llvm::alignTo(Size, Alignment);
 -
 -    // If the Aggregate is made up of pointers, use an array of pointers for the
@@ -1244,6 +1216,8 @@ index 2d73dd8cc..08cf4c6df 100644
 -    if ((Size == 64 || Size == 128) && Alignment == 64 &&
 -        ContainsOnlyPointers(ContainsOnlyPointers, Ty))
 -      BaseTy = llvm::PointerType::getUnqual(getVMContext());
++        llvm::ArrayType::get(llvm::PointerType::get(getVMContext(), 0), 2));
++    }
      return ABIArgInfo::getDirect(
 -        Size == Alignment ? BaseTy
 -                          : llvm::ArrayType::get(BaseTy, Size / Alignment));
@@ -1258,7 +1232,7 @@ index 2d73dd8cc..08cf4c6df 100644
  }
  
  ABIArgInfo AArch64ABIInfo::classifyReturnType(QualType RetTy,
-@@ -607,27 +594,14 @@ ABIArgInfo AArch64ABIInfo::classifyReturnType(QualType RetTy,
+@@ -613,27 +596,14 @@ ABIArgInfo AArch64ABIInfo::classifyReturnType(QualType RetTy,
  
    // Aggregates <= 16 bytes are returned directly in registers or on the stack.
    if (Size <= 128) {
@@ -1293,10 +1267,10 @@ index 2d73dd8cc..08cf4c6df 100644
  
    return getNaturalAlignIndirect(RetTy, getDataLayout().getAllocaAddrSpace());
 diff --git a/clang/lib/CodeGen/Targets/X86.cpp b/clang/lib/CodeGen/Targets/X86.cpp
-index 807d372c3..8a9a6054c 100644
+index 01788d55e..1b9ced1c7 100644
 --- a/clang/lib/CodeGen/Targets/X86.cpp
 +++ b/clang/lib/CodeGen/Targets/X86.cpp
-@@ -3039,8 +3039,8 @@ void X86_64ABIInfo::computeInfo(CGFunctionInfo &FI) const {
+@@ -3236,8 +3236,8 @@ void X86_64ABIInfo::computeInfo(CGFunctionInfo &FI) const {
    bool IsRegCall = CallingConv == llvm::CallingConv::X86_RegCall;
  
    // Keep track of the number of assigned registers.
@@ -1307,7 +1281,7 @@ index 807d372c3..8a9a6054c 100644
    unsigned NeededInt = 0, NeededSSE = 0, MaxVectorWidth = 0;
  
    if (!::classifyReturnType(getCXXABI(), FI, *this)) {
-@@ -3150,229 +3150,10 @@ static Address EmitX86_64VAArgFromMemory(CodeGenFunction &CGF,
+@@ -3347,229 +3347,10 @@ static Address EmitX86_64VAArgFromMemory(CodeGenFunction &CGF,
  
  RValue X86_64ABIInfo::EmitVAArg(CodeGenFunction &CGF, Address VAListAddr,
                                  QualType Ty, AggValueSlot Slot) const {

@@ -40,27 +40,27 @@ dependency tiers.
 flowchart TD
   TC["Stage 5 Toolchain (clang, lld, libpizlo, usermusl, libc++)"]
 
-  subgraph T0["Tier 0 — Bootstrap & Core Compression/Hash"]
+  subgraph T0["Tier 0: Bootstrap & Core Compression/Hash"]
     pkgconf & zlib & bzip2 & xz & lz4 & xxhash & blake3 & brotli
   end
 
-  subgraph T1["Tier 1 — Base Libraries"]
+  subgraph T1["Tier 1: Base Libraries"]
     zstd & expat & libffi & pcre2 & libunistring & libidn2 & attr & yaml & gmp
   end
 
-  subgraph T2["Tier 2 — Terminal, Event, XML & Data"]
+  subgraph T2["Tier 2: Terminal, Event, XML & Data"]
     ncurses & libedit & libevent & libuv & libxml2 & icu & sqlite
   end
 
-  subgraph T3["Tier 3 — Crypto, Networking & Archives"]
+  subgraph T3["Tier 3: Crypto, Networking & Archives"]
     openssl & nghttp2 & curl & libarchive & rsync & openssh
   end
 
-  subgraph T4["Tier 4 — Shells, POSIX/GNU CLI & System Tools"]
+  subgraph T4["Tier 4: Shells, POSIX/GNU CLI & System Tools"]
     dash & bash & gzip & patch & m4 & sed & grep & coreutils & tmux & util_linux["util-linux"] & patchelf
   end
 
-  subgraph T5["Tier 5 — Languages & Developer Tools"]
+  subgraph T5["Tier 5: Languages & Developer Tools"]
     lua & bison & git & cmake & python & ruby
   end
 
@@ -151,46 +151,46 @@ imported as unpacked legacy directories in Fil-C (without a `.projeny` archive
 hash) are explicitly marked `pin on fetch` so checksums are recorded from
 verified upstream release tarballs when each recipe is added.
 
-#### Tier 0 — Bootstrap & Core Compression/Hash (8 packages)
+#### Tier 0: Bootstrap & Core Compression/Hash (8 packages)
 
 | # | Package | Deps | Upstream Version & Source | SHA-256 (12-char) | Fil-C `cede3de02b42` Patch | Policy Class | Policy Rationale |
 |---|---|---|---|---|---|---|---|
-| 1 | `pkgconf` | — | `pkgconf-3.0.10` (github.com/pkgconf/pkgconf) | `c13143cee8ad` | 2 files (`+9/-9`) | `P1-Toolchain` | Patches `configure`/`Makefile.in` for `pizlonated_` symbol prefix; test `P3` env override or `P1` driver/nm fix. |
-| 2 | `zlib` | — | `zlib-1.4` (zlib.net / github.com/madler/zlib) | `caa1a355ab78` | 3 files (`+6/-11`) | `P3-BuildOpt` | Disables ARM CRC32 asm and adjusts `zconf.h` type; check `CFLAGS` / configure options before carrying a patch. |
-| 3 | `bzip2` | — | `bzip2` (upstream `fbc4b11da543`) | pin on fetch | 0 files (pristine import) | `P0-Clean` | Builds unmodified upstream. |
-| 4 | `xz` | — | `xz-5.8.4` (tukaani.org / github.com/tukaani-project/xz) | `4ce24038fd42` | 6 files (`+19/-6`) | `P2-Package` | Small CRC/range-decoder portability tweaks (`crc32_fast.c`, `range_decoder.h`); audit against `--disable-assembler` (`P3`). |
-| 5 | `lz4` | — | `lz4-1.11.0` (github.com/lz4/lz4) | `cd810aa68744` | 1 file (`+2/-1`) | `P3-BuildOpt` | Only `lib/Makefile` flag adjustment; pass via `MAKE_ARGS` to reach 0 patches. |
-| 6 | `xxhash` | — | `xxHash-0.8.4` (github.com/Cyan4973/xxHash) | `0d1be0dc1089` | 1 file (`+12/-2`) | `P2-Package` | Replaces inline x86 `xgetbv`/`cpuid` asm in `xxh_x86dispatch.c` with `zxgetbv()`/`__get_cpuid_count()`; small upstreamable patch. |
-| 7 | `blake3` | — | `BLAKE3-1.8.7` (github.com/BLAKE3-team/BLAKE3) | `c6782a28842b` | 0 files (`+0/-0`) | `P0-Clean` | Builds unmodified upstream (C implementation). |
-| 8 | `brotli` | — | `brotli-1.2.1` (github.com/google/brotli) | `1fa1b8b9120e` | 0 files (`+0/-0`) | `P0-Clean` | Builds unmodified upstream. |
+| 1 | `pkgconf` | none | `pkgconf-3.0.10` (github.com/pkgconf/pkgconf) | `c13143cee8ad` | 2 files (`+9/-9`) | `P1-Toolchain` | Patches `configure`/`Makefile.in` for `pizlonated_` symbol prefix; test `P3` env override or `P1` driver/nm fix. |
+| 2 | `zlib` | none | `zlib-1.4` (zlib.net / github.com/madler/zlib) | `caa1a355ab78` | 3 files (`+6/-11`) | `P3-BuildOpt` | Disables ARM CRC32 asm and adjusts `zconf.h` type; check `CFLAGS` / configure options before carrying a patch. |
+| 3 | `bzip2` | none | `bzip2` (upstream `fbc4b11da543`) | pin on fetch | 0 files (pristine import) | `P0-Clean` | Builds unmodified upstream. |
+| 4 | `xz` | none | `xz-5.8.4` (tukaani.org / github.com/tukaani-project/xz) | `4ce24038fd42` | 6 files (`+19/-6`) | `P2-Package` | Small CRC/range-decoder portability tweaks (`crc32_fast.c`, `range_decoder.h`); audit against `--disable-assembler` (`P3`). |
+| 5 | `lz4` | none | `lz4-1.11.0` (github.com/lz4/lz4) | `cd810aa68744` | 1 file (`+2/-1`) | `P3-BuildOpt` | Only `lib/Makefile` flag adjustment; pass via `MAKE_ARGS` to reach 0 patches. |
+| 6 | `xxhash` | none | `xxHash-0.8.4` (github.com/Cyan4973/xxHash) | `0d1be0dc1089` | 1 file (`+12/-2`) | `P2-Package` | Replaces inline x86 `xgetbv`/`cpuid` asm in `xxh_x86dispatch.c` with `zxgetbv()`/`__get_cpuid_count()`; small upstreamable patch. |
+| 7 | `blake3` | none | `BLAKE3-1.8.7` (github.com/BLAKE3-team/BLAKE3) | `c6782a28842b` | 0 files (`+0/-0`) | `P0-Clean` | Builds unmodified upstream (C implementation). |
+| 8 | `brotli` | none | `brotli-1.2.1` (github.com/google/brotli) | `1fa1b8b9120e` | 0 files (`+0/-0`) | `P0-Clean` | Builds unmodified upstream. |
 
-#### Tier 1 — Base Libraries (9 packages)
+#### Tier 1: Base Libraries (9 packages)
 
 | # | Package | Deps | Upstream Version & Source | SHA-256 (12-char) | Fil-C `cede3de02b42` Patch | Policy Class | Policy Rationale |
 |---|---|---|---|---|---|---|---|
 | 9 | `zstd` | `zlib`, `lz4`, `xz` | `zstd-1.5.7` (github.com/facebook/zstd) | pin on fetch | small delta (`fileio.c`, asm) | `P3-BuildOpt` | Prefer `ZSTD_LEGACY_SUPPORT` / `-DZSTD_DISABLE_ASM` build flags; keep only minimal C fixes if still needed. |
-| 10 | `expat` | — | `expat-2.7.1` (github.com/libexpat/libexpat) | pin on fetch | 0 source changes (autotools only) | `P0-Clean` | Pristine upstream C library. |
+| 10 | `expat` | none | `expat-2.7.1` (github.com/libexpat/libexpat) | pin on fetch | 0 source changes (autotools only) | `P0-Clean` | Pristine upstream C library. |
 | 11 | `libffi` | `pkgconf` | `libffi-3.8.0` (github.com/libffi/libffi) | `7da3e2d9a171` | 13 files (`+565/-13`) | `P4-Audit` | Implements `FFI_FILC` ABI for x86_64/aarch64 (inherently ABI-level; genuinely required `P2`/`P4` runtime bridge). |
 | 12 | `pcre2` | `pkgconf` | `pcre2-10.49` (github.com/PCRE2Project/pcre2) | `a1b29c27e5d4` | 2 test files (`+72/-69`) | `P3-BuildOpt` | Library itself is 0-patch with `--disable-jit`; only `RunGrepTest` adjustments to audit. |
-| 13 | `libunistring` | — | `libunistring-1.5` (ftpmirror.gnu.org/libunistring) | `be8cb96c928d` | 0 files (`+0/-0`) | `P0-Clean` | Builds unmodified upstream. |
+| 13 | `libunistring` | none | `libunistring-1.5` (ftpmirror.gnu.org/libunistring) | `be8cb96c928d` | 0 files (`+0/-0`) | `P0-Clean` | Builds unmodified upstream. |
 | 14 | `libidn2` | `libunistring` | `libidn2-2.3.8` (ftp.gnu.org/gnu/libidn) | `f557911bf617` | 1 file (`+1/-1`) | `P1-Toolchain` | Single-line `-Wl,--version-script` -> `-Wc,--version-script`; drops to 0 patches once Clang driver accepts `-Wl,--version-script`. |
-| 15 | `attr` | — | `attr-2.6.0` (download.savannah.nongnu.org/releases/attr) | `d42fa3745131` | 1 file (`+1/-1`) | `P1-Toolchain` | Same single-line `-Wl,--version-script` workaround in `Makefile.in`; drops to 0 patches with the driver fix. |
-| 16 | `yaml` | — | `yaml-0.2.5` (github.com/yaml/libyaml) | pin on fetch | 0 source changes | `P0-Clean` | Builds unmodified upstream (`--enable-shared`). |
-| 17 | `gmp` | — | `gmp-6.3.0` (gmplib.org / ftp.gnu.org/gnu/gmp) | pin on fetch | small delta + `--disable-assembly` | `P3-BuildOpt` | `--disable-assembly` handles asm; audit remaining Fil-C delta (`1e8b2b9d`) for `P1`/`P2`. |
+| 15 | `attr` | none | `attr-2.6.0` (download.savannah.nongnu.org/releases/attr) | `d42fa3745131` | 1 file (`+1/-1`) | `P1-Toolchain` | Same single-line `-Wl,--version-script` workaround in `Makefile.in`; drops to 0 patches with the driver fix. |
+| 16 | `yaml` | none | `yaml-0.2.5` (github.com/yaml/libyaml) | pin on fetch | 0 source changes | `P0-Clean` | Builds unmodified upstream (`--enable-shared`). |
+| 17 | `gmp` | none | `gmp-6.3.0` (gmplib.org / ftp.gnu.org/gnu/gmp) | pin on fetch | small delta + `--disable-assembly` | `P3-BuildOpt` | `--disable-assembly` handles asm; audit remaining Fil-C delta (`1e8b2b9d`) for `P1`/`P2`. |
 
-#### Tier 2 — Terminal, Event, XML & Data (7 packages)
+#### Tier 2: Terminal, Event, XML & Data (7 packages)
 
 | # | Package | Deps | Upstream Version & Source | SHA-256 (12-char) | Fil-C `cede3de02b42` Patch | Policy Class | Policy Rationale |
 |---|---|---|---|---|---|---|---|
 | 18 | `ncurses` | `pcre2` | `ncurses-6.6` (ftp.gnu.org/gnu/ncurses) | pin on fetch | 0 files (pristine import) | `P0-Clean` | Builds unmodified upstream with `--with-shared --without-ada --enable-pc-files`. |
 | 19 | `libedit` | `ncurses` | `libedit-20260512-3.1` (thrysoee.dk/editline) | `432d5e7ea8b0` | 1 file (`+2/-1`) | `P2-Package` | Skips Linux-specific `wchar_t`/ISO-10646 `#error` in `src/chartype.h` (matching BSD branch); trivial upstreamable patch. |
-| 20 | `libevent` | — | `libevent-2.1.13` (github.com/libevent/libevent) | pin on fetch | small delta (`ee826772`) | `P2-Package` | Audit delta against musl/Fil-C pointer casts; isolate minimal upstreamable patch. |
-| 21 | `libuv` | — | `libuv-1.53.0` (dist.libuv.org/dist/v1.53.0) | `bac496ea32e6` | 12 files (`+79/-46`) | `P2-Package` | Unix syscall/proctitle/process pointer handling (`src/unix/{fs,linux,process,proctitle,signal}.c`); audit for `P1` libc gaps. |
+| 20 | `libevent` | none | `libevent-2.1.13` (github.com/libevent/libevent) | pin on fetch | small delta (`ee826772`) | `P2-Package` | Audit delta against musl/Fil-C pointer casts; isolate minimal upstreamable patch. |
+| 21 | `libuv` | none | `libuv-1.53.0` (dist.libuv.org/dist/v1.53.0) | `bac496ea32e6` | 12 files (`+79/-46`) | `P2-Package` | Unix syscall/proctitle/process pointer handling (`src/unix/{fs,linux,process,proctitle,signal}.c`); audit for `P1` libc gaps. |
 | 22 | `libxml2` | `zlib`, `xz` | `libxml2-2.15.4` (download.gnome.org/sources/libxml2) | `98087fd181d9` | 1 file (`+1/-1`) | `P2-Package` | Marks `xmlCatalogEntry.children` `_Atomic` in `catalog.c` to fix a real unsynchronized concurrent pointer load; ideal upstream fix. |
 | 23 | `icu` | `pkgconf` | `icu4c-79.1` (github.com/unicode-org/icu) | `30136d14852f` | 7 files (`+76/-3`) | `P2-Package` | Capability-safe converter clone, aliasing barrier, and C-array data loading instead of raw `.S` blobs. |
 | 24 | `sqlite` | `zlib`, `libedit` | `sqlite` (upstream `1aa94b58213b`) | pin on fetch | minimal delta (`5eb6ea2a` reverted most) | `P2-Package` | Fil-C already reverted most SQLite patches; verify how close upstream SQLite is to 0 patches. |
 
-#### Tier 3 — Crypto, Networking & Archives (6 packages)
+#### Tier 3: Crypto, Networking & Archives (6 packages)
 
 | # | Package | Deps | Upstream Version & Source | SHA-256 (12-char) | Fil-C `cede3de02b42` Patch | Policy Class | Policy Rationale |
 |---|---|---|---|---|---|---|---|
@@ -201,23 +201,23 @@ verified upstream release tarballs when each recipe is added.
 | 29 | `rsync` | `zlib`, `lz4`, `zstd`, `xxhash`, `openssl` | `rsync-3.5.2` (github.com/RsyncProject/rsync) | `d1158c225003` | 0 files (`+0/-0`) | `P0-Clean` | Builds unmodified upstream. |
 | 30 | `openssh` | `zlib`, `openssl`, `libedit` | `openssh-10.6p2` (cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable) | `5ac4ab37a02f` | 52 files (`+3626/-197`) | `P4-Audit` | High-value security target; audit sandboxing, privilege separation, and `Makefile.in` changes for `P1`/`P3` splits. |
 
-#### Tier 4 — Shells, POSIX/GNU CLI & System Tools (11 packages)
+#### Tier 4: Shells, POSIX/GNU CLI & System Tools (11 packages)
 
 | # | Package | Deps | Upstream Version & Source | SHA-256 (12-char) | Fil-C `cede3de02b42` Patch | Policy Class | Policy Rationale |
 |---|---|---|---|---|---|---|---|
-| 31 | `dash` | — | `dash-0.5.13.5` (gondor.apana.org.au/~herbert/dash/files) | `7871678c86c4` | 1 file (`+1/-1`) | `P1-Toolchain` | Uses `fork` instead of `vfork` in `src/jobs.c`; evaluate `vfork` semantics in `usermusl`/`libpizlo` or keep 1-line `P2` patch. |
+| 31 | `dash` | none | `dash-0.5.13.5` (gondor.apana.org.au/~herbert/dash/files) | `7871678c86c4` | 1 file (`+1/-1`) | `P1-Toolchain` | Uses `fork` instead of `vfork` in `src/jobs.c`; evaluate `vfork` semantics in `usermusl`/`libpizlo` or keep 1-line `P2` patch. |
 | 32 | `bash` | `ncurses` | `bash-5.3` (ftp.gnu.org/gnu/bash) | pin on fetch | small delta (`15d13b23`) + `--without-bash-malloc` | `P3-BuildOpt` | `--without-bash-malloc` eliminates custom allocator; audit remaining `15d13b23` hunks. |
-| 33 | `gzip` | — | `gzip-1.15` (ftp.gnu.org/gnu/gzip) | `3cbe9101598e` | 1 file (`+7/-0`) | `P2-Package` | Moves `#include <signal.h>` before `gzip.h` to avoid macro clash (`head`); clean upstreamable fix. |
-| 34 | `patch` | — | `patch-2.8.1` (ftp.gnu.org/gnu/patch) | `24158fd209ad` | 0 files (`+0/-0`) | `P0-Clean` | Builds unmodified upstream. |
-| 35 | `m4` | — | `m4-1.4.21` (ftpmirror.gnu.org/m4) | `a23e9503084f` | 20 files (`+82/-56`) | `P2-Package` | Gnulib `obstack` + `fpucw.h` (`__FILC__`) + `sigsegv`; reusable gnulib patch across GNU tools. |
-| 36 | `sed` | — | `sed-4.10` (ftp.gnu.org/gnu/sed) | pin on fetch | small delta (`7e2f54ae`, `8790b468`) | `P2-Package` | Gnulib `obstack` + huge-alloc test skip under Fil-C. |
+| 33 | `gzip` | none | `gzip-1.15` (ftp.gnu.org/gnu/gzip) | `3cbe9101598e` | 1 file (`+7/-0`) | `P2-Package` | Moves `#include <signal.h>` before `gzip.h` to avoid macro clash (`head`); clean upstreamable fix. |
+| 34 | `patch` | none | `patch-2.8.1` (ftp.gnu.org/gnu/patch) | `24158fd209ad` | 0 files (`+0/-0`) | `P0-Clean` | Builds unmodified upstream. |
+| 35 | `m4` | none | `m4-1.4.21` (ftpmirror.gnu.org/m4) | `a23e9503084f` | 20 files (`+82/-56`) | `P2-Package` | Gnulib `obstack` + `fpucw.h` (`__FILC__`) + `sigsegv`; reusable gnulib patch across GNU tools. |
+| 36 | `sed` | none | `sed-4.10` (ftp.gnu.org/gnu/sed) | pin on fetch | small delta (`7e2f54ae`, `8790b468`) | `P2-Package` | Gnulib `obstack` + huge-alloc test skip under Fil-C. |
 | 37 | `grep` | `pcre2` | `grep-3.12` (ftp.gnu.org/gnu/grep) | pin on fetch | small delta (`496072a5`) | `P2-Package` | Gnulib `obstack` / pointer arithmetic audit. |
 | 38 | `coreutils` | `attr`, `gmp`, `openssl` | `coreutils-9.12` (ftp.gnu.org/gnu/coreutils) | `a48019855973` | 11 files (`+6063/-4978`, incl. i18n) | `P4-Audit` | Separate Fil-C-specific hunks (`obstack`, `sort.c`, `pr.c`) from distro i18n patch (which is not needed for Fil-C correctness). |
 | 39 | `tmux` | `libevent`, `ncurses` | `tmux-3.8` (github.com/tmux/tmux) | `f948bad3444d` | 0 files (`+0/-0`) | `P0-Clean` | Builds unmodified upstream. |
 | 40 | `util-linux` | `ncurses`, `zlib` | `util-linux-2.42.4` (kernel.org/pub/linux/utils/util-linux) | `f469475f55e5` | 3 files (`+19/-11`) | `P1-Toolchain` | Two of three files (`Makefile.in`, `configure`) are `-Wl,--version-script` (`P1`); leaves only `hook_mount.c` (`P2`). |
-| 41 | `patchelf` | — | `patchelf-0.19.3` (github.com/NixOS/patchelf) | `8c90a38f8900` | 0 files (`+0/-0`) | `P0-Clean` | Builds unmodified upstream (upstream 0.19.3 absorbed the pointer derivation fix). |
+| 41 | `patchelf` | none | `patchelf-0.19.3` (github.com/NixOS/patchelf) | `8c90a38f8900` | 0 files (`+0/-0`) | `P0-Clean` | Builds unmodified upstream (upstream 0.19.3 absorbed the pointer derivation fix). |
 
-#### Tier 5 — Languages & Developer Tools (6 packages)
+#### Tier 5: Languages & Developer Tools (6 packages)
 
 | # | Package | Deps | Upstream Version & Source | SHA-256 (12-char) | Fil-C `cede3de02b42` Patch | Policy Class | Policy Rationale |
 |---|---|---|---|---|---|---|---|
@@ -250,13 +250,13 @@ across multiple packages at once:
 
 ### 2.4 Initial Policy Metrics Baseline (47 Packages)
 
-- **`P0-Clean` (0 patches already):** 12 packages (`25.5%`) — `bzip2`, `blake3`,
+- **`P0-Clean` (0 patches already):** 12 packages (`25.5%`): `bzip2`, `blake3`,
   `brotli`, `expat`, `libunistring`, `yaml`, `ncurses`, `nghttp2`, `rsync`,
   `patch`, `tmux`, `patchelf`.
-- **`P1-Toolchain` candidates:** 5 packages (`10.6%`) — `pkgconf`, `libidn2`,
+- **`P1-Toolchain` candidates:** 5 packages (`10.6%`): `pkgconf`, `libidn2`,
   `attr`, `dash`, `util-linux` (expected to drop to 0 patches or 1-file minimal
   deltas after Clang driver/libc fixes).
-- **`P3-BuildOpt` candidates:** 8 packages (`17.0%`) — `zlib`, `lz4`, `zstd`,
+- **`P3-BuildOpt` candidates:** 8 packages (`17.0%`): `zlib`, `lz4`, `zstd`,
   `pcre2`, `gmp`, `libarchive`, `bash`, `cmake` (target 0 or near-0 source
   patches via build flags).
 - **`P2-Package` (minimal upstreamable patches):** 15 packages (`31.9%`).
@@ -438,7 +438,7 @@ inline scripts/styles, SSR first paint + 5 s polling, mobile-responsive down to
    - Dependencies and reverse dependents.
    - Upstream version, license, and pinned SHA-256 (short + expandable).
    - Full untruncated patch list (filename, subject, `+add / −del`, `N files`,
-     short `Fil-C origin` hashes — reusing the exact patch-table component
+     short `Fil-C origin` hashes, reusing the exact patch-table component
      already implemented in `filc-live`).
    - Sanitized failure excerpt (on `failed` only, using the existing `.excerpt`
      pre block and strict leak filter).
@@ -496,7 +496,7 @@ filter.
 1. **Milestone 6.1 (Toolchain Prep & Runner):** Implement `-Wl,--version-script=`
    support in `llvm/06a-clang-driver-filc-core.patch` and build `scripts/build-port`
    + `scripts/build-ports` with unit tests.
-2. **Milestone 6.2 (Wave 1 — Tiers 0–1):** Add the 17 Wave 1 recipes under
+2. **Milestone 6.2 (Wave 1, Tiers 0–1):** Add the 17 Wave 1 recipes under
    `ports/`, verify unmodified builds and test suites on the CI runner, and
    record baseline patch metrics.
 3. **Milestone 6.3 (`filc-live` Ports View):** Implement `/ports`, `/api/ports`,

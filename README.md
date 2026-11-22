@@ -2,7 +2,7 @@
 
 Maintained patch series bringing [Fil-C](https://github.com/pizlonator/fil-c)
 (memory-safe C and C++ with garbage-collected capabilities, bounds checking, and
-type safety) onto the **latest stable upstream LLVM release** — not a
+type safety) onto the **latest stable upstream LLVM release**, rather than a
 monolithic fork.
 
 Live CI status: **[https://filc.connected.link](https://filc.connected.link)**
@@ -17,20 +17,20 @@ and verified reproducibly.
 
 ## Repository Layout
 
-- `UPSTREAM` — Pinned upstream LLVM release tag/commit, Fil-C runtime commit,
+- `UPSTREAM`: Pinned upstream LLVM release tag/commit, Fil-C runtime commit,
   and upstream musl commit.
-- `llvm/` — Ordered core Fil-C compiler patch series (`llvm/series`) for LLVM
+- `llvm/`: Ordered core Fil-C compiler patch series (`llvm/series`) for LLVM
   IR/DataLayout, optimizer guards, Fil-C passes, Clang frontend/CodeGen, and
   Linux driver (`llvm/series.optional` holds optional Cosmopolitan/APE patches).
-- `runtime/` —
-  - `runtime/cxx/` — Fil-C adaptations for LLVM `libc++` and `libc++abi`.
-  - `runtime/filc/` — Provenance manifest (`PROVENANCE.md`) and compatibility
+- `runtime/`:
+  - `runtime/cxx/`: Fil-C adaptations for LLVM `libc++` and `libc++abi`.
+  - `runtime/filc/`: Provenance manifest (`PROVENANCE.md`) and compatibility
     patch series for core Fil-C runtime sources (`libpas`, `filc/{include,src,main}`,
     `yolounwind`, `projects/zegarmistrz/include`) fetched sparsely from the
     pinned Fil-C commit.
-- `libc/musl/` — Maintained `yolomusl` and `usermusl` patch series against
+- `libc/musl/`: Maintained `yolomusl` and `usermusl` patch series against
   pinned upstream musl (zero vendored musl source files).
-- `scripts/` — Reproducible fetch, apply, build, verification, and CI helper
+- `scripts/`: Reproducible fetch, apply, build, verification, and CI helper
   scripts (see [`scripts/README.md`](scripts/README.md)).
 
 ## Quickstart
@@ -78,7 +78,7 @@ Automated CI verifies two workflows and publishes sanitized status reports to
 
 Building and packaging software with Fil-C follows a toolchain-first policy designed to keep upstream packages unmodified whenever possible:
 
-1. **Fix toolchain gaps at the source:** Missing compiler, runtime, or libc support is fixed in the Fil-C toolchain rather than worked around per package — one fix benefits every package and keeps upstream sources untouched.
+1. **Fix toolchain gaps at the source:** Missing compiler, runtime, or libc support is fixed in the Fil-C toolchain rather than worked around per package. One fix benefits every package and keeps upstream sources untouched.
 2. **Small, upstreamable package patches only when necessary:** Genuinely unsafe or non-portable patterns in a package (such as pointer-to-integer casts, custom allocators, inline assembly, JIT engines, or address-based hashing) receive a minimal, documented, upstreamable patch with an explicit rationale.
 3. **Prefer build options over source patches:** Build-system and configuration issues are resolved through build flags and configuration options instead of patching package sources.
 4. **Audit imported port patches:** Adopted Fil-C port patches serve only as a starting point with full provenance attribution and are reviewed to verify whether they mask an underlying toolchain gap.
@@ -98,7 +98,7 @@ its own license, verified against the pinned source files:
 
 - **Fil-C compiler & C++ libraries** (`pizlonator/fil-c` @ `cede3de02b42`,
   patches in `llvm/` and `runtime/cxx/`): **Apache License v2.0 with LLVM
-  Exceptions** (`Apache-2.0 WITH LLVM-exception`) — see Fil-C `README.md`
+  Exceptions** (`Apache-2.0 WITH LLVM-exception`), see Fil-C `README.md`
   (`## License`), `llvm/LICENSE.TXT`, `clang/LICENSE.TXT`, `libcxx/LICENSE.TXT`,
   `libcxxabi/LICENSE.TXT`, and SPDX headers in the Fil-C compiler files (e.g.,
   `llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp`).
@@ -106,7 +106,7 @@ its own license, verified against the pinned source files:
   `libpas/`, `filc/{include,src,main}`, `yolounwind/`, and
   `projects/zegarmistrz/include`): **BSD-2-Clause** (`Copyright (c) 2018-2022
   Apple Inc.`, `Copyright (c) 2023-2026 Epic Games, Inc.`, `Copyright (c) 2026
-  Filip Pizlo`) — see `libpas/LICENSE.txt` and per-file headers
+  Filip Pizlo`), see `libpas/LICENSE.txt` and per-file headers
   (`filc/include/stdfil.h`, `filc/main/main.c`, `yolounwind/yolounwind.c`,
   `projects/zegarmistrz/include/zegarmistrz.h`). Specific files within these
   runtime paths carry additional/distinct upstream notices: `setproctitle` from
@@ -116,12 +116,12 @@ its own license, verified against the pinned source files:
   `Copyright Patrick Powell 1995`).
 - **LLVM / Clang / LLD / `compiler-rt` / `libc++` / `libc++abi`**
   (`llvm/llvm-project` @ `llvmorg-23.1.6` / `5b10d2d74929`): **Apache License
-  v2.0 with LLVM Exceptions** (`Apache-2.0 WITH LLVM-exception`) — see
+  v2.0 with LLVM Exceptions** (`Apache-2.0 WITH LLVM-exception`), see
   `LICENSE.TXT`, `llvm/LICENSE.TXT`, `clang/LICENSE.TXT`, `lld/LICENSE.TXT`,
   `compiler-rt/LICENSE.TXT`, `libcxx/LICENSE.TXT`, and `libcxxabi/LICENSE.TXT`.
 - **musl** (`f314e133929b`) and **Fil-C `yolomusl` / `usermusl`**
   (`libc/musl/`): **MIT License** (`Copyright © 2005-2020 Rich Felker, et al.`,
-  with compatible permissive third-party portions listed in `COPYRIGHT`) — see
+  with compatible permissive third-party portions listed in `COPYRIGHT`), see
   upstream musl `COPYRIGHT` and Fil-C `projects/yolomusl/COPYRIGHT` /
   `projects/usermusl/COPYRIGHT`. The `libc/musl/usermusl/01-usermusl-filc.patch`
   series additionally carries BSD-licensed components with preserved file

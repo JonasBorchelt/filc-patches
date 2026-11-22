@@ -1,0 +1,300 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# End-to-end runtime verification suite for a built Fil-C toolchain.
+# Runs three test groups against <WORK_ROOT>/build/bin/clang{,++} + pizfix:
+#   (a) C Hello World (compile, link, run, exit 0)
+#   (b) Fil-C Memory-Safety Traps:
+#       - Out-of-bounds read (must trap non-zero with Fil-C safety error)
+#       - Use-after-free read (must trap non-zero with Fil-C safety error)
+#   (c) C++ with libc++ (std::vector, std::string, iostream, throw/catch, exit 0)
+#
+# Emits a structured SHA-256 evidence report (Beleg) to REPORT_FILE and stdout.
+#
+# Usage: scripts/test-toolchain [WORK_ROOT] [REPORT_FILE]
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../UPSTREAM
+source "$REPO_ROOT/UPSTREAM"
+
+WORK_ROOT="${1:-$REPO_ROOT/.work/toolchain}"
+WORK_ROOT="$(cd "$WORK_ROOT" && pwd)"
+REPORT_FILE="${2:-$WORK_ROOT/toolchain-report.txt}"
+
+BUILD_DIR="$WORK_ROOT/build"
+PIZFIX="$WORK_ROOT/pizfix"
+CLANG="$BUILD_DIR/bin/clang"
+CLANGXX="$BUILD_DIR/bin/clang++"
+LLD="$BUILD_DIR/bin/ld.lld"
+TEST_DIR="$WORK_ROOT/e2e-tests"
+
+if [[ ! -x "$CLANG" || ! -x "$CLANGXX" || ! -d "$PIZFIX/lib" ]]; then
+  echo "error: built Fil-C toolchain not found under $WORK_ROOT (run scripts/build-toolchain first)" >&2
+  exit 1
+fi
+
+rm -rf "$TEST_DIR"
+mkdir -p "$TEST_DIR" "$(dirname "$REPORT_FILE")"
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Write test sources
+# ---------------------------------------------------------------------------
+cat > "$TEST_DIR/hello_world.c" <<'EOF'
+#include <stdio.h>
+
+int main(void) {
+    printf("Hello from Fil-C!\n");
+    return 0;
+}
+EOF
+
+cat > "$TEST_DIR/trap_oob.c" <<'EOF'
+#include <stdio.h>
+#include <stdlib.h>
+
+__attribute__((noinline))
+static int read_oob(int *arr, volatile int idx) {
+    return arr[idx];
+}
+
+int main(void) {
+    int *arr = (int *)malloc(4 * sizeof(int));
+    if (!arr)
+        return 2;
+    for (int i = 0; i < 4; ++i)
+        arr[i] = i + 1;
+    volatile int idx = 10;
+    int val = read_oob(arr, idx);
+    printf("UNEXPECTED_OOB_SURVIVED=%d\n", val);
+    return 0;
+}
+EOF
+
+cat > "$TEST_DIR/trap_uaf.c" <<'EOF'
+#include <stdio.h>
+#include <stdlib.h>
+
+__attribute__((noinline))
+static int read_after_free(int *p) {
+    return *p;
+}
+
+int main(void) {
+    int *p = (int *)malloc(sizeof(int));
+    if (!p)
+        return 2;
+    *p = 42;
+    free(p);
+    int val = read_after_free(p);
+    printf("UNEXPECTED_UAF_SURVIVED=%d\n", val);
+    return 0;
+}
+EOF
+
+cat > "$TEST_DIR/hello_cxx.cpp" <<'EOF'
+#include <iostream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+__attribute__((noinline))
+static void maybe_throw(bool doit) {
+    if (doit)
+        throw std::runtime_error("filc-libcxx-exception-ok");
+}
+
+int main() {
+    std::vector<std::string> items = {"Fil-C", "libc++", "LLVM-23"};
+    std::string joined;
+    for (size_t i = 0; i < items.size(); ++i) {
+        if (i > 0)
+            joined += " + ";
+        joined += items[i];
+    }
+    std::string caught;
+    try {
+        maybe_throw(true);
+    } catch (const std::exception &e) {
+        caught = e.what();
+    }
+    std::cout << "CXX_OK: " << joined << " | catch=" << caught << "\n";
+    return 0;
+}
+EOF
+
+# ---------------------------------------------------------------------------
+# Compile & link all test binaries
+# ---------------------------------------------------------------------------
+echo "=== Compiling end-to-end test binaries ==="
+"$CLANG" -O2 -Wall -Wextra -Werror "$TEST_DIR/hello_world.c" -o "$TEST_DIR/hello_world"
+"$CLANG" -O2 -g "$TEST_DIR/trap_oob.c" -o "$TEST_DIR/trap_oob"
+"$CLANG" -O2 -g "$TEST_DIR/trap_uaf.c" -o "$TEST_DIR/trap_uaf"
+"$CLANGXX" -O2 -std=c++20 -Wall -Wextra -Werror "$TEST_DIR/hello_cxx.cpp" -o "$TEST_DIR/hello_cxx"
+
+# ---------------------------------------------------------------------------
+# Execute tests and verify expectations
+# ---------------------------------------------------------------------------
+FAILURES=0
+
+run_and_capture() {
+  local name="$1"
+  local bin="$2"
+  local rc=0
+  set +e
+  "$bin" >"$TEST_DIR/${name}.stdout" 2>"$TEST_DIR/${name}.stderr"
+  rc=$?
+  set -e
+  echo "$rc" >"$TEST_DIR/${name}.rc"
+}
+
+echo "=== Running (a) Hello World ==="
+run_and_capture hello_world "$TEST_DIR/hello_world"
+RC_HELLO="$(cat "$TEST_DIR/hello_world.rc")"
+if [[ "$RC_HELLO" -eq 0 ]] && grep -Fxq "Hello from Fil-C!" "$TEST_DIR/hello_world.stdout"; then
+  STATUS_HELLO="PASS"
+else
+  STATUS_HELLO="FAIL"
+  FAILURES=$((FAILURES + 1))
+fi
+
+echo "=== Running (b1) Memory-Safety Trap: Out-of-Bounds ==="
+run_and_capture trap_oob "$TEST_DIR/trap_oob"
+RC_OOB="$(cat "$TEST_DIR/trap_oob.rc")"
+if [[ "$RC_OOB" -ne 0 ]] \
+  && ! grep -q "UNEXPECTED_OOB_SURVIVED" "$TEST_DIR/trap_oob.stdout" \
+  && grep -qi "filc safety error" "$TEST_DIR/trap_oob.stderr"; then
+  STATUS_OOB="PASS"
+else
+  STATUS_OOB="FAIL"
+  FAILURES=$((FAILURES + 1))
+fi
+
+echo "=== Running (b2) Memory-Safety Trap: Use-After-Free ==="
+run_and_capture trap_uaf "$TEST_DIR/trap_uaf"
+RC_UAF="$(cat "$TEST_DIR/trap_uaf.rc")"
+if [[ "$RC_UAF" -ne 0 ]] \
+  && ! grep -q "UNEXPECTED_UAF_SURVIVED" "$TEST_DIR/trap_uaf.stdout" \
+  && grep -qi "filc safety error" "$TEST_DIR/trap_uaf.stderr"; then
+  STATUS_UAF="PASS"
+else
+  STATUS_UAF="FAIL"
+  FAILURES=$((FAILURES + 1))
+fi
+
+echo "=== Running (c) C++ with libc++ ==="
+run_and_capture hello_cxx "$TEST_DIR/hello_cxx"
+RC_CXX="$(cat "$TEST_DIR/hello_cxx.rc")"
+EXPECTED_CXX="CXX_OK: Fil-C + libc++ + LLVM-23 | catch=filc-libcxx-exception-ok"
+if [[ "$RC_CXX" -eq 0 ]] && grep -Fxq "$EXPECTED_CXX" "$TEST_DIR/hello_cxx.stdout"; then
+  STATUS_CXX="PASS"
+else
+  STATUS_CXX="FAIL"
+  FAILURES=$((FAILURES + 1))
+fi
+
+OVERALL_STATUS="PASS"
+if (( FAILURES > 0 )); then
+  OVERALL_STATUS="FAIL"
+fi
+
+# ---------------------------------------------------------------------------
+# Generate structured evidence report (Beleg)
+# ---------------------------------------------------------------------------
+TIMESTAMP_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+REPO_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+ARCH="$(uname -m)"
+
+{
+  echo "================================================================================"
+  echo "FIL-C TOOLCHAIN END-TO-END VERIFICATION REPORT (BELEG)"
+  echo "================================================================================"
+  echo "TIMESTAMP_UTC:        $TIMESTAMP_UTC"
+  echo "HOST_UNAME:           $(uname -srm)"
+  echo "REPO_COMMIT:          $REPO_COMMIT"
+  echo "LLVM_TAG:             ${LLVM_TAG:-none}"
+  echo "LLVM_COMMIT:          $LLVM_COMMIT"
+  echo "FILC_COMMIT:          $FILC_COMMIT"
+  echo "MUSL_COMMIT:          $MUSL_COMMIT"
+  echo "CLANG_VERSION:        $("$CLANG" --version | head -n 1)"
+  echo "LLD_VERSION:          $("$LLD" --version | head -n 1)"
+  echo "OVERALL_STATUS:       $OVERALL_STATUS"
+  echo ""
+  echo "--- TOOLCHAIN LIBRARY SHA-256 ---"
+  for lib in \
+    "$PIZFIX/lib/libyoloc.so" \
+    "$PIZFIX/lib/libpizlo.so" \
+    "$PIZFIX/lib/libc.so" \
+    "$PIZFIX/lib/libc++.so.1.0" \
+    "$PIZFIX/lib/libc++abi.so.1.0"; do
+    echo "  $(sha256_file "$lib")  $(basename "$lib")"
+  done
+  echo ""
+  echo "--- TEST BINARY SHA-256 ---"
+  for bin in hello_world trap_oob trap_uaf hello_cxx; do
+    echo "  $(sha256_file "$TEST_DIR/$bin")  $bin ($(wc -c < "$TEST_DIR/$bin" | tr -d ' ') bytes)"
+  done
+  echo ""
+  echo "--- TEST (a) HELLO WORLD [$STATUS_HELLO] ---"
+  echo "EXIT_CODE: $RC_HELLO"
+  echo "STDOUT:"
+  sed 's/^/  | /' "$TEST_DIR/hello_world.stdout"
+  if [[ -s "$TEST_DIR/hello_world.stderr" ]]; then
+    echo "STDERR:"
+    sed 's/^/  | /' "$TEST_DIR/hello_world.stderr"
+  fi
+  echo ""
+  echo "--- TEST (b1) MEMORY-SAFETY TRAP: OUT-OF-BOUNDS [$STATUS_OOB] ---"
+  echo "EXIT_CODE: $RC_OOB"
+  if [[ -s "$TEST_DIR/trap_oob.stdout" ]]; then
+    echo "STDOUT:"
+    sed 's/^/  | /' "$TEST_DIR/trap_oob.stdout"
+  fi
+  echo "STDERR:"
+  sed 's/^/  | /' "$TEST_DIR/trap_oob.stderr"
+  echo ""
+  echo "--- TEST (b2) MEMORY-SAFETY TRAP: USE-AFTER-FREE [$STATUS_UAF] ---"
+  echo "EXIT_CODE: $RC_UAF"
+  if [[ -s "$TEST_DIR/trap_uaf.stdout" ]]; then
+    echo "STDOUT:"
+    sed 's/^/  | /' "$TEST_DIR/trap_uaf.stdout"
+  fi
+  echo "STDERR:"
+  sed 's/^/  | /' "$TEST_DIR/trap_uaf.stderr"
+  echo ""
+  echo "--- TEST (c) C++ WITH LIBC++ [$STATUS_CXX] ---"
+  echo "EXIT_CODE: $RC_CXX"
+  echo "STDOUT:"
+  sed 's/^/  | /' "$TEST_DIR/hello_cxx.stdout"
+  if [[ -s "$TEST_DIR/hello_cxx.stderr" ]]; then
+    echo "STDERR:"
+    sed 's/^/  | /' "$TEST_DIR/hello_cxx.stderr"
+  fi
+  echo "================================================================================"
+} > "$REPORT_FILE"
+
+REPORT_SHA256="$(sha256_file "$REPORT_FILE")"
+echo "REPORT_SHA256:        $REPORT_SHA256" >> "$REPORT_FILE"
+
+if [[ -n "${FILC_REPORT_ARCHIVE_DIR:-}" ]]; then
+  mkdir -p "$FILC_REPORT_ARCHIVE_DIR"
+  ARCHIVE_NAME="toolchain-${TIMESTAMP_UTC//[:]/}-${REPO_COMMIT:0:8}-${OVERALL_STATUS}.txt"
+  cp "$REPORT_FILE" "$FILC_REPORT_ARCHIVE_DIR/$ARCHIVE_NAME"
+  echo "Archived report to $FILC_REPORT_ARCHIVE_DIR/$ARCHIVE_NAME"
+fi
+
+cat "$REPORT_FILE"
+
+if (( FAILURES > 0 )); then
+  echo "error: $FAILURES end-to-end toolchain test(s) failed" >&2
+  exit 1
+fi
+
+echo "=== ALL END-TO-END TOOLCHAIN TESTS PASSED ==="

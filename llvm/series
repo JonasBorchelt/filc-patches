@@ -5,3 +5,4 @@
 04-clang-frontend-ast-basic-sema.patch
 05-clang-codegen-abi-and-pipeline.patch
 06a-clang-driver-filc-core.patch
+06b-clang-driver-wl-version-script.patch

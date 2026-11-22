@@ -130,6 +130,37 @@ int main() {
 }
 EOF
 
+cat > "$TEST_DIR/vertest.c" <<'EOF'
+int vertest_secret(int x) {
+    return x * 2;
+}
+
+int vertest_add(int a, int b) {
+    return vertest_secret(a) + b;
+}
+EOF
+
+cat > "$TEST_DIR/vertest.map" <<'EOF'
+VERTEST_1.0 {
+  global:
+    vertest_add;
+  local:
+    *;
+};
+EOF
+
+cat > "$TEST_DIR/vertest_main.c" <<'EOF'
+#include <stdio.h>
+
+extern int vertest_add(int a, int b);
+
+int main(void) {
+    int r = vertest_add(10, 22);
+    printf("VERTEST_OK: %d\n", r);
+    return r == 42 ? 0 : 1;
+}
+EOF
+
 # ---------------------------------------------------------------------------
 # Compile & link all test binaries
 # ---------------------------------------------------------------------------
@@ -140,6 +171,16 @@ echo "FILC_PHASE tests running"
 "$CLANG" -O2 -g "$TEST_DIR/trap_oob.c" -o "$TEST_DIR/trap_oob"
 "$CLANG" -O2 -g "$TEST_DIR/trap_uaf.c" -o "$TEST_DIR/trap_uaf"
 "$CLANGXX" -O2 -std=c++20 -Wall -Wextra -Werror "$TEST_DIR/hello_cxx.cpp" -o "$TEST_DIR/hello_cxx"
+"$CLANG" -O2 -fPIC -shared "$TEST_DIR/vertest.c" \
+  -Wl,--version-script="$TEST_DIR/vertest.map" \
+  -o "$TEST_DIR/libvertest_eq.so"
+"$CLANG" -O2 -fPIC -shared "$TEST_DIR/vertest.c" \
+  -Wl,--version-script,"$TEST_DIR/vertest.map" \
+  -o "$TEST_DIR/libvertest_comma.so"
+"$CLANG" -O2 "$TEST_DIR/vertest_main.c" -L"$TEST_DIR" -Wl,-rpath,"$TEST_DIR" \
+  -lvertest_eq -o "$TEST_DIR/vertest_eq"
+"$CLANG" -O2 "$TEST_DIR/vertest_main.c" -L"$TEST_DIR" -Wl,-rpath,"$TEST_DIR" \
+  -lvertest_comma -o "$TEST_DIR/vertest_comma"
 
 # ---------------------------------------------------------------------------
 # Execute tests and verify expectations
@@ -216,6 +257,33 @@ else
   STATUS_CXX="FAIL"
   FAILURES=$((FAILURES + 1))
   echo "FILC_PHASE test-cxx failure $(( $(date +%s) - T_T4 ))"
+fi
+
+echo "=== Running (d) Shared Library -Wl,--version-script Regression ==="
+run_and_capture vertest_eq "$TEST_DIR/vertest_eq"
+run_and_capture vertest_comma "$TEST_DIR/vertest_comma"
+RC_VER_EQ="$(cat "$TEST_DIR/vertest_eq.rc")"
+RC_VER_COMMA="$(cat "$TEST_DIR/vertest_comma.rc")"
+NM_OK=1
+if command -v nm >/dev/null 2>&1; then
+  for so in "$TEST_DIR/libvertest_eq.so" "$TEST_DIR/libvertest_comma.so"; do
+    if ! nm -D "$so" | grep -q ' T pizlonated_vertest_add$'; then
+      echo "error: expected exported pizlonated_vertest_add in $so" >&2
+      NM_OK=0
+    fi
+    if nm -D "$so" | grep -q 'vertest_secret'; then
+      echo "error: expected vertest_secret to stay local in $so" >&2
+      NM_OK=0
+    fi
+  done
+fi
+if [[ "$RC_VER_EQ" -eq 0 && "$RC_VER_COMMA" -eq 0 && "$NM_OK" -eq 1 ]] \
+  && grep -Fxq "VERTEST_OK: 42" "$TEST_DIR/vertest_eq.stdout" \
+  && grep -Fxq "VERTEST_OK: 42" "$TEST_DIR/vertest_comma.stdout"; then
+  STATUS_VERSCRIPT="PASS"
+else
+  STATUS_VERSCRIPT="FAIL"
+  FAILURES=$((FAILURES + 1))
 fi
 
 OVERALL_STATUS="PASS"
@@ -298,6 +366,11 @@ ARCH="$(uname -m)"
     echo "STDERR:"
     sed 's/^/  | /' "$TEST_DIR/hello_cxx.stderr"
   fi
+  echo ""
+  echo "--- TEST (d) SHARED LIB -Wl,--version-script [$STATUS_VERSCRIPT] ---"
+  echo "EXIT_CODE_EQ: $RC_VER_EQ  EXIT_CODE_COMMA: $RC_VER_COMMA"
+  echo "STDOUT:"
+  sed 's/^/  | /' "$TEST_DIR/vertest_eq.stdout"
   echo "================================================================================"
 } > "$REPORT_FILE"
 

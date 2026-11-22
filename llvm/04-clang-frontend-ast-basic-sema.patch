@@ -1,5 +1,5 @@
 Subject: Clang frontend support (HasUnion tracking, dual DataLayout in TargetInfo, preprocessor & cpuid)
-Upstream-Base: llvmorg-21.1.8 (2078da43e25a4623cab2d0d60decddf709aaea28)
+Upstream-Base: llvmorg-22.1.8 (ca7933e47d3a3451d81e72ac174dcb5aa28b59d1)
 Fil-C-Head: cede3de02b42b58a14acc9ce39c9894ab952a915 (branch deluge)
 
 Tracks union containment on RecordDecl/QualType in AST and Sema, splits
@@ -36,12 +36,17 @@ Rebase-Notes (llvmorg-20.1.8 -> llvmorg-21.1.8):
   - clang/lib/Headers/cpuid.h: context updated for reformatted x86-64 __cpuid_count macro.
   - clang/lib/Sema/SemaDecl.cpp: context updated for NumNamedMembers loop preceding field verification.
 
+Rebase-Notes (llvmorg-21.1.8 -> llvmorg-22.1.8):
+  - clang/include/clang/AST/TypeBase.h & Type.h: split QualType::hasUnion() declarations into TypeBase.h following LLVM 22's Type.h split.
+  - TargetInfo.{h,cpp} & Targets/{X86.h,AArch64.cpp}: LLVM 22 centralized DataLayout computation into TargetInfo::resetDataLayout() via Triple::computeDataLayout(); injected ni:0 for ELF x86_64/aarch64 directly in TargetInfo::resetDataLayout(), dropping per-target overrides in X86.h and AArch64.cpp.
+  - clang/lib/Headers/cpuid.h: context updated for doxygen comments and removed bit_AVX10_512.
+
 ---
 diff --git a/clang/include/clang/AST/Decl.h b/clang/include/clang/AST/Decl.h
-index 3d7969cca..4ea556d4d 100644
+index 5c46c9121..72d336d51 100644
 --- a/clang/include/clang/AST/Decl.h
 +++ b/clang/include/clang/AST/Decl.h
-@@ -4382,6 +4382,14 @@ public:
+@@ -4447,6 +4447,14 @@ public:
      RecordDeclBits.HasNonTrivialToPrimitiveCopyCUnion = V;
    }
  
@@ -57,10 +62,10 @@ index 3d7969cca..4ea556d4d 100644
      return RecordDeclBits.HasUninitializedExplicitInitFields;
    }
 diff --git a/clang/include/clang/AST/DeclBase.h b/clang/include/clang/AST/DeclBase.h
-index dd67ebc98..b8fe192a5 100644
+index 3c5a09343..71464b182 100644
 --- a/clang/include/clang/AST/DeclBase.h
 +++ b/clang/include/clang/AST/DeclBase.h
-@@ -1458,7 +1458,7 @@ class DeclContext {
+@@ -1474,7 +1474,7 @@ class DeclContext {
    friend class ASTWriter;
  
  protected:
@@ -69,7 +74,7 @@ index dd67ebc98..b8fe192a5 100644
  
    // We use uint64_t in the bit-fields below since some bit-fields
    // cross the unsigned boundary and this breaks the packing.
-@@ -1680,6 +1680,8 @@ protected:
+@@ -1689,6 +1689,8 @@ protected:
      uint64_t HasNonTrivialToPrimitiveDestructCUnion : 1;
      LLVM_PREFERRED_TYPE(bool)
      uint64_t HasNonTrivialToPrimitiveCopyCUnion : 1;
@@ -79,27 +84,10 @@ index dd67ebc98..b8fe192a5 100644
      /// True if any field is marked as requiring explicit initialization with
      /// [[clang::require_explicit_initialization]].
 diff --git a/clang/include/clang/AST/Type.h b/clang/include/clang/AST/Type.h
-index 21b97102d..927da6e3c 100644
+index 7bd244128..2d38eaf29 100644
 --- a/clang/include/clang/AST/Type.h
 +++ b/clang/include/clang/AST/Type.h
-@@ -1561,6 +1561,8 @@ public:
-   /// true, isNonTrivialToPrimitiveCopy returns PCK_Struct.
-   bool hasNonTrivialToPrimitiveCopyCUnion() const;
- 
-+  bool hasUnion() const;
-+
-   /// Determine whether expressions of the given type are forbidden
-   /// from being lvalues in C.
-   ///
-@@ -1642,6 +1644,7 @@ private:
-   static bool hasNonTrivialToPrimitiveDefaultInitializeCUnion(const RecordDecl *RD);
-   static bool hasNonTrivialToPrimitiveDestructCUnion(const RecordDecl *RD);
-   static bool hasNonTrivialToPrimitiveCopyCUnion(const RecordDecl *RD);
-+  static bool hasUnion(const RecordDecl *RD);
- };
- 
- raw_ostream &operator<<(raw_ostream &OS, QualType QT);
-@@ -8252,6 +8255,12 @@ inline bool QualType::hasNonTrivialToPrimitiveCopyCUnion() const {
+@@ -88,6 +88,12 @@ inline bool QualType::hasNonTrivialToPrimitiveCopyCUnion() const {
    return false;
  }
  
@@ -109,14 +97,35 @@ index 21b97102d..927da6e3c 100644
 +  return false;
 +}
 +
- inline FunctionType::ExtInfo getFunctionExtInfo(const Type &t) {
-   if (const auto *PT = t.getAs<PointerType>()) {
-     if (const auto *FT = PT->getPointeeType()->getAs<FunctionType>())
+ } // namespace clang
+ 
+ #endif // LLVM_CLANG_AST_TYPE_H
+diff --git a/clang/include/clang/AST/TypeBase.h b/clang/include/clang/AST/TypeBase.h
+index 279b75f14..695c20107 100644
+--- a/clang/include/clang/AST/TypeBase.h
++++ b/clang/include/clang/AST/TypeBase.h
+@@ -1562,6 +1562,8 @@ public:
+   /// true, isNonTrivialToPrimitiveCopy returns PCK_Struct.
+   bool hasNonTrivialToPrimitiveCopyCUnion() const;
+ 
++  bool hasUnion() const;
++
+   /// Determine whether expressions of the given type are forbidden
+   /// from being lvalues in C.
+   ///
+@@ -1643,6 +1645,7 @@ private:
+   static bool hasNonTrivialToPrimitiveDefaultInitializeCUnion(const RecordDecl *RD);
+   static bool hasNonTrivialToPrimitiveDestructCUnion(const RecordDecl *RD);
+   static bool hasNonTrivialToPrimitiveCopyCUnion(const RecordDecl *RD);
++  static bool hasUnion(const RecordDecl *RD);
+ };
+ 
+ raw_ostream &operator<<(raw_ostream &OS, QualType QT);
 diff --git a/clang/include/clang/Basic/TargetInfo.h b/clang/include/clang/Basic/TargetInfo.h
-index f05dcae0a..2c0005eb2 100644
+index 83467b8e9..ebf5e5a71 100644
 --- a/clang/include/clang/Basic/TargetInfo.h
 +++ b/clang/include/clang/Basic/TargetInfo.h
-@@ -248,7 +248,8 @@ protected:
+@@ -250,7 +250,8 @@ protected:
    bool HasStrictFP;
  
    unsigned char MaxAtomicPromoteWidth, MaxAtomicInlineWidth;
@@ -126,16 +135,15 @@ index f05dcae0a..2c0005eb2 100644
    const char *UserLabelPrefix;
    const char *MCountName;
    unsigned char RegParmMax, SSERegParmMax;
-@@ -297,6 +298,8 @@ protected:
-   // UserLabelPrefix must match DL's getGlobalPrefix() when interpreted
-   // as a DataLayout object.
-   void resetDataLayout(StringRef DL, const char *UserLabelPrefix = "");
-+  void resetDataLayout(StringRef DLBeforeFilC, StringRef DLAfterFilC,
-+                       const char *UserLabelPrefix = "");
+@@ -298,6 +299,7 @@ protected:
  
-   // Target features that are read-only and should not be disabled/enabled
-   // by command line options. Such features are for emitting predefined
-@@ -1285,9 +1288,13 @@ public:
+   /// Set the data layout to the given string.
+   void resetDataLayout(StringRef DL);
++  void resetDataLayout(StringRef DLBeforeFilC, StringRef DLAfterFilC);
+ 
+   /// Set the data layout based on current triple and ABI.
+   void resetDataLayout();
+@@ -1323,9 +1325,13 @@ public:
      return std::nullopt;
    }
  
@@ -166,10 +174,10 @@ index 3680ee566..5e540804e 100644
    bool shouldVisitTemplateInstantiations() const { return true; }
  
 diff --git a/clang/lib/AST/ASTContext.cpp b/clang/lib/AST/ASTContext.cpp
-index 862f1d574..dde25014f 100644
+index d5aacd801..6ca603ac0 100644
 --- a/clang/lib/AST/ASTContext.cpp
 +++ b/clang/lib/AST/ASTContext.cpp
-@@ -13130,9 +13130,7 @@ VTableContextBase *ASTContext::getVTableContext() {
+@@ -13167,9 +13167,7 @@ VTableContextBase *ASTContext::getVTableContext() {
      if (ABI.isMicrosoft())
        VTContext.reset(new MicrosoftVTableContext(*this));
      else {
@@ -181,10 +189,10 @@ index 862f1d574..dde25014f 100644
      }
    }
 diff --git a/clang/lib/AST/Decl.cpp b/clang/lib/AST/Decl.cpp
-index bd1b5950d..ad769edc5 100644
+index 231fc381b..5862a9972 100644
 --- a/clang/lib/AST/Decl.cpp
 +++ b/clang/lib/AST/Decl.cpp
-@@ -5110,6 +5110,7 @@ RecordDecl::RecordDecl(Kind DK, TagKind TK, const ASTContext &C,
+@@ -5219,6 +5219,7 @@ RecordDecl::RecordDecl(Kind DK, TagKind TK, const ASTContext &C,
    setHasNonTrivialToPrimitiveDestructCUnion(false);
    setHasNonTrivialToPrimitiveCopyCUnion(false);
    setHasUninitializedExplicitInitFields(false);
@@ -193,10 +201,10 @@ index bd1b5950d..ad769edc5 100644
    setArgPassingRestrictions(RecordArgPassingKind::CanPassInRegs);
    setIsRandomized(false);
 diff --git a/clang/lib/AST/Mangle.cpp b/clang/lib/AST/Mangle.cpp
-index 9652fdbc4..8e683dc74 100644
+index 780b2c585..0f1397b2f 100644
 --- a/clang/lib/AST/Mangle.cpp
 +++ b/clang/lib/AST/Mangle.cpp
-@@ -177,7 +177,7 @@ void MangleContext::mangleName(GlobalDecl GD, raw_ostream &Out) {
+@@ -208,7 +208,7 @@ void MangleContext::mangleName(GlobalDecl GD, raw_ostream &Out) {
          getASTContext().getTargetInfo().getUserLabelPrefix();
  #ifndef NDEBUG
      char GlobalPrefix =
@@ -205,7 +213,7 @@ index 9652fdbc4..8e683dc74 100644
              .getGlobalPrefix();
      assert((UserLabelPrefix.empty() && !GlobalPrefix) ||
             (UserLabelPrefix.size() == 1 && UserLabelPrefix[0] == GlobalPrefix));
-@@ -418,7 +418,7 @@ class ASTNameGenerator::Implementation {
+@@ -453,7 +453,7 @@ class ASTNameGenerator::Implementation {
  public:
    explicit Implementation(ASTContext &Ctx)
        : MC(Ctx.createMangleContext()),
@@ -215,7 +223,7 @@ index 9652fdbc4..8e683dc74 100644
    bool writeName(const Decl *D, raw_ostream &OS) {
      // First apply frontend mangling.
 diff --git a/clang/lib/AST/Type.cpp b/clang/lib/AST/Type.cpp
-index bd3dd983b..ad2c30e8c 100644
+index 53082bcf7..86f4604a2 100644
 --- a/clang/lib/AST/Type.cpp
 +++ b/clang/lib/AST/Type.cpp
 @@ -2937,6 +2937,10 @@ bool QualType::hasNonTrivialToPrimitiveCopyCUnion(const RecordDecl *RD) {
@@ -230,61 +238,42 @@ index bd3dd983b..ad2c30e8c 100644
    return isWebAssemblyExternrefType() || isWebAssemblyFuncrefType();
  }
 diff --git a/clang/lib/Basic/TargetInfo.cpp b/clang/lib/Basic/TargetInfo.cpp
-index 09b6a1f09..1349b2fba 100644
+index 794621c4b..3aaddbe3b 100644
 --- a/clang/lib/Basic/TargetInfo.cpp
 +++ b/clang/lib/Basic/TargetInfo.cpp
-@@ -194,8 +194,13 @@ TargetInfo::TargetInfo(const llvm::Triple &T) : Triple(T) {
+@@ -197,10 +197,30 @@ TargetInfo::TargetInfo(const llvm::Triple &T) : Triple(T) {
  // Out of line virtual dtor for TargetInfo.
  TargetInfo::~TargetInfo() {}
  
--void TargetInfo::resetDataLayout(StringRef DL, const char *ULP) {
--  DataLayoutString = DL.str();
-+void TargetInfo::resetDataLayout(StringRef, const char *) {
-+  llvm_unreachable("YOLO version of resetDataLayout called");
+-void TargetInfo::resetDataLayout(StringRef DL) { DataLayoutString = DL.str(); }
++void TargetInfo::resetDataLayout(StringRef DL) {
++  DataLayoutStringBeforeFilC = DL.str();
++  DataLayoutStringAfterFilC = DL.str();
 +}
 +
-+void TargetInfo::resetDataLayout(StringRef DLBeforeFilC, StringRef DLAfterFilC, const char *ULP) {
++void TargetInfo::resetDataLayout(StringRef DLBeforeFilC, StringRef DLAfterFilC) {
 +  DataLayoutStringBeforeFilC = DLBeforeFilC.str();
 +  DataLayoutStringAfterFilC = DLAfterFilC.str();
-   UserLabelPrefix = ULP;
++}
+ 
+ void TargetInfo::resetDataLayout() {
+-  DataLayoutString = Triple.computeDataLayout(getABI());
++  std::string After = Triple.computeDataLayout(getABI());
++  std::string Before = After;
++  if (Triple.isOSBinFormatELF() &&
++      (Triple.getArch() == llvm::Triple::x86_64 ||
++       Triple.getArch() == llvm::Triple::aarch64)) {
++    // Inject non-integral address space 0 (ni:0) for pre-pizlonation Fil-C IR.
++    if (Before.rfind("e-m:e-", 0) == 0)
++      Before = "e-m:e-ni:0-" + Before.substr(6);
++    else if (!Before.empty())
++      Before += "-ni:0";
++  }
++  DataLayoutStringBeforeFilC = std::move(Before);
++  DataLayoutStringAfterFilC = std::move(After);
  }
  
-diff --git a/clang/lib/Basic/Targets/AArch64.cpp b/clang/lib/Basic/Targets/AArch64.cpp
-index 72d2e5fcf..98d9b15a5 100644
---- a/clang/lib/Basic/Targets/AArch64.cpp
-+++ b/clang/lib/Basic/Targets/AArch64.cpp
-@@ -194,7 +194,7 @@ AArch64TargetInfo::AArch64TargetInfo(const llvm::Triple &Triple,
-   HasUnalignedAccess = true;
- 
-   // AArch64 targets default to using the ARM C++ ABI.
--  TheCXXABI.set(TargetCXXABI::GenericAArch64);
-+  TheCXXABI.set(TargetCXXABI::GenericItanium);
- 
-   if (Triple.getOS() == llvm::Triple::Linux)
-     this->MCountName = "\01_mcount";
-@@ -1365,7 +1365,7 @@ AArch64TargetInfo::checkCallingConvention(CallingConv CC) const {
- bool AArch64TargetInfo::isCLZForZeroUndef() const { return false; }
- 
- TargetInfo::BuiltinVaListKind AArch64TargetInfo::getBuiltinVaListKind() const {
--  return TargetInfo::AArch64ABIBuiltinVaList;
-+  return TargetInfo::CharPtrBuiltinVaList;
- }
- 
- const char *const AArch64TargetInfo::GCCRegNames[] = {
-@@ -1638,8 +1638,11 @@ void AArch64leTargetInfo::setDataLayout() {
-                       "n32:64-S128-Fn32",
-                       "_");
-   } else
--    resetDataLayout("e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-"
--                    "i64:64-i128:128-n32:64-S128-Fn32");
-+    resetDataLayout(
-+        "e-m:e-ni:0-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-"
-+        "i64:64-i128:128-n32:64-S128-Fn32",
-+        "e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-"
-+        "i64:64-i128:128-n32:64-S128-Fn32", "");
- }
- 
- void AArch64leTargetInfo::getTargetDefines(const LangOptions &Opts,
+ bool
 diff --git a/clang/lib/Basic/Targets/SPIR.cpp b/clang/lib/Basic/Targets/SPIR.cpp
 index 2336fb3ef..26de054b5 100644
 --- a/clang/lib/Basic/Targets/SPIR.cpp
@@ -324,30 +313,6 @@ index 2336fb3ef..26de054b5 100644
  }
  
  void SPIRV64AMDGCNTargetInfo::getTargetDefines(const LangOptions &Opts,
-diff --git a/clang/lib/Basic/Targets/X86.h b/clang/lib/Basic/Targets/X86.h
-index a7be08069..5344c8eeb 100644
---- a/clang/lib/Basic/Targets/X86.h
-+++ b/clang/lib/Basic/Targets/X86.h
-@@ -751,12 +751,13 @@ public:
-     RegParmMax = 6;
- 
-     // Pointers are 32-bit in x32.
--    resetDataLayout(IsX32 ? "e-m:e-p:32:32-p270:32:32-p271:32:32-p272:64:64-"
--                            "i64:64-i128:128-f80:128-n8:16:32:64-S128"
--                    : IsWinCOFF ? "e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:"
--                                  "64-i128:128-f80:128-n8:16:32:64-S128"
--                                : "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:"
--                                  "64-i128:128-f80:128-n8:16:32:64-S128");
-+    assert(!IsX32);
-+    assert(!IsWinCOFF);
-+    resetDataLayout("e-m:e-ni:0-p270:32:32-p271:32:32-p272:64:64-i64:"
-+                    "64-i128:128-f80:128-n8:16:32:64-S128",
-+                    "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:"
-+                    "64-i128:128-f80:128-n8:16:32:64-S128",
-+                    "");
- 
-     // Use fpret only for long double.
-     RealTypeUsesObjCFPRetMask = (unsigned)FloatModeKind::LongDouble;
 diff --git a/clang/lib/Basic/Version.cpp b/clang/lib/Basic/Version.cpp
 index 4823f566b..0def33723 100644
 --- a/clang/lib/Basic/Version.cpp
@@ -396,10 +361,10 @@ index 4823f566b..0def33723 100644
    std::string LLVMRev = getLLVMRevision();
    if (!LLVMRev.empty() && LLVMRev != Revision) {
 diff --git a/clang/lib/Frontend/InitPreprocessor.cpp b/clang/lib/Frontend/InitPreprocessor.cpp
-index cce839295..49b5a41e6 100644
+index 8253fad9e..181adb7e3 100644
 --- a/clang/lib/Frontend/InitPreprocessor.cpp
 +++ b/clang/lib/Frontend/InitPreprocessor.cpp
-@@ -866,6 +866,8 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
+@@ -837,6 +837,8 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
    // Compiler version introspection macros.
    Builder.defineMacro("__llvm__");  // LLVM Backend
    Builder.defineMacro("__clang__"); // Clang Frontend
@@ -409,12 +374,12 @@ index cce839295..49b5a41e6 100644
  #define TOSTR(X) TOSTR2(X)
    Builder.defineMacro("__clang_major__", TOSTR(CLANG_VERSION_MAJOR));
 diff --git a/clang/lib/Headers/cpuid.h b/clang/lib/Headers/cpuid.h
-index 52addb7bf..269c8d89d 100644
+index 156425c75..6ff7b0ffb 100644
 --- a/clang/lib/Headers/cpuid.h
 +++ b/clang/lib/Headers/cpuid.h
-@@ -257,6 +257,23 @@
- #define bit_AVX10_256   0x00020000
- #define bit_AVX10_512   0x00040000
+@@ -253,6 +253,23 @@
+ #define bit_RDPRU       0x00000010
+ #define bit_WBNOINVD    0x00000200
  
 +#ifdef __PIZLONATOR_WAS_HERE__
 +#ifdef __cplusplus
@@ -436,19 +401,19 @@ index 52addb7bf..269c8d89d 100644
  #ifdef __i386__
  #define __cpuid(__leaf, __eax, __ebx, __ecx, __edx) \
      __asm("cpuid" : "=a"(__eax), "=b" (__ebx), "=c"(__ecx), "=d"(__edx) \
-@@ -281,6 +298,7 @@
+@@ -277,6 +294,7 @@
          : "=a"(__eax), "=r"(__ebx), "=c"(__ecx), "=d"(__edx)                   \
          : "0"(__leaf), "2"(__count))
  #endif
 +#endif /* __PIZLONATOR_WAS_HERE__ */
  
- static __inline unsigned int __get_cpuid_max (unsigned int __leaf,
-                                               unsigned int *__sig)
+ /// Queries the processor to determine the highest supported \c CPUID leaf.
+ /// This intrinsic is only available on x86 and x64.
 diff --git a/clang/lib/Sema/SemaDecl.cpp b/clang/lib/Sema/SemaDecl.cpp
-index d43dc2297..b9d32913e 100644
+index d67220a2f..502a4ffd9 100644
 --- a/clang/lib/Sema/SemaDecl.cpp
 +++ b/clang/lib/Sema/SemaDecl.cpp
-@@ -19436,6 +19436,22 @@ void Sema::ActOnFields(Scope *S, SourceLocation RecLoc, Decl *EnclosingDecl,
+@@ -19731,6 +19731,22 @@ void Sema::ActOnFields(Scope *S, SourceLocation RecLoc, Decl *EnclosingDecl,
      }
    }
  
@@ -471,7 +436,7 @@ index d43dc2297..b9d32913e 100644
    // Verify that all the fields are okay.
    SmallVector<FieldDecl*, 32> RecFields;
    const FieldDecl *PreviousField = nullptr;
-@@ -19451,6 +19467,9 @@ void Sema::ActOnFields(Scope *S, SourceLocation RecLoc, Decl *EnclosingDecl,
+@@ -19746,6 +19762,9 @@ void Sema::ActOnFields(Scope *S, SourceLocation RecLoc, Decl *EnclosingDecl,
        RecFields.push_back(FD);
      }
  

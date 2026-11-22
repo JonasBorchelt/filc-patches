@@ -15,13 +15,13 @@ POLICY_RATIONALE="Uses upstream ZSTD_NO_ASM=1 build option to avoid inline assem
 FILC_ORIGIN_REF="cede3de02b42:build_zstd.sh"
 
 port_build() {
-  ZSTD_NO_ASM=1 make -j "$JOBS" CC="$CC" CXX="$CXX" HAVE_ZLIB=1 HAVE_LZ4=1 HAVE_LZMA=0 \
-    CPPFLAGS="-I$PIZFIX/include" LDFLAGS="-L$PIZFIX/lib" prefix="$PIZFIX"
+  ZSTD_NO_ASM=1 CPPFLAGS="-I$PIZFIX/include" LDFLAGS="-L$PIZFIX/lib" \
+    make -j "$JOBS" CC="$CC" CXX="$CXX" HAVE_ZLIB=1 HAVE_LZ4=1 HAVE_LZMA=0 prefix="$PIZFIX"
 }
 
 port_install() {
-  ZSTD_NO_ASM=1 make CC="$CC" CXX="$CXX" HAVE_ZLIB=1 HAVE_LZ4=1 HAVE_LZMA=0 \
-    CPPFLAGS="-I$PIZFIX/include" LDFLAGS="-L$PIZFIX/lib" prefix="$PIZFIX" install
+  ZSTD_NO_ASM=1 CPPFLAGS="-I$PIZFIX/include" LDFLAGS="-L$PIZFIX/lib" \
+    make CC="$CC" CXX="$CXX" HAVE_ZLIB=1 HAVE_LZ4=1 HAVE_LZMA=0 prefix="$PIZFIX" install
 }
 
 port_test() {

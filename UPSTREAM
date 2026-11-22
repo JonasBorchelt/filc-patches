@@ -1,8 +1,8 @@
-# Pinned upstream revisions (Etappe 2, Stage 2: rebased onto llvmorg-22.1.8)
+# Pinned upstream revisions (Etappe 2, Stage 3: rebased onto llvmorg-23.1.6)
 
 LLVM_REPO=https://github.com/llvm/llvm-project.git
-LLVM_TAG=llvmorg-22.1.8
-LLVM_COMMIT=ca7933e47d3a3451d81e72ac174dcb5aa28b59d1
+LLVM_TAG=llvmorg-23.1.6
+LLVM_COMMIT=5b10d2d74929eae78912771222c9855af97496f4
 
 FILC_REPO=https://github.com/pizlonator/fil-c.git
 FILC_BRANCH=deluge

@@ -183,6 +183,8 @@ emit_report() {
 }
 
 echo "=== Resolving latest stable LLVM release tag from ${LLVM_REPO} ==="
+T_FETCH_START="$(date +%s)"
+echo "FILC_PHASE fetch running"
 if [[ -n "${FILC_RELEASE_TAG:-}" ]]; then
   RELEASE_TAG="$FILC_RELEASE_TAG"
 else
@@ -247,6 +249,10 @@ if [[ "$ACTUAL" != "$RELEASE_COMMIT" ]]; then
 fi
 RELEASE_SUBJECT="$(git -C "$LLVM_DIR" log -1 --format='%cI %s' HEAD)"
 echo "Checked out ${RELEASE_TAG}: ${RELEASE_COMMIT} (${RELEASE_SUBJECT})"
+echo "FILC_PHASE fetch success $(( $(date +%s) - T_FETCH_START ))"
+
+T_PATCH_START="$(date +%s)"
+echo "FILC_PHASE patches running"
 
 collect_patches() {
   local base_dir="$1"
@@ -285,6 +291,7 @@ for rel in "${ALL_PATCHES[@]}"; do
   psha="$(sha256_file "$patch_path")"
   if [[ "$PATCH_STATUS" != "PASS" ]]; then
     PATCH_RESULTS+=("SKIP  ${psha}  ${rel}")
+    echo "FILC_PATCH ${rel} SKIP"
     continue
   fi
 
@@ -293,15 +300,23 @@ for rel in "${ALL_PATCHES[@]}"; do
   if err_out="$(git -C "$LLVM_DIR" apply --check --whitespace=nowarn "$patch_path" 2>&1)"; then
     git -C "$LLVM_DIR" apply --whitespace=nowarn "$patch_path"
     PATCH_RESULTS+=("PASS  ${psha}  ${rel}")
+    echo "FILC_PATCH ${rel} PASS"
   else
     PATCH_STATUS="FAIL"
     FIRST_FAILING_PATCH="$rel"
     FIRST_FAILURE_DETAIL="$err_out"
     PATCH_RESULTS+=("FAIL  ${psha}  ${rel}")
+    echo "FILC_PATCH ${rel} FAIL"
     echo "FIRST FAILING PATCH: ${rel}" >&2
     printf '%s\n' "$err_out" >&2
   fi
 done
+
+if [[ "$PATCH_STATUS" == "PASS" ]]; then
+  echo "FILC_PHASE patches success $(( $(date +%s) - T_PATCH_START ))"
+else
+  echo "FILC_PHASE patches failure $(( $(date +%s) - T_PATCH_START ))"
+fi
 
 rm -f "$TOOLCHAIN_REPORT"
 

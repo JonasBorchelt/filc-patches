@@ -78,6 +78,8 @@ T_TOTAL_START="$(date +%s)"
 # ---------------------------------------------------------------------------
 if [[ "${FILC_SKIP_FETCH:-0}" != "1" ]]; then
   echo "=== [0/8] Fetching & applying LLVM, Fil-C runtime, yolomusl, usermusl ==="
+  T_S0="$(date +%s)"
+  echo "FILC_PHASE fetch running"
   APPLY_LLVM_ARGS=(--sparse)
   [[ -n "${FILC_LLVM_REFERENCE:-}" ]] && APPLY_LLVM_ARGS+=(--reference "$FILC_LLVM_REFERENCE")
   "$REPO_ROOT/scripts/apply" "${APPLY_LLVM_ARGS[@]}" "$LLVM_SRC"
@@ -92,6 +94,7 @@ if [[ "${FILC_SKIP_FETCH:-0}" != "1" ]]; then
 
   # Reuse yolomusl git object store so musl is only downloaded once.
   "$REPO_ROOT/scripts/apply-musl" usermusl --reference "$YOLOMUSL_SRC" "$USERMUSL_SRC"
+  echo "FILC_PHASE fetch success $(( $(date +%s) - T_S0 ))"
 fi
 
 # Fresh pizfix sysroot
@@ -151,12 +154,19 @@ if command -v ccache >/dev/null 2>&1; then
   LLVM_CMAKE_ARGS+=(-DLLVM_CCACHE_BUILD=ON)
 fi
 
+T_CFG="$(date +%s)"
+echo "FILC_PHASE configure running"
 cmake "${LLVM_CMAKE_ARGS[@]}"
+echo "FILC_PHASE configure success $(( $(date +%s) - T_CFG ))"
+
+T_LLVM_BUILD="$(date +%s)"
+echo "FILC_PHASE llvm-build running"
 ninja -C "$BUILD_DIR" -j"$COMPILE_JOBS" clang lld
 
 test -x "$BUILD_DIR/bin/clang"
 test -x "$BUILD_DIR/bin/clang++"
 test -x "$BUILD_DIR/bin/ld.lld"
+echo "FILC_PHASE llvm-build success $(( $(date +%s) - T_LLVM_BUILD ))"
 echo "STAGE1_LLVM_SECONDS=$(( $(date +%s) - T_S1 ))"
 
 # ---------------------------------------------------------------------------
@@ -164,6 +174,7 @@ echo "STAGE1_LLVM_SECONDS=$(( $(date +%s) - T_S1 ))"
 # ---------------------------------------------------------------------------
 echo "=== [2/8] Building compiler-rt (builtins + crt) ==="
 T_S2="$(date +%s)"
+echo "FILC_PHASE compiler-rt running"
 rm -rf "$CRT_BUILD_DIR"
 cmake -S "$LLVM_SRC/runtimes" -B "$CRT_BUILD_DIR" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
@@ -201,6 +212,7 @@ fi
 cp "$CRTBEGIN_OBJ" "$PIZFIX/lib/crtbegin.o"
 cp "$CRTEND_OBJ" "$PIZFIX/lib/crtend.o"
 cp "$BUILTINS_LIB" "$PIZFIX/lib/libyolort.a"
+echo "FILC_PHASE compiler-rt success $(( $(date +%s) - T_S2 ))"
 echo "STAGE2_COMPILER_RT_SECONDS=$(( $(date +%s) - T_S2 ))"
 
 # ---------------------------------------------------------------------------
@@ -208,15 +220,18 @@ echo "STAGE2_COMPILER_RT_SECONDS=$(( $(date +%s) - T_S2 ))"
 # ---------------------------------------------------------------------------
 echo "=== [3/8] Building yolounwind ==="
 T_S3="$(date +%s)"
+echo "FILC_PHASE yolounwind running"
 make -C "$RUNTIME_SRC/yolounwind" clean || true
 make -C "$RUNTIME_SRC/yolounwind" -j"$COMPILE_JOBS"
 cp "$RUNTIME_SRC/yolounwind/libyolounwind.a" "$PIZFIX/lib/libyolounwind.a"
+echo "FILC_PHASE yolounwind success $(( $(date +%s) - T_S3 ))"
 echo "STAGE3_YOLOUNWIND_SECONDS=$(( $(date +%s) - T_S3 ))"
 
 # ---------------------------------------------------------------------------
 # Stage 4: pizfix/os-include
 # ---------------------------------------------------------------------------
 echo "=== [4/8] Setting up pizfix/os-include ==="
+echo "FILC_PHASE os-include running"
 rm -rf "$PIZFIX/os-include"
 mkdir -p "$PIZFIX/os-include"
 ln -s /usr/include/linux "$PIZFIX/os-include/linux"
@@ -229,12 +244,14 @@ else
   exit 1
 fi
 ln -s /usr/include/asm-generic "$PIZFIX/os-include/asm-generic"
+echo "FILC_PHASE os-include success 0"
 
 # ---------------------------------------------------------------------------
 # Stage 5: yolomusl
 # ---------------------------------------------------------------------------
 echo "=== [5/8] Building yolomusl ==="
 T_S5="$(date +%s)"
+echo "FILC_PHASE yolomusl running"
 (
   cd "$YOLOMUSL_SRC"
   CC="$HOST_CC" ./configure \
@@ -259,6 +276,7 @@ ln -fs libyoloc.so "$PIZFIX/lib/ld-fil1-${ARCH}.so"
 rm -rf "$PIZFIX/yolo-include"
 mv "$PIZFIX/yolo/include" "$PIZFIX/yolo-include"
 rm -rf "$PIZFIX/yolo"
+echo "FILC_PHASE yolomusl success $(( $(date +%s) - T_S5 ))"
 echo "STAGE5_YOLOMUSL_SECONDS=$(( $(date +%s) - T_S5 ))"
 
 # ---------------------------------------------------------------------------
@@ -266,6 +284,7 @@ echo "STAGE5_YOLOMUSL_SECONDS=$(( $(date +%s) - T_S5 ))"
 # ---------------------------------------------------------------------------
 echo "=== [6/8] Building Fil-C runtime (libpizlo + CRT) ==="
 T_S6="$(date +%s)"
+echo "FILC_PHASE runtime running"
 # Wire relative ../pizfix and ../build inside RUNTIME_SRC so Makefile-setup
 # and libpas/Makefile resolve directly to our unified layout.
 ln -sfn "$PIZFIX" "$RUNTIME_SRC/pizfix"
@@ -280,6 +299,7 @@ ln -sfn "$BUILD_DIR" "$RUNTIME_SRC/build"
     FILC_CLANG="$BUILD_DIR/bin/clang" \
     HOST_CLANG="$HOST_CC"
 )
+echo "FILC_PHASE runtime success $(( $(date +%s) - T_S6 ))"
 echo "STAGE6_RUNTIME_SECONDS=$(( $(date +%s) - T_S6 ))"
 
 # ---------------------------------------------------------------------------
@@ -287,6 +307,7 @@ echo "STAGE6_RUNTIME_SECONDS=$(( $(date +%s) - T_S6 ))"
 # ---------------------------------------------------------------------------
 echo "=== [7/8] Building usermusl ==="
 T_S7="$(date +%s)"
+echo "FILC_PHASE usermusl running"
 (
   cd "$USERMUSL_SRC"
   CC="$BUILD_DIR/bin/clang -yolo-assembler" ./configure \
@@ -296,6 +317,7 @@ T_S7="$(date +%s)"
   make -j"$COMPILE_JOBS"
   make install
 )
+echo "FILC_PHASE usermusl success $(( $(date +%s) - T_S7 ))"
 echo "STAGE7_USERMUSL_SECONDS=$(( $(date +%s) - T_S7 ))"
 
 # ---------------------------------------------------------------------------
@@ -303,6 +325,7 @@ echo "STAGE7_USERMUSL_SECONDS=$(( $(date +%s) - T_S7 ))"
 # ---------------------------------------------------------------------------
 echo "=== [8/8] Building libc++ and libc++abi ==="
 T_S8="$(date +%s)"
+echo "FILC_PHASE libcxx running"
 TRIPLE="$("$BUILD_DIR/bin/clang" -print-target-triple)"
 echo "Target triple: $TRIPLE"
 
@@ -362,6 +385,7 @@ fi
   ln -fs libc++abi.so.1.0 libc++abi.so.1
   ln -fs libc++abi.so.1 libc++abi.so
 )
+echo "FILC_PHASE libcxx success $(( $(date +%s) - T_S8 ))"
 echo "STAGE8_LIBCXX_SECONDS=$(( $(date +%s) - T_S8 ))"
 
 # Verify critical sysroot deliverables

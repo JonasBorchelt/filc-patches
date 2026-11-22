@@ -134,6 +134,8 @@ EOF
 # Compile & link all test binaries
 # ---------------------------------------------------------------------------
 echo "=== Compiling end-to-end test binaries ==="
+T_TESTS_START="$(date +%s)"
+echo "FILC_PHASE tests running"
 "$CLANG" -O2 -Wall -Wextra -Werror "$TEST_DIR/hello_world.c" -o "$TEST_DIR/hello_world"
 "$CLANG" -O2 -g "$TEST_DIR/trap_oob.c" -o "$TEST_DIR/trap_oob"
 "$CLANG" -O2 -g "$TEST_DIR/trap_uaf.c" -o "$TEST_DIR/trap_uaf"
@@ -156,53 +158,72 @@ run_and_capture() {
 }
 
 echo "=== Running (a) Hello World ==="
+T_T1="$(date +%s)"
+echo "FILC_PHASE test-hello running"
 run_and_capture hello_world "$TEST_DIR/hello_world"
 RC_HELLO="$(cat "$TEST_DIR/hello_world.rc")"
 if [[ "$RC_HELLO" -eq 0 ]] && grep -Fxq "Hello from Fil-C!" "$TEST_DIR/hello_world.stdout"; then
   STATUS_HELLO="PASS"
+  echo "FILC_PHASE test-hello success $(( $(date +%s) - T_T1 ))"
 else
   STATUS_HELLO="FAIL"
   FAILURES=$((FAILURES + 1))
+  echo "FILC_PHASE test-hello failure $(( $(date +%s) - T_T1 ))"
 fi
 
 echo "=== Running (b1) Memory-Safety Trap: Out-of-Bounds ==="
+T_T2="$(date +%s)"
+echo "FILC_PHASE test-oob running"
 run_and_capture trap_oob "$TEST_DIR/trap_oob"
 RC_OOB="$(cat "$TEST_DIR/trap_oob.rc")"
 if [[ "$RC_OOB" -ne 0 ]] \
   && ! grep -q "UNEXPECTED_OOB_SURVIVED" "$TEST_DIR/trap_oob.stdout" \
   && grep -qi "filc safety error" "$TEST_DIR/trap_oob.stderr"; then
   STATUS_OOB="PASS"
+  echo "FILC_PHASE test-oob success $(( $(date +%s) - T_T2 ))"
 else
   STATUS_OOB="FAIL"
   FAILURES=$((FAILURES + 1))
+  echo "FILC_PHASE test-oob failure $(( $(date +%s) - T_T2 ))"
 fi
 
 echo "=== Running (b2) Memory-Safety Trap: Use-After-Free ==="
+T_T3="$(date +%s)"
+echo "FILC_PHASE test-uaf running"
 run_and_capture trap_uaf "$TEST_DIR/trap_uaf"
 RC_UAF="$(cat "$TEST_DIR/trap_uaf.rc")"
 if [[ "$RC_UAF" -ne 0 ]] \
   && ! grep -q "UNEXPECTED_UAF_SURVIVED" "$TEST_DIR/trap_uaf.stdout" \
   && grep -qi "filc safety error" "$TEST_DIR/trap_uaf.stderr"; then
   STATUS_UAF="PASS"
+  echo "FILC_PHASE test-uaf success $(( $(date +%s) - T_T3 ))"
 else
   STATUS_UAF="FAIL"
   FAILURES=$((FAILURES + 1))
+  echo "FILC_PHASE test-uaf failure $(( $(date +%s) - T_T3 ))"
 fi
 
 echo "=== Running (c) C++ with libc++ ==="
+T_T4="$(date +%s)"
+echo "FILC_PHASE test-cxx running"
 run_and_capture hello_cxx "$TEST_DIR/hello_cxx"
 RC_CXX="$(cat "$TEST_DIR/hello_cxx.rc")"
 EXPECTED_CXX="CXX_OK: Fil-C + libc++ + LLVM-23 | catch=filc-libcxx-exception-ok"
 if [[ "$RC_CXX" -eq 0 ]] && grep -Fxq "$EXPECTED_CXX" "$TEST_DIR/hello_cxx.stdout"; then
   STATUS_CXX="PASS"
+  echo "FILC_PHASE test-cxx success $(( $(date +%s) - T_T4 ))"
 else
   STATUS_CXX="FAIL"
   FAILURES=$((FAILURES + 1))
+  echo "FILC_PHASE test-cxx failure $(( $(date +%s) - T_T4 ))"
 fi
 
 OVERALL_STATUS="PASS"
 if (( FAILURES > 0 )); then
   OVERALL_STATUS="FAIL"
+  echo "FILC_PHASE tests failure $(( $(date +%s) - T_TESTS_START ))"
+else
+  echo "FILC_PHASE tests success $(( $(date +%s) - T_TESTS_START ))"
 fi
 
 # ---------------------------------------------------------------------------

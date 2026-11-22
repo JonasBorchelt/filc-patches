@@ -1,5 +1,5 @@
 Subject: Clang driver Fil-C Linux core (pizfix/optfil, sarcasm, JIT CRT, version scripts, linker)
-Upstream-Base: llvmorg-22.1.8 (ca7933e47d3a3451d81e72ac174dcb5aa28b59d1)
+Upstream-Base: llvmorg-23.1.6 (5b10d2d74929eae78912771222c9855af97496f4)
 Fil-C-Head: cede3de02b42b58a14acc9ce39c9894ab952a915 (branch deluge)
 
 Implements the Fil-C Linux Clang driver: pizfix/optfil sysroot and include
@@ -44,12 +44,17 @@ Rebase-Notes (llvmorg-21.1.8 -> llvmorg-22.1.8):
   - Gnu.cpp & CommonArgs.cpp: getStaticPIE() moved from Gnu.cpp to CommonArgs.cpp in LLVM 22; applied -static -> -static-pie override in CommonArgs.cpp.
   - Linux.cpp: replaced options::OPT_nostdinc with options::OPT_nostdinc (Options moved to clang::options in LLVM 22).
 
+
+Rebase-Notes (llvmorg-22.1.8 -> llvmorg-23.1.6):
+  - Driver.h & Driver.cpp: context updated for ClangExecutable -> DriverExecutable rename in LLVM 23.
+  - Gnu.cpp: updated Linker::ConstructJob for moved OPT_u and addOffloadRTLibs() replacement of addHIPRuntimeLibArgs().
+
 ---
 diff --git a/clang/include/clang/Basic/DiagnosticDriverKinds.td b/clang/include/clang/Basic/DiagnosticDriverKinds.td
-index db0f521b7..31500ad22 100644
+index ae3eecc60..e34335e7f 100644
 --- a/clang/include/clang/Basic/DiagnosticDriverKinds.td
 +++ b/clang/include/clang/Basic/DiagnosticDriverKinds.td
-@@ -212,6 +212,16 @@ def err_drv_invalid_diagnotics_misexpect_tolerance : Error<
+@@ -229,6 +229,16 @@ def err_drv_invalid_diagnotics_misexpect_tolerance : Error<
    "invalid argument in '%0', only integers are supported">;
  def err_drv_missing_argument : Error<
    "argument to '%0' is missing (expected %1 value%s1)">;
@@ -67,10 +72,10 @@ index db0f521b7..31500ad22 100644
    "invalid Xarch argument: '%0', options requiring arguments are unsupported">;
  def err_drv_Xopenmp_target_missing_triple : Error<
 diff --git a/clang/include/clang/Basic/DiagnosticGroups.td b/clang/include/clang/Basic/DiagnosticGroups.td
-index b7c5195e2..24f199ebf 100644
+index b3c3b25aa..f4de2c28b 100644
 --- a/clang/include/clang/Basic/DiagnosticGroups.td
 +++ b/clang/include/clang/Basic/DiagnosticGroups.td
-@@ -140,6 +140,10 @@ def MathErrnoEnabledWithVecLib : DiagGroup<"math-errno-enabled-with-veclib">;
+@@ -162,6 +162,10 @@ def MathErrnoEnabledWithVecLib : DiagGroup<"math-errno-enabled-with-veclib">;
  
  def FrameAddress : DiagGroup<"frame-address">;
  def FreeNonHeapObject : DiagGroup<"free-nonheap-object">;
@@ -82,10 +87,10 @@ index b7c5195e2..24f199ebf 100644
  def EnumTooLarge : DiagGroup<"enum-too-large">;
  def UnsupportedNan : DiagGroup<"unsupported-nan">;
 diff --git a/clang/include/clang/Driver/Driver.h b/clang/include/clang/Driver/Driver.h
-index b7bd1bc8a..b05ab8fd8 100644
+index eece9ac52..704bef051 100644
 --- a/clang/include/clang/Driver/Driver.h
 +++ b/clang/include/clang/Driver/Driver.h
-@@ -179,6 +179,10 @@ public:
+@@ -169,6 +169,10 @@ public:
    /// command line.
    std::string Dir;
  
@@ -93,14 +98,14 @@ index b7bd1bc8a..b05ab8fd8 100644
 +  bool HasOptfil;
 +  std::string PizfixRoot;
 +
-   /// The original path to the clang executable.
-   std::string ClangExecutable;
+   /// The original path to the driver executable.
+   std::string DriverExecutable;
  
 diff --git a/clang/include/clang/Driver/ToolChain.h b/clang/include/clang/Driver/ToolChain.h
-index 1425714d3..23c79be15 100644
+index 863ba1084..955fa9f9c 100644
 --- a/clang/include/clang/Driver/ToolChain.h
 +++ b/clang/include/clang/Driver/ToolChain.h
-@@ -160,6 +160,7 @@ private:
+@@ -171,6 +171,7 @@ private:
    mutable std::unique_ptr<Tool> Clang;
    mutable std::unique_ptr<Tool> Flang;
    mutable std::unique_ptr<Tool> Assemble;
@@ -108,7 +113,7 @@ index 1425714d3..23c79be15 100644
    mutable std::unique_ptr<Tool> Link;
    mutable std::unique_ptr<Tool> StaticLibTool;
    mutable std::unique_ptr<Tool> IfsMerge;
-@@ -174,6 +175,7 @@ private:
+@@ -185,6 +186,7 @@ private:
    Tool *getStaticLibTool() const;
    Tool *getIfsMerge() const;
    Tool *getClangAs() const;
@@ -117,10 +122,10 @@ index 1425714d3..23c79be15 100644
    Tool *getOffloadPackager() const;
    Tool *getLinkerWrapper() const;
 diff --git a/clang/include/clang/Options/Options.td b/clang/include/clang/Options/Options.td
-index b2b8dc5d4..c85d2beff 100644
+index a7b94639e..fd186f1bf 100644
 --- a/clang/include/clang/Options/Options.td
 +++ b/clang/include/clang/Options/Options.td
-@@ -748,6 +748,33 @@ def gcc_toolchain : Joined<["--"], "gcc-toolchain=">, Flags<[NoXarchOption]>,
+@@ -751,6 +751,33 @@ def gcc_toolchain : Joined<["--"], "gcc-toolchain=">, Flags<[NoXarchOption]>,
  def gcc_triple_EQ : Joined<["--"], "gcc-triple=">,
    Visibility<[ClangOption, FlangOption]>,
    HelpText<"Search for the GCC installation with the specified triple.">;
@@ -154,7 +159,7 @@ index b2b8dc5d4..c85d2beff 100644
  def CC : Flag<["-"], "CC">, Visibility<[ClangOption, CC1Option]>,
    Group<Preprocessor_Group>,
      HelpText<"Include comments from within macros in preprocessed output">,
-@@ -1660,6 +1687,9 @@ defm auto_import : BoolFOption<"auto-import",
+@@ -1718,6 +1745,9 @@ defm auto_import : BoolFOption<"auto-import",
  def offload_EQ : CommaJoined<["--"], "offload=">, Flags<[NoXarchOption]>, Alias<offload_targets_EQ>,
    HelpText<"Specify comma-separated list of offloading target triples (CUDA and HIP only)">;
  
@@ -164,7 +169,7 @@ index b2b8dc5d4..c85d2beff 100644
  // This flag is only here so we can test the named loops implementation
  // in C++ mode and C language modes before C2y to make sure it actually
  // works; it should be removed once the syntax of the feature is stable
-@@ -6116,6 +6146,7 @@ def noprebind : Flag<["-"], "noprebind">;
+@@ -6481,6 +6511,7 @@ def noprebind : Flag<["-"], "noprebind">;
  def noprofilelib : Flag<["-"], "noprofilelib">;
  def noseglinkedit : Flag<["-"], "noseglinkedit">;
  def nostartfiles : Flag<["-"], "nostartfiles">, Group<Link_Group>;
@@ -173,20 +178,12 @@ index b2b8dc5d4..c85d2beff 100644
  def nostdinc : Flag<["-"], "nostdinc">,
    Visibility<[ClangOption, CLOption, DXCOption]>, Group<IncludePath_Group>,
 diff --git a/clang/lib/Driver/Driver.cpp b/clang/lib/Driver/Driver.cpp
-index eb3f9cbea..26b5f09ad 100644
+index e606cdc4c..c629f697b 100644
 --- a/clang/lib/Driver/Driver.cpp
 +++ b/clang/lib/Driver/Driver.cpp
-@@ -168,6 +168,7 @@ std::string CUIDOptions::getCUID(StringRef InputFile,
-   }
-   return CUID;
- }
-+
- Driver::Driver(StringRef ClangExecutable, StringRef TargetTriple,
-                DiagnosticsEngine &Diags, std::string Title,
-                IntrusiveRefCntPtr<llvm::vfs::FileSystem> VFS)
-@@ -189,6 +190,20 @@ Driver::Driver(StringRef ClangExecutable, StringRef TargetTriple,
-   Name = std::string(llvm::sys::path::filename(ClangExecutable));
-   Dir = std::string(llvm::sys::path::parent_path(ClangExecutable));
+@@ -197,6 +197,20 @@ Driver::Driver(StringRef DriverExecutable, StringRef TargetTriple,
+   Name = std::string(llvm::sys::path::filename(DriverExecutable));
+   Dir = std::string(llvm::sys::path::parent_path(DriverExecutable));
  
 +  {
 +    SmallString<128> P(Dir);
@@ -205,7 +202,7 @@ index eb3f9cbea..26b5f09ad 100644
    if ((!SysRoot.empty()) && llvm::sys::path::is_relative(SysRoot)) {
      // Prepend InstalledDir if SysRoot is relative
      SmallString<128> P(Dir);
-@@ -1512,6 +1527,26 @@ Compilation *Driver::BuildCompilation(ArrayRef<const char *> ArgList) {
+@@ -1502,6 +1516,26 @@ Compilation *Driver::BuildCompilation(ArrayRef<const char *> ArgList) {
      if (VFS->setCurrentWorkingDirectory(WD->getValue()))
        Diag(diag::err_drv_unable_to_set_working_directory) << WD->getValue();
  
@@ -232,7 +229,7 @@ index eb3f9cbea..26b5f09ad 100644
    // Check for missing include directories.
    if (!Diags.isIgnored(diag::warn_missing_include_dirs, SourceLocation())) {
      for (auto IncludeDir : Args.getAllArgValues(options::OPT_I_Group)) {
-@@ -1623,8 +1658,10 @@ Compilation *Driver::BuildCompilation(ArrayRef<const char *> ArgList) {
+@@ -1613,8 +1647,10 @@ Compilation *Driver::BuildCompilation(ArrayRef<const char *> ArgList) {
        CompilerPath = Split.second;
      }
    }
@@ -244,7 +241,7 @@ index eb3f9cbea..26b5f09ad 100644
    if (const Arg *A = Args.getLastArg(options::OPT__dyld_prefix_EQ))
      DyldPrefix = A->getValue();
  
-@@ -5422,6 +5459,12 @@ void Driver::BuildJobs(Compilation &C) const {
+@@ -5637,6 +5673,12 @@ void Driver::BuildJobs(Compilation &C) const {
    (void)C.getArgs().hasArg(options::OPT_driver_mode);
    (void)C.getArgs().hasArg(options::OPT_rsp_quoting);
  
@@ -258,10 +255,10 @@ index eb3f9cbea..26b5f09ad 100644
      // Match ClangAs and other derived assemblers of Tool. ClangAs uses a
      // longer ShortName "clang integrated assembler" while other assemblers just
 diff --git a/clang/lib/Driver/ToolChain.cpp b/clang/lib/Driver/ToolChain.cpp
-index 77a2c73f0..4f9b72468 100644
+index f894a0635..ad74e7267 100644
 --- a/clang/lib/Driver/ToolChain.cpp
 +++ b/clang/lib/Driver/ToolChain.cpp
-@@ -596,6 +596,12 @@ Tool *ToolChain::getClangAs() const {
+@@ -743,6 +743,12 @@ Tool *ToolChain::getClangAs() const {
    return Assemble.get();
  }
  
@@ -274,7 +271,7 @@ index 77a2c73f0..4f9b72468 100644
  Tool *ToolChain::getLink() const {
    if (!Link)
      Link.reset(buildLinker());
-@@ -1086,9 +1092,19 @@ Tool *ToolChain::SelectTool(const JobAction &JA) const {
+@@ -1244,9 +1250,19 @@ Tool *ToolChain::SelectTool(const JobAction &JA) const {
    if (D.IsFlangMode() && getDriver().ShouldUseFlangCompiler(JA)) return getFlang();
    if (getDriver().ShouldUseClangCompiler(JA)) return getClang();
    Action::ActionClass AC = JA.getKind();
@@ -297,7 +294,7 @@ index 77a2c73f0..4f9b72468 100644
    return getTool(AC);
  }
  
-@@ -1543,6 +1559,7 @@ void ToolChain::AddCXXStdlibLibArgs(const ArgList &Args,
+@@ -1781,6 +1797,7 @@ void ToolChain::AddCXXStdlibLibArgs(const ArgList &Args,
      CmdArgs.push_back("-lc++");
      if (Args.hasArg(options::OPT_fexperimental_library))
        CmdArgs.push_back("-lc++experimental");
@@ -306,10 +303,10 @@ index 77a2c73f0..4f9b72468 100644
  
    case ToolChain::CST_Libstdcxx:
 diff --git a/clang/lib/Driver/ToolChains/Arch/X86.cpp b/clang/lib/Driver/ToolChains/Arch/X86.cpp
-index 4fcb744db..bc24e7689 100644
+index d0108e5d9..3d83ed234 100644
 --- a/clang/lib/Driver/ToolChains/Arch/X86.cpp
 +++ b/clang/lib/Driver/ToolChains/Arch/X86.cpp
-@@ -100,7 +100,7 @@ std::string x86::getX86TargetCPU(const Driver &D, const ArgList &Args,
+@@ -102,7 +102,7 @@ std::string x86::getX86TargetCPU(const Driver &D, const ArgList &Args,
  
    // Everything else goes to x86-64 in 64-bit mode.
    if (Is64Bit)
@@ -319,10 +316,10 @@ index 4fcb744db..bc24e7689 100644
    switch (Triple.getOS()) {
    case llvm::Triple::NetBSD:
 diff --git a/clang/lib/Driver/ToolChains/Clang.cpp b/clang/lib/Driver/ToolChains/Clang.cpp
-index 3fd5eef60..c14c077f3 100644
+index db7893c54..56a10bdea 100644
 --- a/clang/lib/Driver/ToolChains/Clang.cpp
 +++ b/clang/lib/Driver/ToolChains/Clang.cpp
-@@ -1058,6 +1058,10 @@ void Clang::AddPreprocessingOptions(Compilation &C, const JobAction &JA,
+@@ -1078,6 +1078,10 @@ void Clang::AddPreprocessingOptions(Compilation &C, const JobAction &JA,
      } else if (A->getOption().matches(options::OPT_ibuiltininc)) {
        // This is used only by the driver. No need to pass to cc1.
        continue;
@@ -333,7 +330,7 @@ index 3fd5eef60..c14c077f3 100644
      }
  
      // Not translated, render as usual.
-@@ -1104,13 +1108,15 @@ void Clang::AddPreprocessingOptions(Compilation &C, const JobAction &JA,
+@@ -1123,13 +1127,15 @@ void Clang::AddPreprocessingOptions(Compilation &C, const JobAction &JA,
    if (Arg *A = Args.getLastArg(options::OPT_I_))
      D.Diag(diag::err_drv_I_dash_not_supported) << A->getAsString(Args);
  
@@ -356,7 +353,7 @@ index 3fd5eef60..c14c077f3 100644
      }
    }
  
-@@ -2196,7 +2202,8 @@ void Clang::AddX86TargetArgs(const ArgList &Args,
+@@ -2233,7 +2239,8 @@ void Clang::AddX86TargetArgs(const ArgList &Args,
  
    // Default to "generic" unless -march is present or targetting the PS4/PS5.
    std::string TuneCPU;
@@ -366,7 +363,7 @@ index 3fd5eef60..c14c077f3 100644
      TuneCPU = "generic";
  
    // Override based on -mtune.
-@@ -6913,7 +6920,9 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
+@@ -7311,7 +7318,9 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
  
    Args.AddLastArg(CmdArgs, options::OPT_fstrict_flex_arrays_EQ);
  
@@ -377,7 +374,7 @@ index 3fd5eef60..c14c077f3 100644
  
    Args.addOptInFlag(CmdArgs, options::OPT_mspeculative_load_hardening,
                      options::OPT_mno_speculative_load_hardening);
-@@ -7690,6 +7699,14 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
+@@ -8218,6 +8227,14 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
      }
    }
  
@@ -392,7 +389,7 @@ index 3fd5eef60..c14c077f3 100644
    // This needs to run after -Xclang argument forwarding to pick up the target
    // features enabled through -Xclang -target-feature flags.
    SanitizeArgs.addArgs(TC, Args, CmdArgs, InputType);
-@@ -8913,6 +8930,82 @@ void ClangAs::ConstructJob(Compilation &C, const JobAction &JA,
+@@ -9489,6 +9506,82 @@ void ClangAs::ConstructJob(Compilation &C, const JobAction &JA,
    }
  }
  
@@ -507,10 +504,10 @@ index 9adad5c54..d06532185 100644
  class LLVM_LIBRARY_VISIBILITY OffloadBundler final : public Tool {
  public:
 diff --git a/clang/lib/Driver/ToolChains/CommonArgs.cpp b/clang/lib/Driver/ToolChains/CommonArgs.cpp
-index 10a1a412e..0da3ccc73 100644
+index 08c06951c..0b7939a0f 100644
 --- a/clang/lib/Driver/ToolChains/CommonArgs.cpp
 +++ b/clang/lib/Driver/ToolChains/CommonArgs.cpp
-@@ -2164,7 +2164,11 @@ tools::ParsePICArgs(const ToolChain &ToolChain, const ArgList &Args) {
+@@ -2223,7 +2223,11 @@ tools::ParsePICArgs(const ToolChain &ToolChain, const ArgList &Args) {
  }
  
  bool tools::getStaticPIE(const ArgList &Args, const ToolChain &TC) {
@@ -524,7 +521,7 @@ index 10a1a412e..0da3ccc73 100644
      const Driver &D = TC.getDriver();
      const llvm::opt::OptTable &Opts = D.getOpts();
 diff --git a/clang/lib/Driver/ToolChains/Gnu.cpp b/clang/lib/Driver/ToolChains/Gnu.cpp
-index cb6a9b242..466e14f07 100644
+index 2fad9327d..1fddb0f90 100644
 --- a/clang/lib/Driver/ToolChains/Gnu.cpp
 +++ b/clang/lib/Driver/ToolChains/Gnu.cpp
 @@ -32,6 +32,8 @@
@@ -700,7 +697,7 @@ index cb6a9b242..466e14f07 100644
  void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
                                             const InputInfo &Output,
                                             const InputInfoList &Inputs,
-@@ -346,6 +478,8 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+@@ -343,6 +475,8 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
        CmdArgs.push_back("--no-relax");
    }
  
@@ -709,10 +706,11 @@ index cb6a9b242..466e14f07 100644
    const bool IsShared = Args.hasArg(options::OPT_shared);
    if (IsShared)
      CmdArgs.push_back("-shared");
-@@ -375,6 +509,40 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+@@ -372,7 +506,41 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
    CmdArgs.push_back("-o");
    CmdArgs.push_back(Output.getFilename());
  
+-  Args.addAllArgs(CmdArgs, {options::OPT_s, options::OPT_t, options::OPT_u});
 +  auto GetYoloLibPath = [&] (const StringRef str) -> std::string {
 +    if (ToolChain.getDriver().HasPizfix) {
 +      std::string BasePath;
@@ -747,10 +745,11 @@ index cb6a9b242..466e14f07 100644
 +    return std::string(P);
 +  };
 +
++  Args.addAllArgs(CmdArgs, {options::OPT_s, options::OPT_t});
+ 
    if (!Args.hasArg(options::OPT_nostdlib, options::OPT_nostartfiles,
                     options::OPT_r)) {
-     if (!isAndroid && !IsIAMCU) {
-@@ -390,9 +558,9 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+@@ -389,9 +557,9 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
            crt1 = "crt1.o";
        }
        if (crt1)
@@ -762,7 +761,7 @@ index cb6a9b242..466e14f07 100644
      }
  
      if (IsVE) {
-@@ -401,11 +569,13 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+@@ -400,11 +568,13 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
      }
  
      if (IsIAMCU)
@@ -779,7 +778,7 @@ index cb6a9b242..466e14f07 100644
          std::string crtbegin = ToolChain.getCompilerRT(Args, "crtbegin",
                                                         ToolChain::FT_Object);
          if (ToolChain.getVFS().exists(crtbegin))
-@@ -421,7 +591,7 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+@@ -420,7 +590,7 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
            crtbegin = isAndroid ? "crtbegin_dynamic.o" : "crtbeginS.o";
          else
            crtbegin = isAndroid ? "crtbegin_dynamic.o" : "crtbegin.o";
@@ -788,13 +787,11 @@ index cb6a9b242..466e14f07 100644
        }
        CmdArgs.push_back(Args.MakeArgString(P));
      }
-@@ -435,9 +605,56 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
-           Args.MakeArgString(ToolChain.GetFilePath("crt_pad_segment.o")));
-   }
+@@ -436,7 +606,54 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
  
--  Args.addAllArgs(CmdArgs, {options::OPT_L, options::OPT_u});
-+  Args.AddAllArgs(CmdArgs, options::OPT_L);
-+
+   Args.addAllArgs(CmdArgs, {options::OPT_L});
+ 
+-  ToolChain.AddFilePathLibArgs(Args, CmdArgs);
 +  if (ToolChain.getDriver().HasPizfix) {
 +    std::string BasePath;
 +    if (Arg *A = Args.getLastArg(options::OPT_filc_crt_path)) {
@@ -838,16 +835,15 @@ index cb6a9b242..466e14f07 100644
 +    CmdArgs.push_back("/usr/lib");
 +  }
 +  
-+  Args.AddAllArgs(CmdArgs, options::OPT_u);
- 
--  ToolChain.AddFilePathLibArgs(Args, CmdArgs);
++  Args.addAllArgs(CmdArgs, {options::OPT_u});
++
 +  // This is such a hack!!! But so is everything else I'm doing in this file, so like whatever.
 +  if ((false))
 +    ToolChain.AddFilePathLibArgs(Args, CmdArgs);
  
-   if (D.isUsingLTO())
-     addLTOOptions(ToolChain, Args, CmdArgs, Output, Inputs,
-@@ -449,14 +666,96 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+   if (auto LTO = ToolChain.getLTOMode(Args); LTO != LTOK_None)
+     addLTOOptions(ToolChain, Args, CmdArgs, Output, Inputs, LTO == LTOK_Thin);
+@@ -447,14 +664,96 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
    bool NeedsSanitizerDeps = addSanitizerRuntimes(ToolChain, Args, CmdArgs);
    bool NeedsXRayDeps = addXRayRuntime(ToolChain, Args, CmdArgs);
    addLinkerCompressDebugSectionsOption(ToolChain, Args, CmdArgs);
@@ -933,7 +929,7 @@ index cb6a9b242..466e14f07 100644
 +      Args.MakeArgString(std::string("--version-script=") + OutputVersionScriptFilename));
 +  }
 +
-   addHIPRuntimeLibArgs(ToolChain, C, Args, CmdArgs);
+   ToolChain.addOffloadRTLibs(C.getActiveOffloadKinds(), Args, CmdArgs);
  
    // The profile runtime also needs access to system libraries.
    getToolChain().addProfileRTLibs(Args, CmdArgs);
@@ -945,7 +941,7 @@ index cb6a9b242..466e14f07 100644
        !Args.hasArg(options::OPT_nostdlib, options::OPT_nodefaultlibs,
                     options::OPT_r)) {
      if (ToolChain.ShouldLinkCXXStdlib(Args)) {
-@@ -486,7 +785,25 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+@@ -484,7 +783,25 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
    }
  
    if (!Args.hasArg(options::OPT_nostdlib, options::OPT_r)) {
@@ -972,7 +968,7 @@ index cb6a9b242..466e14f07 100644
        if (IsStatic || IsStaticPIE)
          CmdArgs.push_back("--start-group");
  
-@@ -555,8 +872,10 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+@@ -571,8 +888,10 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
      if (!Args.hasArg(options::OPT_nostartfiles) && !IsIAMCU) {
        if (HasCRTBeginEndFiles) {
          std::string P;
@@ -985,7 +981,7 @@ index cb6a9b242..466e14f07 100644
            std::string crtend = ToolChain.getCompilerRT(Args, "crtend",
                                                         ToolChain::FT_Object);
            if (ToolChain.getVFS().exists(crtend))
-@@ -570,12 +889,12 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+@@ -586,12 +905,12 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
              crtend = isAndroid ? "crtend_android.o" : "crtendS.o";
            else
              crtend = isAndroid ? "crtend_android.o" : "crtend.o";
@@ -1000,7 +996,7 @@ index cb6a9b242..466e14f07 100644
      }
    }
  
-@@ -585,6 +904,7 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+@@ -604,6 +923,7 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
    C.addCommand(std::make_unique<Command>(JA, *this,
                                           ResponseFileSupport::AtFileCurCP(),
                                           Exec, CmdArgs, Inputs, Output));
@@ -1008,7 +1004,7 @@ index cb6a9b242..466e14f07 100644
  }
  
  void tools::gnutools::Assembler::ConstructJob(Compilation &C,
-@@ -3060,15 +3380,7 @@ Generic_GCC::getDefaultUnwindTableLevel(const ArgList &Args) const {
+@@ -3103,15 +3423,7 @@ Generic_GCC::getDefaultUnwindTableLevel(const ArgList &Args) const {
  }
  
  bool Generic_GCC::isPICDefault() const {
@@ -1025,7 +1021,7 @@ index cb6a9b242..466e14f07 100644
  }
  
  bool Generic_GCC::isPIEDefault(const llvm::opt::ArgList &Args) const {
-@@ -3232,6 +3544,24 @@ void
+@@ -3274,6 +3586,24 @@ void
  Generic_GCC::addLibCxxIncludePaths(const llvm::opt::ArgList &DriverArgs,
                                     llvm::opt::ArgStringList &CC1Args) const {
    const Driver &D = getDriver();
@@ -1051,10 +1047,10 @@ index cb6a9b242..466e14f07 100644
    if (SysRoot.empty())
      SysRoot = llvm::sys::path::get_separator();
 diff --git a/clang/lib/Driver/ToolChains/Linux.cpp b/clang/lib/Driver/ToolChains/Linux.cpp
-index d525b417b..bff15844c 100644
+index 8d30a5ead..e243ce5b1 100644
 --- a/clang/lib/Driver/ToolChains/Linux.cpp
 +++ b/clang/lib/Driver/ToolChains/Linux.cpp
-@@ -240,6 +240,9 @@ Linux::Linux(const Driver &D, const llvm::Triple &Triple, const ArgList &Args)
+@@ -243,6 +243,9 @@ Linux::Linux(const Driver &D, const llvm::Triple &Triple, const ArgList &Args)
  
    Generic_GCC::PushPPaths(PPaths);
  
@@ -1064,7 +1060,7 @@ index d525b417b..bff15844c 100644
    Distro Distro(D.getVFS(), Triple);
  
    if (Distro.IsAlpineLinux() || Triple.isAndroid()) {
-@@ -387,6 +390,8 @@ unsigned Linux::GetDefaultDwarfVersion() const {
+@@ -391,6 +394,8 @@ unsigned Linux::GetDefaultDwarfVersion() const {
  }
  
  ToolChain::CXXStdlibType Linux::GetDefaultCXXStdlibType() const {
@@ -1073,7 +1069,7 @@ index d525b417b..bff15844c 100644
    if (getTriple().isAndroid())
      return ToolChain::CST_Libcxx;
    return ToolChain::CST_Libstdcxx;
-@@ -558,6 +563,24 @@ std::string Linux::getDynamicLinker(const ArgList &Args) const {
+@@ -565,6 +570,24 @@ std::string Linux::getDynamicLinker(const ArgList &Args) const {
    const llvm::Triple::ArchType Arch = getArch();
    const llvm::Triple &Triple = getTriple();
  
@@ -1098,7 +1094,7 @@ index d525b417b..bff15844c 100644
    const Distro Distro(getDriver().getVFS(), Triple);
  
    if (Triple.isAndroid()) {
-@@ -744,6 +767,58 @@ void Linux::AddClangSystemIncludeArgs(const ArgList &DriverArgs,
+@@ -761,6 +784,58 @@ void Linux::AddClangSystemIncludeArgs(const ArgList &DriverArgs,
    const Driver &D = getDriver();
    std::string SysRoot = computeSysRoot();
  
@@ -1157,7 +1153,7 @@ index d525b417b..bff15844c 100644
    if (DriverArgs.hasArg(options::OPT_nostdinc))
      return;
  
-@@ -751,8 +826,6 @@ void Linux::AddClangSystemIncludeArgs(const ArgList &DriverArgs,
+@@ -768,8 +843,6 @@ void Linux::AddClangSystemIncludeArgs(const ArgList &DriverArgs,
    // GCC_INCLUDE_DIR (private headers) in GCC. Note: the include directory
    // contains some files conflicting with system /usr/include. musl systems
    // prefer the /usr/include copies which are more relevant.

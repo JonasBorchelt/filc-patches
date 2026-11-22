@@ -1,0 +1,367 @@
+#!/usr/bin/env python3
+"""
+DAG-validated Wave/Tier orchestrator for Fil-C userland ports.
+
+Discovers recipes in ports/*/PORT, validates dependencies (rejecting cycles and
+unknown dependencies), schedules ports in topological tier order, propagates
+'blocked' status to transitive dependents when a dependency fails, and writes a
+consolidated report (JSON + text) with policy metrics.
+"""
+
+import argparse
+import collections
+import datetime
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+VALID_POLICY_CLASSES = {
+    "P0-Clean",
+    "P1-Toolchain",
+    "P2-Package",
+    "P3-BuildOpt",
+    "P4-Audit",
+}
+VALID_BUILD_SYSTEMS = {"autotools", "cmake", "make", "meson", "custom"}
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+PORT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._+-]{0,63}$")
+
+WAVE_TIERS = {
+    1: {0, 1},
+    2: {2, 3},
+    3: {4, 5},
+}
+
+
+def parse_port_file(port_file: str) -> dict:
+    """Parse top-level KEY="VALUE" / KEY=VALUE assignments from a PORT recipe."""
+    data = {}
+    with open(port_file, "r", encoding="utf-8") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("port_") and "()" in line:
+                break
+            m = re.match(r'^([A-Z0-9_]+)=(.*)$', line)
+            if not m:
+                continue
+            key, val = m.group(1), m.group(2).strip()
+            if len(val) >= 2 and ((val[0] == '"' and val[-1] == '"') or (val[0] == "'" and val[-1] == "'")):
+                val = val[1:-1]
+            data[key] = val
+    return data
+
+
+def count_recipe_patches(port_dir: str):
+    series = os.path.join(port_dir, "patches", "series")
+    if not os.path.isfile(series):
+        return 0, 0, 0, 0
+    pcount = added = removed = files = 0
+    with open(series, "r", encoding="utf-8") as f:
+        for raw in f:
+            line = raw.split("#", 1)[0].strip()
+            if not line:
+                continue
+            pfile = os.path.join(port_dir, "patches", line)
+            if not os.path.isfile(pfile):
+                raise ValueError(f"missing patch file referenced by {series}: {line}")
+            pcount += 1
+            in_diff = False
+            pf = 0
+            for praw in open(pfile, "r", encoding="utf-8", errors="replace"):
+                ln = praw.rstrip("\r\n")
+                if ln.startswith("diff --git "):
+                    in_diff = True
+                    pf += 1
+                elif not in_diff and ln.startswith("--- "):
+                    in_diff = True
+                elif in_diff:
+                    if ln.startswith("+") and not ln.startswith("+++ "):
+                        added += 1
+                    elif ln.startswith("-") and not ln.startswith("--- "):
+                        removed += 1
+            if pf == 0:
+                pf = 1
+            files += pf
+    return pcount, added, removed, files
+
+
+def load_ports(ports_dir: str) -> dict:
+    ports = {}
+    if not os.path.isdir(ports_dir):
+        raise ValueError(f"ports directory not found: {ports_dir}")
+
+    for entry in sorted(os.listdir(ports_dir)):
+        pdir = os.path.join(ports_dir, entry)
+        pfile = os.path.join(pdir, "PORT")
+        if not os.path.isdir(pdir) or not os.path.isfile(pfile):
+            continue
+        meta = parse_port_file(pfile)
+        name = meta.get("NAME", "")
+        if name != entry or not PORT_NAME_RE.match(name):
+            raise ValueError(f"{pfile}: invalid or mismatched NAME={name!r}")
+        for req in ("VERSION", "LICENSE", "UPSTREAM_URL", "UPSTREAM_SHA256", "EXTRACT_DIR", "TIER", "BUILD_SYSTEM", "POLICY_CLASS"):
+            if not meta.get(req):
+                raise ValueError(f"{pfile}: missing required field {req}")
+        if not SHA256_RE.match(meta["UPSTREAM_SHA256"]):
+            raise ValueError(f"{pfile}: UPSTREAM_SHA256 must be 64 lowercase hex chars")
+        if meta["POLICY_CLASS"] not in VALID_POLICY_CLASSES:
+            raise ValueError(f"{pfile}: invalid POLICY_CLASS={meta['POLICY_CLASS']!r}")
+        if meta["BUILD_SYSTEM"] not in VALID_BUILD_SYSTEMS:
+            raise ValueError(f"{pfile}: invalid BUILD_SYSTEM={meta['BUILD_SYSTEM']!r}")
+        try:
+            tier = int(meta["TIER"])
+        except ValueError as exc:
+            raise ValueError(f"{pfile}: invalid TIER={meta['TIER']!r}") from exc
+
+        deps = [d for d in meta.get("DEPS", "").split() if d]
+        pcount, added, removed, files = count_recipe_patches(pdir)
+        ports[name] = {
+            "name": name,
+            "version": meta["VERSION"],
+            "license": meta["LICENSE"],
+            "tier": tier,
+            "deps": deps,
+            "build_system": meta["BUILD_SYSTEM"],
+            "policy_class": meta["POLICY_CLASS"],
+            "upstream_url": meta["UPSTREAM_URL"],
+            "upstream_sha256": meta["UPSTREAM_SHA256"],
+            "patch_count": pcount,
+            "added_lines": added,
+            "removed_lines": removed,
+            "files_changed": files,
+        }
+    return ports
+
+
+def select_with_deps(ports: dict, initial_names: list) -> set:
+    selected = set()
+    stack = list(initial_names)
+    while stack:
+        cur = stack.pop()
+        if cur not in ports:
+            raise ValueError(f"unknown port: {cur}")
+        if cur in selected:
+            continue
+        selected.add(cur)
+        for dep in ports[cur]["deps"]:
+            if dep not in ports:
+                raise ValueError(f"port '{cur}' depends on unknown port '{dep}'")
+            stack.append(dep)
+    return selected
+
+
+def topo_sort(ports: dict, selected: set) -> list:
+    indeg = {n: 0 for n in selected}
+    rdeps = collections.defaultdict(list)
+    for n in selected:
+        for d in ports[n]["deps"]:
+            if d not in selected:
+                raise ValueError(f"port '{n}' depends on unselected/unknown port '{d}'")
+            indeg[n] += 1
+            rdeps[d].append(n)
+
+    ready = sorted([n for n, deg in indeg.items() if deg == 0], key=lambda x: (ports[x]["tier"], x))
+    order = []
+    while ready:
+        cur = ready.pop(0)
+        order.append(cur)
+        for nxt in rdeps[cur]:
+            indeg[nxt] -= 1
+            if indeg[nxt] == 0:
+                ready.append(nxt)
+                ready.sort(key=lambda x: (ports[x]["tier"], x))
+
+    if len(order) != len(selected):
+        cycle_nodes = sorted(selected - set(order))
+        raise ValueError(f"dependency cycle detected among ports: {', '.join(cycle_nodes)}")
+    return order
+
+
+def find_root_blockers(port_name: str, ports: dict, statuses: dict) -> list:
+    blockers = []
+    visited = set()
+    stack = list(ports[port_name]["deps"])
+    while stack:
+        d = stack.pop()
+        if d in visited:
+            continue
+        visited.add(d)
+        st = statuses.get(d, {}).get("status")
+        if st == "failed":
+            blockers.append(d)
+        elif st == "blocked":
+            stack.extend(ports[d]["deps"])
+    return sorted(set(blockers))
+
+
+def main() -> int:
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    parser = argparse.ArgumentParser(description="Build and test Fil-C userland ports in DAG order")
+    parser.add_argument("work_root", nargs="?", default=os.path.join(repo_root, ".work", "ports"))
+    parser.add_argument("--ports-dir", default=os.path.join(repo_root, "ports"))
+    parser.add_argument("--builder", default=os.path.join(repo_root, "scripts", "build-port"))
+    parser.add_argument("--wave", type=int, choices=(1, 2, 3), default=0)
+    parser.add_argument("--tiers", default="", help="Comma-separated tier numbers (e.g. 0,1)")
+    parser.add_argument("--ports", default="", help="Comma-separated port names")
+    parser.add_argument("--dry-run", action="store_true", help="Validate DAG and print plan only")
+    args = parser.parse_args()
+
+    ports = load_ports(args.ports_dir)
+    if not ports:
+        print("error: no port recipes found", file=sys.stderr)
+        return 1
+
+    if args.ports:
+        wanted = [p.strip() for p in args.ports.split(",") if p.strip()]
+    elif args.tiers:
+        tier_set = {int(t.strip()) for t in args.tiers.split(",") if t.strip()}
+        wanted = [n for n, m in ports.items() if m["tier"] in tier_set]
+    elif args.wave:
+        tier_set = WAVE_TIERS[args.wave]
+        wanted = [n for n, m in ports.items() if m["tier"] in tier_set]
+    else:
+        wanted = sorted(ports.keys())
+
+    selected = select_with_deps(ports, wanted)
+    order = topo_sort(ports, selected)
+
+    unmodified = sum(1 for n in order if ports[n]["patch_count"] == 0)
+    patched = len(order) - unmodified
+    total_patches = sum(ports[n]["patch_count"] for n in order)
+    total_added = sum(ports[n]["added_lines"] for n in order)
+    total_removed = sum(ports[n]["removed_lines"] for n in order)
+
+    if args.dry_run:
+        print(f"DAG VALID: {len(order)} ports (unmodified={unmodified}, patched={patched}, patches={total_patches}, +{total_added}/-{total_removed})")
+        for idx, n in enumerate(order, 1):
+            m = ports[n]
+            deps_str = ",".join(m["deps"]) if m["deps"] else "-"
+            print(
+                f"  {idx:2d}. [T{m['tier']}] {n:16s} {m['version']:10s} "
+                f"{m['policy_class']:12s} patches={m['patch_count']} (+{m['added_lines']}/-{m['removed_lines']}) deps={deps_str}"
+            )
+        return 0
+
+    work_root = os.path.abspath(args.work_root)
+    state_dir = os.path.join(work_root, "ports-state")
+    os.makedirs(state_dir, exist_ok=True)
+
+    t0 = time.monotonic()
+    results = {}
+    env = os.environ.copy()
+    env["FILC_PORTS_DIR"] = os.path.abspath(args.ports_dir)
+
+    for idx, name in enumerate(order, 1):
+        meta = ports[name]
+        blockers = find_root_blockers(name, ports, results)
+        if blockers:
+            print(f"[{idx}/{len(order)}] BLOCKED {name} (blocked by: {', '.join(blockers)})", flush=True)
+            rec = {
+                "name": name,
+                "version": meta["version"],
+                "tier": meta["tier"],
+                "status": "blocked",
+                "policy_class": meta["policy_class"],
+                "deps": meta["deps"],
+                "blocked_by": blockers,
+                "duration_seconds": 0,
+                "patch_count": meta["patch_count"],
+                "added_lines": meta["added_lines"],
+                "removed_lines": meta["removed_lines"],
+                "files_changed": meta["files_changed"],
+            }
+            results[name] = rec
+            with open(os.path.join(state_dir, f"{name}.json"), "w", encoding="utf-8") as f:
+                json.dump(rec, f, indent=2, sort_keys=True)
+                f.write("\n")
+            continue
+
+        print(f"[{idx}/{len(order)}] BUILDING {name} {meta['version']} (T{meta['tier']}, {meta['policy_class']})", flush=True)
+        proc = subprocess.run([args.builder, name, work_root], env=env, check=False)
+        state_file = os.path.join(state_dir, f"{name}.json")
+        if os.path.isfile(state_file):
+            with open(state_file, "r", encoding="utf-8") as f:
+                rec = json.load(f)
+            rec.setdefault("blocked_by", [])
+        else:
+            rec = {
+                "name": name,
+                "version": meta["version"],
+                "tier": meta["tier"],
+                "status": "tested" if proc.returncode == 0 else "failed",
+                "policy_class": meta["policy_class"],
+                "deps": meta["deps"],
+                "blocked_by": [],
+                "duration_seconds": 0,
+                "patch_count": meta["patch_count"],
+                "added_lines": meta["added_lines"],
+                "removed_lines": meta["removed_lines"],
+                "files_changed": meta["files_changed"],
+            }
+        if proc.returncode != 0 and rec["status"] not in ("failed", "blocked"):
+            rec["status"] = "failed"
+        results[name] = rec
+
+    counts = collections.Counter(r["status"] for r in results.values())
+    total_dur = int(time.monotonic() - t0)
+    summary = {
+        "updated_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "duration_seconds": total_dur,
+        "total": len(order),
+        "tested": counts.get("tested", 0),
+        "built": counts.get("built", 0),
+        "failed": counts.get("failed", 0),
+        "blocked": counts.get("blocked", 0),
+        "unmodified": unmodified,
+        "patched": patched,
+        "total_patches": total_patches,
+        "total_added_lines": total_added,
+        "total_removed_lines": total_removed,
+        "ports": [results[n] for n in order],
+    }
+
+    report_json = os.path.join(work_root, "ports-report.json")
+    with open(report_json, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, sort_keys=True)
+        f.write("\n")
+
+    lines = [
+        "================================================================================",
+        "FIL-C PORTS BUILD REPORT",
+        "================================================================================",
+        f"DATE_UTC={summary['updated_at']}",
+        f"DURATION_SECONDS={total_dur}",
+        f"PORTS_TOTAL={summary['total']}",
+        f"PORTS_TESTED={summary['tested']}",
+        f"PORTS_BUILT={summary['built']}",
+        f"PORTS_FAILED={summary['failed']}",
+        f"PORTS_BLOCKED={summary['blocked']}",
+        f"PORTS_UNMODIFIED={unmodified}",
+        f"PORTS_PATCHED={patched}",
+        f"PATCHES_TOTAL={total_patches} (+{total_added}/-{total_removed})",
+        "",
+        "PORTS:",
+    ]
+    for n in order:
+        r = results[n]
+        blk = f" blocked_by={','.join(r.get('blocked_by', []))}" if r.get("blocked_by") else ""
+        lines.append(
+            f"  {r['status']:8s} [T{r['tier']}] {r['name']:16s} {r['version']:10s} "
+            f"{r['policy_class']:12s} patches={r['patch_count']} ({r['duration_seconds']}s){blk}"
+        )
+    lines.append("================================================================================")
+    report_txt = "\n".join(lines) + "\n"
+    with open(os.path.join(work_root, "ports-report.txt"), "w", encoding="utf-8") as f:
+        f.write(report_txt)
+
+    print(report_txt, end="")
+    return 0 if summary["failed"] == 0 and summary["blocked"] == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

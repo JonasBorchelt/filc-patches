@@ -1,0 +1,35 @@
+NAME="blake3"
+VERSION="1.8.7"
+LICENSE="CC0-1.0 OR Apache-2.0"
+UPSTREAM_URL="https://github.com/BLAKE3-team/BLAKE3/archive/refs/tags/1.8.7.tar.gz"
+UPSTREAM_SHA256="c6782a28842b1c0478524ac06a4f2ede784038ee298d6e2162c0b089c4306a3c"
+EXTRACT_DIR="BLAKE3-1.8.7"
+TIER=0
+DEPS=""
+BUILD_SYSTEM="cmake"
+CMAKE_SOURCE_SUBDIR="c"
+CMAKE_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P0-Clean"
+POLICY_RATIONALE="Builds unmodified from official upstream BLAKE3 1.8.7 tag archive using SIMD C intrinsics."
+FILC_ORIGIN_REF="cede3de02b42:build_blake3.sh"
+
+port_configure() {
+  local simd_type="x86-intrinsics"
+  if [[ "$(uname -m)" == "aarch64" || "$(uname -m)" == "arm64" ]]; then
+    simd_type="neon-intrinsics"
+  fi
+  cmake -S "$SRC_DIR/c" -B "$SRC_DIR/_build" \
+    -DCMAKE_INSTALL_PREFIX="$PIZFIX" \
+    -DCMAKE_C_COMPILER="$CC" \
+    -DCMAKE_CXX_COMPILER="$CXX" \
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    -DBLAKE3_SIMD_TYPE="$simd_type"
+}
+
+port_test() {
+  "$CC" -O2 -g -I"$PIZFIX/include" -L"$PIZFIX/lib" -o "$SRC_DIR/_build/example" "$SRC_DIR/c/example.c" -lblake3
+  local got
+  got="$(printf '' | "$SRC_DIR/_build/example")"
+  test "$got" = "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+}

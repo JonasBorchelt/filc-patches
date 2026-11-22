@@ -1,0 +1,19 @@
+NAME="brotli"
+VERSION="1.2.1"
+LICENSE="MIT"
+UPSTREAM_URL="https://github.com/google/brotli/archive/refs/tags/v1.2.1.tar.gz"
+UPSTREAM_SHA256="98d35d11a78dc453aebb7d10c3748f3f73ff78c8267c0dc697b8631f67bf7e8f"
+EXTRACT_DIR="brotli-1.2.1"
+TIER=0
+DEPS=""
+BUILD_SYSTEM="cmake"
+CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Release"
+TEST_CMD=""
+POLICY_CLASS="P0-Clean"
+POLICY_RATIONALE="Builds unmodified from official upstream brotli 1.2.1 tag archive."
+FILC_ORIGIN_REF="cede3de02b42:build_brotli.sh"
+
+port_test() {
+  "$PIZFIX/bin/brotli" --version
+  printf 'filc-brotli-roundtrip-check\n' | "$PIZFIX/bin/brotli" -c | "$PIZFIX/bin/brotli" -dc | grep -qx 'filc-brotli-roundtrip-check'
+}

@@ -1,0 +1,30 @@
+NAME="zstd"
+VERSION="1.5.7"
+LICENSE="BSD-3-Clause OR GPL-2.0-only"
+UPSTREAM_URL="https://github.com/meta/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz"
+UPSTREAM_SHA256="eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3"
+EXTRACT_DIR="zstd-1.5.7"
+TIER=1
+DEPS="zlib lz4"
+BUILD_SYSTEM="make"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P3-BuildOpt"
+POLICY_RATIONALE="Uses upstream ZSTD_NO_ASM=1 build option to avoid inline assembly without patching source files."
+FILC_ORIGIN_REF="cede3de02b42:build_zstd.sh"
+
+port_build() {
+  ZSTD_NO_ASM=1 make -j "$JOBS" CC="$CC" CXX="$CXX" HAVE_ZLIB=1 HAVE_LZ4=1 HAVE_LZMA=0 \
+    CPPFLAGS="-I$PIZFIX/include" LDFLAGS="-L$PIZFIX/lib" prefix="$PIZFIX"
+}
+
+port_install() {
+  ZSTD_NO_ASM=1 make CC="$CC" CXX="$CXX" HAVE_ZLIB=1 HAVE_LZ4=1 HAVE_LZMA=0 \
+    CPPFLAGS="-I$PIZFIX/include" LDFLAGS="-L$PIZFIX/lib" prefix="$PIZFIX" install
+}
+
+port_test() {
+  "$PIZFIX/bin/zstd" --version
+  printf 'filc-zstd-roundtrip-check\n' | "$PIZFIX/bin/zstd" -c | "$PIZFIX/bin/zstd" -dc | grep -qx 'filc-zstd-roundtrip-check'
+}

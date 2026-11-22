@@ -1,0 +1,24 @@
+NAME="zlib"
+VERSION="1.4"
+LICENSE="Zlib"
+UPSTREAM_URL="https://github.com/madler/zlib/releases/download/v1.4/zlib-1.4.tar.gz"
+UPSTREAM_SHA256="02dd159783677a749c04adbdd02b55b8a2bcc7e054f51b76b549199a916ad584"
+EXTRACT_DIR="zlib-1.4"
+TIER=0
+DEPS=""
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS=""
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD="make test"
+POLICY_CLASS="P0-Clean"
+POLICY_RATIONALE="Builds unmodified from official upstream zlib 1.4 release tarball."
+FILC_ORIGIN_REF="cede3de02b42:projects/zlib.projeny"
+
+port_configure() {
+  local extra_cflags="-O3 -g"
+  if [[ "$(uname -m)" == "aarch64" || "$(uname -m)" == "arm64" ]]; then
+    extra_cflags="$extra_cflags -mno-crc"
+  fi
+  CFLAGS="$extra_cflags" ./configure --prefix="$PIZFIX"
+}

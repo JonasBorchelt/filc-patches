@@ -1,0 +1,349 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Build, install into staged Fil-C sysroot, and test a single port recipe.
+#
+# Usage: scripts/build-port <port-name> [WORK_ROOT]
+#
+# Environment:
+#   FILC_TOOLCHAIN_ROOT   Path to Stage 5 toolchain work root (default: <WORK_ROOT>/toolchain or <REPO_ROOT>/.work/toolchain)
+#   FILC_PORTS_CACHE_DIR  Tarball download cache directory (default: <WORK_ROOT>/ports-cache)
+#   FILC_PORTS_JOBS       Parallel compile jobs (default: host nproc)
+#   FILC_PORT_TIMEOUT     Per-stage command timeout in seconds (default: 900)
+#   FILC_PORT_SKIP_DEPS   Set to 1 to skip dependency installation check
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: $0 <port-name> [WORK_ROOT]" >&2
+  exit 2
+fi
+
+PORT_NAME="$1"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PORTS_DIR="${FILC_PORTS_DIR:-$REPO_ROOT/ports}"
+PORT_DIR="$PORTS_DIR/$PORT_NAME"
+PORT_FILE="$PORT_DIR/PORT"
+
+if [[ ! -f "$PORT_FILE" ]]; then
+  echo "error: port recipe not found: $PORT_FILE" >&2
+  exit 1
+fi
+
+WORK_ROOT="${2:-$REPO_ROOT/.work/ports}"
+mkdir -p "$WORK_ROOT"
+WORK_ROOT="$(cd "$WORK_ROOT" && pwd)"
+
+CACHE_DIR="${FILC_PORTS_CACHE_DIR:-$WORK_ROOT/ports-cache}"
+STATE_DIR="$WORK_ROOT/ports-state"
+BUILD_BASE="$WORK_ROOT/ports-build"
+mkdir -p "$CACHE_DIR" "$STATE_DIR" "$BUILD_BASE"
+
+# Locate Stage 5 Fil-C toolchain
+if [[ -n "${FILC_TOOLCHAIN_ROOT:-}" ]]; then
+  TOOLCHAIN_ROOT="$FILC_TOOLCHAIN_ROOT"
+elif [[ -d "$WORK_ROOT/toolchain/pizfix" ]]; then
+  TOOLCHAIN_ROOT="$WORK_ROOT/toolchain"
+else
+  TOOLCHAIN_ROOT="$REPO_ROOT/.work/toolchain"
+fi
+
+PIZFIX="${FILC_PIZFIX:-$TOOLCHAIN_ROOT/pizfix}"
+CLANG_BIN="${FILC_CLANG:-$TOOLCHAIN_ROOT/build/bin/clang}"
+CLANGXX_BIN="${FILC_CLANGXX:-$TOOLCHAIN_ROOT/build/bin/clang++}"
+LLVM_AR="${FILC_AR:-$TOOLCHAIN_ROOT/build/bin/llvm-ar}"
+LLVM_RANLIB="${FILC_RANLIB:-$TOOLCHAIN_ROOT/build/bin/llvm-ranlib}"
+
+NPROC="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)"
+JOBS="${FILC_PORTS_JOBS:-$NPROC}"
+TIMEOUT_SEC="${FILC_PORT_TIMEOUT:-900}"
+
+# Defaults for recipe variables
+NAME=""
+VERSION=""
+LICENSE=""
+UPSTREAM_URL=""
+UPSTREAM_SHA256=""
+EXTRACT_DIR=""
+TIER=""
+DEPS=""
+BUILD_SYSTEM=""
+CONFIGURE_ARGS=""
+CMAKE_ARGS=""
+CMAKE_SOURCE_SUBDIR=""
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS=""
+POLICY_RATIONALE=""
+FILC_ORIGIN_REF=""
+
+# shellcheck source=/dev/null
+source "$PORT_FILE"
+
+for req in NAME VERSION LICENSE UPSTREAM_URL UPSTREAM_SHA256 EXTRACT_DIR TIER BUILD_SYSTEM POLICY_CLASS; do
+  if [[ -z "${!req:-}" ]]; then
+    echo "error: $PORT_FILE missing required field: $req" >&2
+    exit 1
+  fi
+done
+
+if [[ "$NAME" != "$PORT_NAME" ]]; then
+  echo "error: $PORT_FILE NAME ($NAME) != directory name ($PORT_NAME)" >&2
+  exit 1
+fi
+
+T_START="$(date +%s)"
+CURRENT_STAGE="init"
+PATCH_COUNT=0
+PATCH_ADDED=0
+PATCH_REMOVED=0
+PATCH_FILES=0
+
+write_state() {
+  local status="$1"
+  local fail_stage="${2:-}"
+  local dur=$(( $(date +%s) - T_START ))
+  python3 - "$STATE_DIR/$PORT_NAME.json" "$NAME" "$VERSION" "$TIER" "$status" "$POLICY_CLASS" \
+    "$dur" "$PATCH_COUNT" "$PATCH_ADDED" "$PATCH_REMOVED" "$PATCH_FILES" "$fail_stage" "$DEPS" <<'PY'
+import json, sys
+out_path, name, ver, tier, status, policy, dur, pc, pa, pr, pf, fstage, deps = sys.argv[1:]
+rec = {
+    "name": name,
+    "version": ver,
+    "tier": int(tier),
+    "status": status,
+    "policy_class": policy,
+    "deps": [d for d in deps.split() if d],
+    "duration_seconds": max(0, int(dur)),
+    "patch_count": int(pc),
+    "added_lines": int(pa),
+    "removed_lines": int(pr),
+    "files_changed": int(pf),
+}
+if fstage:
+    rec["failed_stage"] = fstage
+with open(out_path, "w", encoding="utf-8") as f:
+    json.dump(rec, f, indent=2, sort_keys=True)
+    f.write("\n")
+PY
+}
+
+PORT_DONE=0
+on_exit() {
+  local rc=$?
+  if [[ "$PORT_DONE" != "1" ]]; then
+    echo "FILC_PORT $PORT_NAME failed stage=$CURRENT_STAGE rc=$rc" >&2
+    write_state "failed" "$CURRENT_STAGE" || true
+  fi
+}
+trap on_exit EXIT
+
+run_with_timeout() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$TIMEOUT_SEC" "$@"
+  else
+    "$@"
+  fi
+}
+
+compute_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+echo "=== Building port: $NAME $VERSION (tier=$TIER, policy=$POLICY_CLASS) ==="
+echo "FILC_PORT $PORT_NAME building"
+
+# 1. Dependency check
+CURRENT_STAGE="deps"
+if [[ "${FILC_PORT_SKIP_DEPS:-0}" != "1" ]]; then
+  for dep in $DEPS; do
+    if [[ ! -f "$STATE_DIR/$dep.installed" ]]; then
+      echo "error: dependency '$dep' not installed in $STATE_DIR" >&2
+      exit 1
+    fi
+  done
+fi
+
+# 2. Fetch & SHA-256 verification
+CURRENT_STAGE="fetch"
+TARBALL_NAME="$(basename "${UPSTREAM_URL%%\?*}")"
+TARBALL_PATH="$CACHE_DIR/${NAME}-${VERSION}-${TARBALL_NAME}"
+
+if [[ ! -f "$TARBALL_PATH" ]]; then
+  TMP_DL="$TARBALL_PATH.part.$$"
+  rm -f "$TMP_DL"
+  curl -fsSL --retry 3 --retry-delay 2 -o "$TMP_DL" "$UPSTREAM_URL"
+  mv "$TMP_DL" "$TARBALL_PATH"
+fi
+
+ACTUAL_SHA="$(compute_sha256 "$TARBALL_PATH")"
+if [[ "$ACTUAL_SHA" != "$UPSTREAM_SHA256" ]]; then
+  echo "error: SHA-256 mismatch for $TARBALL_PATH" >&2
+  echo "  expected: $UPSTREAM_SHA256" >&2
+  echo "  actual:   $ACTUAL_SHA" >&2
+  rm -f "$TARBALL_PATH"
+  exit 1
+fi
+echo "SHA-256 verified: $ACTUAL_SHA"
+
+# 3. Extract
+CURRENT_STAGE="extract"
+PORT_BUILD_DIR="$BUILD_BASE/$PORT_NAME"
+rm -rf "$PORT_BUILD_DIR"
+mkdir -p "$PORT_BUILD_DIR"
+tar -xf "$TARBALL_PATH" -C "$PORT_BUILD_DIR"
+SRC_DIR="$PORT_BUILD_DIR/$EXTRACT_DIR"
+if [[ ! -d "$SRC_DIR" ]]; then
+  echo "error: expected extract directory not found: $SRC_DIR" >&2
+  exit 1
+fi
+
+# 4. Apply patches (if any)
+CURRENT_STAGE="patch"
+if [[ -f "$PORT_DIR/patches/series" ]]; then
+  while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
+    line="${raw_line%%#*}"
+    line="$(echo "$line" | xargs)"
+    [[ -z "$line" ]] && continue
+    pfile="$PORT_DIR/patches/$line"
+    if [[ ! -f "$pfile" ]]; then
+      echo "error: patch listed in series not found: $pfile" >&2
+      exit 1
+    fi
+    echo "Applying patch: $line"
+    patch -d "$SRC_DIR" -p1 --batch --forward < "$pfile"
+    PATCH_COUNT=$((PATCH_COUNT + 1))
+    read -r pa pr pf < <(python3 - "$pfile" <<'PY'
+import sys
+a = r = f = 0
+in_diff = False
+for raw in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    ln = raw.rstrip("\r\n")
+    if ln.startswith("diff --git ") or (not in_diff and ln.startswith("--- ")):
+        in_diff = True
+        if ln.startswith("diff --git "):
+            f += 1
+        continue
+    if in_diff:
+        if ln.startswith("diff --git "):
+            f += 1
+        elif ln.startswith("+") and not ln.startswith("+++ "):
+            a += 1
+        elif ln.startswith("-") and not ln.startswith("--- "):
+            r += 1
+if f == 0 and (a > 0 or r > 0):
+    f = 1
+print(a, r, f)
+PY
+)
+    PATCH_ADDED=$((PATCH_ADDED + pa))
+    PATCH_REMOVED=$((PATCH_REMOVED + pr))
+    PATCH_FILES=$((PATCH_FILES + pf))
+  done < "$PORT_DIR/patches/series"
+fi
+
+# 5. Prepare Fil-C toolchain environment
+if [[ ! -x "$CLANG_BIN" ]]; then
+  echo "error: Fil-C clang not found at $CLANG_BIN (set FILC_TOOLCHAIN_ROOT)" >&2
+  exit 1
+fi
+if [[ ! -d "$PIZFIX" ]]; then
+  echo "error: Fil-C sysroot (pizfix) not found at $PIZFIX" >&2
+  exit 1
+fi
+
+export CC="$CLANG_BIN"
+export CXX="$CLANGXX_BIN"
+[[ -x "$LLVM_AR" ]] && export AR="$LLVM_AR"
+[[ -x "$LLVM_RANLIB" ]] && export RANLIB="$LLVM_RANLIB"
+export PREFIX="$PIZFIX"
+export PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig:$PIZFIX/share/pkgconfig"
+export PATH="$PIZFIX/bin:$(dirname "$CLANG_BIN"):$PATH"
+export CFLAGS="${CFLAGS:--O2 -g}"
+export CXXFLAGS="${CXXFLAGS:--O2 -g}"
+
+# 6. Configure, Build, Install
+cd "$SRC_DIR"
+
+CURRENT_STAGE="configure"
+if declare -F port_configure >/dev/null 2>&1; then
+  run_with_timeout port_configure
+else
+  case "$BUILD_SYSTEM" in
+    autotools)
+      # shellcheck disable=SC2086
+      run_with_timeout ./configure --prefix="$PIZFIX" $CONFIGURE_ARGS
+      ;;
+    cmake)
+      CMAKE_SRC="$SRC_DIR"
+      [[ -n "$CMAKE_SOURCE_SUBDIR" ]] && CMAKE_SRC="$SRC_DIR/$CMAKE_SOURCE_SUBDIR"
+      # shellcheck disable=SC2086
+      run_with_timeout cmake -S "$CMAKE_SRC" -B "$SRC_DIR/_build" \
+        -DCMAKE_INSTALL_PREFIX="$PIZFIX" \
+        -DCMAKE_C_COMPILER="$CC" \
+        -DCMAKE_CXX_COMPILER="$CXX" \
+        -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+        $CMAKE_ARGS
+      ;;
+    make)
+      ;;
+    custom)
+      echo "error: BUILD_SYSTEM=custom requires port_configure/port_build functions" >&2
+      exit 1
+      ;;
+    *)
+      echo "error: unsupported BUILD_SYSTEM: $BUILD_SYSTEM" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+CURRENT_STAGE="build"
+if declare -F port_build >/dev/null 2>&1; then
+  run_with_timeout port_build
+else
+  case "$BUILD_SYSTEM" in
+    autotools|make)
+      # shellcheck disable=SC2086
+      run_with_timeout make -j "$JOBS" $MAKE_ARGS
+      ;;
+    cmake)
+      run_with_timeout cmake --build "$SRC_DIR/_build" -j "$JOBS"
+      ;;
+  esac
+fi
+
+CURRENT_STAGE="install"
+if declare -F port_install >/dev/null 2>&1; then
+  run_with_timeout port_install
+else
+  case "$BUILD_SYSTEM" in
+    autotools|make)
+      # shellcheck disable=SC2086
+      run_with_timeout make install $INSTALL_ARGS
+      ;;
+    cmake)
+      run_with_timeout cmake --install "$SRC_DIR/_build"
+      ;;
+  esac
+fi
+
+# 7. Test
+FINAL_STATUS="built"
+if declare -F port_test >/dev/null 2>&1; then
+  CURRENT_STAGE="test"
+  run_with_timeout port_test
+  FINAL_STATUS="tested"
+elif [[ -n "$TEST_CMD" ]]; then
+  CURRENT_STAGE="test"
+  run_with_timeout bash -ceu "$TEST_CMD"
+  FINAL_STATUS="tested"
+fi
+
+touch "$STATE_DIR/$PORT_NAME.installed"
+write_state "$FINAL_STATUS" ""
+PORT_DONE=1
+echo "FILC_PORT $PORT_NAME $FINAL_STATUS duration=$(( $(date +%s) - T_START ))s patches=$PATCH_COUNT"

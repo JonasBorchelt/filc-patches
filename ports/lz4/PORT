@@ -1,0 +1,28 @@
+NAME="lz4"
+VERSION="1.11.1"
+LICENSE="BSD-2-Clause"
+UPSTREAM_URL="https://github.com/lz4/lz4/releases/download/v1.11.1/lz4-1.11.1.tar.gz"
+UPSTREAM_SHA256="683fed08a844ad012196381e40badf80c0bbe4962959761416d41c9e67d77ec7"
+EXTRACT_DIR="lz4-1.11.1"
+TIER=0
+DEPS=""
+BUILD_SYSTEM="make"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P0-Clean"
+POLICY_RATIONALE="Builds unmodified from official upstream lz4 1.11.1 release tarball."
+FILC_ORIGIN_REF="cede3de02b42:build_lz4.sh"
+
+port_build() {
+  make -j "$JOBS" CC="$CC" CXX="$CXX" prefix="$PIZFIX"
+}
+
+port_install() {
+  make CC="$CC" CXX="$CXX" prefix="$PIZFIX" install
+}
+
+port_test() {
+  "$PIZFIX/bin/lz4" --version
+  printf 'filc-lz4-roundtrip-check\n' | "$PIZFIX/bin/lz4" -c | "$PIZFIX/bin/lz4" -dc | grep -qx 'filc-lz4-roundtrip-check'
+}

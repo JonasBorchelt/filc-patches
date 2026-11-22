@@ -1,0 +1,27 @@
+NAME="xxhash"
+VERSION="0.8.4"
+LICENSE="BSD-2-Clause"
+UPSTREAM_URL="https://github.com/Cyan4973/xxHash/archive/refs/tags/v0.8.4.tar.gz"
+UPSTREAM_SHA256="5738270935e7c3d38a79b3adf7c9692566ce7895a25f67de43ad52ab504acd32"
+EXTRACT_DIR="xxHash-0.8.4"
+TIER=0
+DEPS=""
+BUILD_SYSTEM="make"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P2-Package"
+POLICY_RATIONALE="Replaces raw x86 inline cpuid/xgetbv assembly in xxh_x86dispatch.c with Fil-C intrinsics."
+FILC_ORIGIN_REF="cede3de02b42:projects/xxHash.projeny"
+
+port_build() {
+  make -j "$JOBS" CC="$CC" CXX="$CXX" prefix="$PIZFIX"
+}
+
+port_install() {
+  make CC="$CC" CXX="$CXX" prefix="$PIZFIX" install
+}
+
+port_test() {
+  make -j "$JOBS" CC="$CC" CXX="$CXX" prefix="$PIZFIX" check
+}

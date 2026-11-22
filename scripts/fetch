@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Fetch upstream LLVM at the exact commit pinned in UPSTREAM.
+# Usage: scripts/fetch [--sparse] [--reference <git-repo>] [TARGET_DIR]
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../UPSTREAM
+source "$REPO_ROOT/UPSTREAM"
+
+SPARSE=0
+REFERENCE=""
+TARGET_DIR=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --sparse)
+      SPARSE=1
+      shift
+      ;;
+    --reference)
+      REFERENCE="${2:?--reference requires a path}"
+      shift 2
+      ;;
+    -h|--help)
+      echo "Usage: $0 [--sparse] [--reference <git-repo>] [TARGET_DIR]"
+      exit 0
+      ;;
+    -*)
+      echo "error: unknown option: $1" >&2
+      exit 2
+      ;;
+    *)
+      TARGET_DIR="$1"
+      shift
+      ;;
+  esac
+done
+
+TARGET_DIR="${TARGET_DIR:-${FILC_LLVM_DIR:-$REPO_ROOT/.work/llvm-project}}"
+mkdir -p "$(dirname "$TARGET_DIR")"
+
+if [[ ! -d "$TARGET_DIR/.git" ]]; then
+  git init -q "$TARGET_DIR"
+  git -C "$TARGET_DIR" remote add origin "$LLVM_REPO"
+fi
+
+if [[ -n "$REFERENCE" ]]; then
+  if git -C "$REFERENCE" config --get-regexp '^(extensions\.partialclone|remote\..*\.promisor)$' >/dev/null 2>&1; then
+    echo "note: skipping --reference $REFERENCE (partial/promisor clone); fetching from $LLVM_REPO" >&2
+  else
+    OBJ_DIR="$(git -C "$REFERENCE" rev-parse --git-path objects)"
+    if [[ "$OBJ_DIR" != /* ]]; then
+      OBJ_DIR="$(cd "$REFERENCE" && cd "$OBJ_DIR" && pwd)"
+    fi
+    ALT_FILE="$TARGET_DIR/.git/objects/info/alternates"
+    if [[ ! -f "$ALT_FILE" ]] || ! grep -Fxq "$OBJ_DIR" "$ALT_FILE"; then
+      echo "$OBJ_DIR" >> "$ALT_FILE"
+    fi
+  fi
+fi
+
+# Ensure we have the exact pinned commit object.
+if ! git -C "$TARGET_DIR" cat-file -e "${LLVM_COMMIT}^{commit}" 2>/dev/null; then
+  FETCH_ARGS=(fetch --depth=1 --no-tags)
+  if [[ "$SPARSE" -eq 1 ]]; then
+    git -C "$TARGET_DIR" config remote.origin.promisor true
+    git -C "$TARGET_DIR" config remote.origin.partialclonefilter blob:none
+    FETCH_ARGS+=(--filter=blob:none)
+  fi
+  if [[ -n "${LLVM_TAG:-}" ]]; then
+    git -C "$TARGET_DIR" "${FETCH_ARGS[@]}" origin "refs/tags/${LLVM_TAG}:refs/tags/${LLVM_TAG}"
+  else
+    git -C "$TARGET_DIR" "${FETCH_ARGS[@]}" origin "$LLVM_COMMIT"
+  fi
+fi
+
+if [[ "$SPARSE" -eq 1 ]]; then
+  git -C "$TARGET_DIR" sparse-checkout init --cone
+  git -C "$TARGET_DIR" sparse-checkout set llvm clang libcxx libcxxabi libc polly
+else
+  if [[ -f "$TARGET_DIR/.git/info/sparse-checkout" ]]; then
+    git -C "$TARGET_DIR" sparse-checkout disable
+  fi
+fi
+
+git -C "$TARGET_DIR" checkout -q --force --detach "$LLVM_COMMIT"
+git -C "$TARGET_DIR" clean -fdx -q
+
+ACTUAL="$(git -C "$TARGET_DIR" rev-parse HEAD)"
+if [[ "$ACTUAL" != "$LLVM_COMMIT" ]]; then
+  echo "error: checked-out commit $ACTUAL != pinned $LLVM_COMMIT" >&2
+  exit 1
+fi
+
+echo "Fetched LLVM ${LLVM_TAG:-$LLVM_COMMIT} ($ACTUAL) into $TARGET_DIR"

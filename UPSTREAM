@@ -1,9 +1,10 @@
-# Pinned upstream revisions (placeholder - to be populated once baseline is finalized)
+# Pinned upstream revisions (Etappe 1: exact reproduction against llvmorg-20.1.8)
 
 LLVM_REPO=https://github.com/llvm/llvm-project.git
-LLVM_BRANCH=main
-LLVM_COMMIT=TBD
+LLVM_TAG=llvmorg-20.1.8
+LLVM_COMMIT=87f0227cb60147a26a1eeb4fb06e3b505e9c7261
 
 FILC_REPO=https://github.com/pizlonator/fil-c.git
 FILC_BRANCH=deluge
-FILC_COMMIT=TBD
+FILC_COMMIT=cede3de02b42b58a14acc9ce39c9894ab952a915
+FILC_REBASE_COMMIT=d292f5dbb951d549fc9b053950d5a330d532b361

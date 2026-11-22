@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Verify that applying the patch series on top of UPSTREAM's pinned LLVM commit
+# reproduces the Fil-C reference tree (UPSTREAM's FILC_COMMIT) bit-for-bit
+# across all touched LLVM monorepo directories, modulo explicitly documented
+# exceptions.
+#
+# Usage: scripts/verify-identical [--filc-dir <path>] [--work-dir <path>]
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../UPSTREAM
+source "$REPO_ROOT/UPSTREAM"
+
+FILC_DIR=""
+WORK_DIR=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --filc-dir)
+      FILC_DIR="${2:?--filc-dir requires a path}"
+      shift 2
+      ;;
+    --work-dir)
+      WORK_DIR="${2:?--work-dir requires a path}"
+      shift 2
+      ;;
+    -h|--help)
+      echo "Usage: $0 [--filc-dir <path>] [--work-dir <path>]"
+      exit 0
+      ;;
+    *)
+      echo "error: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+FILC_DIR="${FILC_DIR:-${FILC_SRC_DIR:-$(dirname "$REPO_ROOT")/src/fil-c}}"
+WORK_DIR="${WORK_DIR:-$REPO_ROOT/.work/verify-llvm}"
+
+if [[ ! -d "$FILC_DIR/.git" ]]; then
+  echo "error: Fil-C reference repo not found at $FILC_DIR (pass --filc-dir)" >&2
+  exit 1
+fi
+
+FILC_ACTUAL="$(git -C "$FILC_DIR" rev-parse HEAD)"
+if [[ "$FILC_ACTUAL" != "$FILC_COMMIT" ]]; then
+  echo "warning: $FILC_DIR HEAD is $FILC_ACTUAL, comparing against pinned commit $FILC_COMMIT" >&2
+fi
+
+if ! git -C "$FILC_DIR" cat-file -e "${FILC_COMMIT}^{commit}" 2>/dev/null; then
+  echo "error: Fil-C commit $FILC_COMMIT not present in $FILC_DIR" >&2
+  exit 1
+fi
+
+# Pass 1: Verify default series (01..06a + runtime/cxx) applies cleanly
+echo "=== Pass 1: Applying default series (01..06a + runtime/cxx) ==="
+"$REPO_ROOT/scripts/apply" --sparse "$WORK_DIR"
+
+# Pass 2: Apply optional 06b on top for full bit-identity check against Fil-C
+echo "=== Pass 2: Applying optional Cosmo/Fat-APE patch (06b) on top ==="
+while IFS= read -r line || [[ -n "$line" ]]; do
+  line="${line%%#*}"
+  line="$(echo "$line" | xargs)"
+  [[ -z "$line" ]] && continue
+  patch_path="$REPO_ROOT/llvm/$line"
+  echo "Applying ${patch_path#"$REPO_ROOT"/} ..."
+  git -C "$WORK_DIR" apply --check --whitespace=nowarn "$patch_path"
+  git -C "$WORK_DIR" apply --whitespace=nowarn "$patch_path"
+done < "$REPO_ROOT/llvm/series.optional"
+
+echo "=== Pass 3: Comparing patched tree against Fil-C $FILC_COMMIT ==="
+python3 - "$WORK_DIR" "$FILC_DIR" "$LLVM_COMMIT" "$FILC_COMMIT" <<'PY'
+import hashlib
+import os
+import subprocess
+import sys
+
+work_dir, filc_dir, llvm_commit, filc_commit = sys.argv[1:5]
+
+def git(repo, *args, binary=False):
+    out = subprocess.check_output(["git", "-C", repo, *args])
+    return out if binary else out.decode("utf-8")
+
+# Determine every path differing between LLVM_COMMIT and FILC_COMMIT across
+# all top-level directories that exist in LLVM_COMMIT.
+llvm_dirs = [
+    line.split("\t")[1]
+    for line in git(filc_dir, "ls-tree", llvm_commit).splitlines()
+    if line.split()[1] == "tree"
+]
+
+# Every file touched in Fil-C relative to upstream LLVM
+filc_changed = {}
+for line in git(filc_dir, "diff", "--name-status", "--no-renames", f"{llvm_commit}..{filc_commit}", "--", *llvm_dirs).splitlines():
+    st, path = line.split("\t", 1)
+    filc_changed[path] = st
+
+# Every file touched in our patched working tree relative to LLVM_COMMIT
+work_changed = set()
+for line in git(work_dir, "status", "--porcelain", "-uall").splitlines():
+    # format: "XY path"
+    path = line[3:]
+    work_changed.add(path)
+
+# Explicit, audited exceptions allowed in Etappe 1:
+DROPPED_POLLY_DELETIONS = {
+    "polly/lib/External/isl/imath/Makefile",
+    "polly/lib/External/isl/imath/tests/gmp-compat-test/Makefile",
+}
+CLEANED_DEBUG_FILES = {
+    "llvm/lib/Transforms/Scalar/SROA.cpp",
+}
+
+all_paths = sorted(set(filc_changed.keys()) | work_changed)
+
+bit_identical = []
+expected_exceptions = []
+unexpected_diffs = []
+
+for path in all_paths:
+    st = filc_changed.get(path)
+    work_file = os.path.join(work_dir, path)
+
+    if path in DROPPED_POLLY_DELETIONS:
+        if st != "D":
+            unexpected_diffs.append((path, f"expected polly deletion in Fil-C, got {st}"))
+            continue
+        if not os.path.isfile(work_file):
+            unexpected_diffs.append((path, "expected untouched upstream polly file in work_dir"))
+            continue
+        expected_exceptions.append((path, "dropped accidental 20.1.8-rebase deletion in polly/"))
+        continue
+
+    if not os.path.isfile(work_file):
+        unexpected_diffs.append((path, "missing from patched tree"))
+        continue
+
+    with open(work_file, "rb") as f:
+        work_bytes = f.read()
+
+    filc_bytes = git(filc_dir, "show", f"{filc_commit}:{path}", binary=True)
+
+    if work_bytes == filc_bytes:
+        bit_identical.append(path)
+        continue
+
+    if path in CLEANED_DEBUG_FILES:
+        # Verify that the ONLY difference between work_file and Fil-C is the
+        # dropped `verbose` debug-logging lines!
+        diff_proc = subprocess.run(
+            ["diff", "-u", "--label", "patched", "--label", "fil-c", work_file, "-"],
+            input=filc_bytes,
+            capture_output=True,
+        )
+        diff_text = diff_proc.stdout.decode("utf-8", errors="replace")
+        bad_lines = []
+        for line in diff_text.splitlines():
+            if line.startswith(("---", "+++", "@@", " ")):
+                continue
+            # Every changed line in patched -> fil-c must be adding verbose debug logging
+            # (or adding braces around `for (Slice &S : P)` solely for `if (verbose)`).
+            content = line[1:].strip()
+            if line.startswith("+"):
+                allowed = (
+                    content == "static constexpr bool verbose = false;"
+                    or content == ""
+                    or content.startswith("if (verbose)")
+                    or content.startswith("errs() <<")
+                    or content.startswith("<<")
+                    or content.startswith("for (Slice S : Slices)")
+                    or content.startswith("if (S.getUse()")
+                    or content.startswith("else if (S.getUse())")
+                    or content.startswith("else")
+                    or content in ("{", "}", "for (Slice &S : P) {")
+                )
+                if not allowed:
+                    bad_lines.append(line)
+            elif line.startswith("-"):
+                if content != "for (Slice &S : P)":
+                    bad_lines.append(line)
+        if bad_lines:
+            unexpected_diffs.append((path, f"unexpected non-debug diff lines: {bad_lines[:5]}"))
+        else:
+            added = sum(1 for l in diff_text.splitlines() if l.startswith("+") and not l.startswith("+++"))
+            removed = sum(1 for l in diff_text.splitlines() if l.startswith("-") and not l.startswith("---"))
+            expected_exceptions.append((path, f"dropped verbose debug logging only ({added} debug lines stripped, functional Fil-C logic bit-identical)"))
+        continue
+
+    h_work = hashlib.sha256(work_bytes).hexdigest()[:12]
+    h_filc = hashlib.sha256(filc_bytes).hexdigest()[:12]
+    unexpected_diffs.append((path, f"content mismatch (work={h_work} vs fil-c={h_filc})"))
+
+print(f"\nBit-identical files verified: {len(bit_identical)}")
+print(f"Explicitly audited exceptions: {len(expected_exceptions)}")
+for p, reason in expected_exceptions:
+    print(f"  [EXCEPTION] {p}: {reason}")
+
+if unexpected_diffs:
+    print(f"\nFAIL: {len(unexpected_diffs)} unexpected differences found:", file=sys.stderr)
+    for p, reason in unexpected_diffs:
+        print(f"  [DIFF] {p}: {reason}", file=sys.stderr)
+    sys.exit(1)
+
+# Sanity check: ensure total accounted files == all 118 Fil-C changed files
+if len(bit_identical) + len(expected_exceptions) != len(filc_changed):
+    print(
+        f"FAIL: accounted {len(bit_identical)}+{len(expected_exceptions)} != filc_changed {len(filc_changed)}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+print(
+    f"\nSUCCESS: {len(bit_identical)}/{len(filc_changed)} touched LLVM-monorepo files are 100% bit-identical "
+    f"to Fil-C {filc_commit[:12]}, and all {len(expected_exceptions)} exceptions match the audited policy."
+)
+PY

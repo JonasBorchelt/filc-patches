@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Reset or fetch upstream LLVM at UPSTREAM's pinned revision and apply the
+# Fil-C patch series (llvm/series + runtime/cxx/series).
+# Usage: scripts/apply [--with-optional] [--sparse] [--no-cxx] [--reference <git-repo>] [TARGET_DIR]
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../UPSTREAM
+source "$REPO_ROOT/UPSTREAM"
+
+WITH_OPTIONAL=0
+WITH_CXX=1
+SPARSE=0
+REFERENCE=""
+TARGET_DIR=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --with-optional)
+      WITH_OPTIONAL=1
+      shift
+      ;;
+    --no-cxx)
+      WITH_CXX=0
+      shift
+      ;;
+    --sparse)
+      SPARSE=1
+      shift
+      ;;
+    --reference)
+      REFERENCE="${2:?--reference requires a path}"
+      shift 2
+      ;;
+    -h|--help)
+      echo "Usage: $0 [--with-optional] [--no-cxx] [--sparse] [--reference <git-repo>] [TARGET_DIR]"
+      exit 0
+      ;;
+    -*)
+      echo "error: unknown option: $1" >&2
+      exit 2
+      ;;
+    *)
+      TARGET_DIR="$1"
+      shift
+      ;;
+  esac
+done
+
+TARGET_DIR="${TARGET_DIR:-${FILC_LLVM_DIR:-$REPO_ROOT/.work/llvm-project}}"
+
+FETCH_CMD=("$REPO_ROOT/scripts/fetch")
+[[ "$SPARSE" -eq 1 ]] && FETCH_CMD+=(--sparse)
+[[ -n "$REFERENCE" ]] && FETCH_CMD+=(--reference "$REFERENCE")
+FETCH_CMD+=("$TARGET_DIR")
+
+"${FETCH_CMD[@]}"
+
+apply_series() {
+  local base_dir="$1"
+  local series_file="$2"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"
+    line="$(echo "$line" | xargs)"
+    [[ -z "$line" ]] && continue
+    local patch_path="$base_dir/$line"
+    if [[ ! -f "$patch_path" ]]; then
+      echo "error: missing patch $patch_path" >&2
+      exit 1
+    fi
+    echo "Applying ${patch_path#"$REPO_ROOT"/} ..."
+    git -C "$TARGET_DIR" apply --check --whitespace=nowarn "$patch_path"
+    git -C "$TARGET_DIR" apply --whitespace=nowarn "$patch_path"
+  done < "$series_file"
+}
+
+apply_series "$REPO_ROOT/llvm" "$REPO_ROOT/llvm/series"
+
+if [[ "$WITH_OPTIONAL" -eq 1 && -f "$REPO_ROOT/llvm/series.optional" ]]; then
+  apply_series "$REPO_ROOT/llvm" "$REPO_ROOT/llvm/series.optional"
+fi
+
+if [[ "$WITH_CXX" -eq 1 && -f "$REPO_ROOT/runtime/cxx/series" ]]; then
+  apply_series "$REPO_ROOT/runtime/cxx" "$REPO_ROOT/runtime/cxx/series"
+fi
+
+echo "Applied Fil-C patch series cleanly to $TARGET_DIR (optional=$WITH_OPTIONAL, cxx=$WITH_CXX)"

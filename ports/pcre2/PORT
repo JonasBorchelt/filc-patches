@@ -1,0 +1,27 @@
+NAME="pcre2"
+VERSION="10.49"
+LICENSE="BSD-3-Clause"
+UPSTREAM_URL="https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.49/pcre2-10.49.tar.bz2"
+UPSTREAM_SHA256="53c156e1ba416a20da8e65395daa132da0d80e76910424caca3fcdae7831d384"
+EXTRACT_DIR="pcre2-10.49"
+TIER=1
+DEPS="zlib"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--disable-jit --enable-pcre2-16 --enable-pcre2-32 --enable-pcre2grep-libz"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P3-BuildOpt"
+POLICY_RATIONALE="Builds unmodified upstream PCRE2 library with --disable-jit to avoid dynamic JIT codegen without source patches."
+FILC_ORIGIN_REF="cede3de02b42:projects/pcre2.projeny"
+
+port_configure() {
+  CPPFLAGS="-I$PIZFIX/include" LDFLAGS="-L$PIZFIX/lib" \
+    ./configure --prefix="$PIZFIX" --disable-jit --enable-pcre2-16 --enable-pcre2-32 --enable-pcre2grep-libz
+}
+
+port_test() {
+  "$PIZFIX/bin/pcre2grep" --version
+  printf 'filc-pcre2-12345\n' | "$PIZFIX/bin/pcre2grep" -o '[0-9]+' | grep -qx '12345'
+  printf '/(foo|bar)+/\nfoobar\n' | "$PIZFIX/bin/pcre2test" | grep -q '0: foobar'
+}

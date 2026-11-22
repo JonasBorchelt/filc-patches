@@ -1,0 +1,26 @@
+NAME="libidn2"
+VERSION="2.3.8"
+LICENSE="LGPL-3.0-or-later OR GPL-2.0-or-later"
+UPSTREAM_URL="https://ftpmirror.gnu.org/gnu/libidn/libidn2-2.3.8.tar.gz"
+UPSTREAM_SHA256="f557911bf6171621e1f72ff35f5b1825bb35b52ed45325dcdee931e5d3c0787a"
+EXTRACT_DIR="libidn2-2.3.8"
+TIER=1
+DEPS="libunistring"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--disable-doc"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P0-Clean"
+POLICY_RATIONALE="Builds unmodified upstream libidn2 once the Fil-C Clang driver rewrites -Wl,--version-script= arguments."
+FILC_ORIGIN_REF="cede3de02b42:projects/libidn2.projeny"
+
+port_configure() {
+  CPPFLAGS="-I$PIZFIX/include" LDFLAGS="-L$PIZFIX/lib" \
+    ./configure --prefix="$PIZFIX" --disable-doc
+}
+
+port_test() {
+  "$PIZFIX/bin/idn2" --version
+  printf 'münchen.de\n' | "$PIZFIX/bin/idn2" | grep -qx 'xn--mnchen-3ya.de'
+}

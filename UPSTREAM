@@ -1,0 +1,9 @@
+# Pinned upstream revisions (placeholder - to be populated once baseline is finalized)
+
+LLVM_REPO=https://github.com/llvm/llvm-project.git
+LLVM_BRANCH=main
+LLVM_COMMIT=TBD
+
+FILC_REPO=https://github.com/pizlonator/fil-c.git
+FILC_BRANCH=deluge
+FILC_COMMIT=TBD

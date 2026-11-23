@@ -35,7 +35,7 @@ echo "=== 1. Real ports/ DAG & recipe dry-run validation ==="
 "$REPO_ROOT/scripts/build-ports" --dry-run
 
 echo "=== 1b. Upstream pin metadata & verify-pins unit tests ==="
-"$REPO_ROOT/scripts/verify-pins" --check-metadata-only --all
+"$REPO_ROOT/scripts/verify-pins.rb" --check-metadata-only --all
 
 PIN_TEST_DIR="$TMP_DIR/pin-ports"
 mkdir -p "$PIN_TEST_DIR/goodpin" "$PIN_TEST_DIR/badpin" "$PIN_TEST_DIR/missingmeta"
@@ -78,20 +78,20 @@ DEPS=""
 BUILD_SYSTEM="make"
 POLICY_CLASS="P0-Clean"
 EOF
-"$REPO_ROOT/scripts/verify-pins" --ports-dir "$PIN_TEST_DIR" --cache-dir "$TMP_DIR/pin-cache" goodpin
+"$REPO_ROOT/scripts/verify-pins.rb" --ports-dir "$PIN_TEST_DIR" --cache-dir "$TMP_DIR/pin-cache" goodpin
 # Verify persistent metadata cache reuse after source file is removed
 rm -f "$TMP_DIR/good.sha256"
-CACHE_OUT="$("$REPO_ROOT/scripts/verify-pins" --ports-dir "$PIN_TEST_DIR" --cache-dir "$TMP_DIR/pin-cache" goodpin)"
+CACHE_OUT="$("$REPO_ROOT/scripts/verify-pins.rb" --ports-dir "$PIN_TEST_DIR" --cache-dir "$TMP_DIR/pin-cache" goodpin)"
 printf '%s\n' "$CACHE_OUT" > "$TMP_DIR/pin-cache.out"
 cat "$TMP_DIR/pin-cache.out"
 assert_grep -Fq "cached, verified" "$TMP_DIR/pin-cache.out" "verify-pins persistent cache reuse"
 # Restore source for badpin mismatch test and test rolling-index refresh + FILC_PORTS scoping
 printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  good-1.0.tar.gz\n' > "$TMP_DIR/good.sha256"
-if "$REPO_ROOT/scripts/verify-pins" --ports-dir "$PIN_TEST_DIR" --cache-dir "$TMP_DIR/pin-cache" badpin 2>/dev/null; then
+if "$REPO_ROOT/scripts/verify-pins.rb" --ports-dir "$PIN_TEST_DIR" --cache-dir "$TMP_DIR/pin-cache" badpin 2>/dev/null; then
   echo "FAIL: verify-pins should reject mismatched upstream sha256" >&2
   exit 1
 fi
-if "$REPO_ROOT/scripts/verify-pins" --ports-dir "$PIN_TEST_DIR" --check-metadata-only missingmeta 2>/dev/null; then
+if "$REPO_ROOT/scripts/verify-pins.rb" --ports-dir "$PIN_TEST_DIR" --check-metadata-only missingmeta 2>/dev/null; then
   echo "FAIL: verify-pins should reject missing UPSTREAM_SHA256_SOURCE" >&2
   exit 1
 fi
@@ -124,12 +124,12 @@ DEPS=""
 BUILD_SYSTEM="make"
 POLICY_CLASS="P0-Clean"
 EOF
-FILC_PORTS="topapp" "$REPO_ROOT/scripts/verify-pins" --ports-dir "$PIN_TEST_DIR" --cache-dir "$TMP_DIR/pin-cache" --verifiable-direct --respect-filc-ports
+FILC_PORTS="topapp" "$REPO_ROOT/scripts/verify-pins.rb" --ports-dir "$PIN_TEST_DIR" --cache-dir "$TMP_DIR/pin-cache" --verifiable-direct --respect-filc-ports
 # Simulate version bump in shared index file: cached index lacks top-2.0, must refresh automatically
 printf 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee  top-2.0.tar.gz\n' >> "$TMP_DIR/index.sha256"
 sed -i.bak -e 's/1\.0/2.0/g' -e 's/c\{64\}/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/' "$PIN_TEST_DIR/topapp/PORT"
 rm -f "$PIN_TEST_DIR/topapp/PORT.bak"
-FILC_PORTS="topapp" "$REPO_ROOT/scripts/verify-pins" --ports-dir "$PIN_TEST_DIR" --cache-dir "$TMP_DIR/pin-cache" --verifiable-direct --respect-filc-ports
+FILC_PORTS="topapp" "$REPO_ROOT/scripts/verify-pins.rb" --ports-dir "$PIN_TEST_DIR" --cache-dir "$TMP_DIR/pin-cache" --verifiable-direct --respect-filc-ports
 echo "VERIFY-PINS UNIT TESTS OK"
 
 echo "=== 2. Patch header completeness check ==="

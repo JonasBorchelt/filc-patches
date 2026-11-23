@@ -1,0 +1,449 @@
+Subject: Harden Fil-C compile-time rejections in Clang Sema, Driver, and FilPizlonator
+Upstream-Base: llvmorg-23.1.6 (5b10d2d74929eae78912771222c9855af97496f4)
+Fil-C-Head: cede3de02b42b58a14acc9ce39c9894ab952a915 (branch deluge)
+
+In Release builds with LLVM_ENABLE_ASSERTIONS=OFF, llvm_unreachable() and
+assert() compile away into UB or no-ops. Any user-input-reachable check that
+relied on them could silently miscompile instead of rejecting the translation
+unit (for example, __builtin_setjmp folded into FilPizlonator's default
+intrinsic handler, making Ruby's autoconf probe succeed and panic at runtime).
+
+Changes (from full audit of all 70 llvm_unreachable and 540 assert sites):
+- clang/lib/Sema/SemaChecking.cpp: Reject __builtin_setjmp and __builtin_longjmp
+  directly in Sema with err_builtin_setjmp_unsupported / err_builtin_longjmp_unsupported.
+- llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp: Replace all user-input-
+  reachable llvm_unreachable and assert checks (eh.sjlj intrinsics, CallBrInst /
+  asm goto, SEH funclet instructions, unlowered indirectbr, unsupported module
+  inline asm, non-zero pointer address spaces, scalable vectors, 64-bit layout
+  overflow checks in SafeAdd64/SafeMul64, defining reserved pass-through
+  functions, incompatible setjmp prototypes, unsupported pointer atomicrmw,
+  linkage, ConstantExpr, and catch-all unknown instructions) with
+  report_fatal_error(..., /*GenCrashDiag=*/false).
+- clang/lib/CodeGen/CGRecordLayoutBuilder.cpp: Replace non-zero address space
+  assert and scalable vector unreachable with report_fatal_error.
+- clang/lib/Driver/ToolChains/Gnu.cpp: Replace GCC job refusal and linker
+  version-script parse/EOF/write unreachables with report_fatal_error.
+
+---
+diff --git a/clang/lib/CodeGen/CGRecordLayoutBuilder.cpp b/clang/lib/CodeGen/CGRecordLayoutBuilder.cpp
+index 242ac845b..f95b93f8c 100644
+--- a/clang/lib/CodeGen/CGRecordLayoutBuilder.cpp
++++ b/clang/lib/CodeGen/CGRecordLayoutBuilder.cpp
+@@ -324,7 +324,10 @@ static bool hasPointers(llvm::Type* T) {
+   }
+ 
+   if (isa<llvm::PointerType>(T)) {
+-    assert (!T->getPointerAddressSpace());
++    if (T->getPointerAddressSpace())
++      llvm::report_fatal_error(
++          "Fil-C does not support non-zero pointer address spaces",
++          /*GenCrashDiag=*/false);
+     return true;
+   }
+ 
+@@ -344,8 +347,9 @@ static bool hasPointers(llvm::Type* T) {
+     return hasPointers(VT->getElementType());
+ 
+   if (isa<llvm::ScalableVectorType>(T)) {
+-    llvm_unreachable("Shouldn't ever see scalable vectors in hasPtrs");
+-    return false;
++    llvm::report_fatal_error(
++        "Fil-C does not support scalable vector types",
++        /*GenCrashDiag=*/false);
+   }
+     
+   return false;
+diff --git a/clang/lib/Driver/ToolChains/Gnu.cpp b/clang/lib/Driver/ToolChains/Gnu.cpp
+index 7f8206531..82d618a33 100644
+--- a/clang/lib/Driver/ToolChains/Gnu.cpp
++++ b/clang/lib/Driver/ToolChains/Gnu.cpp
+@@ -71,7 +71,8 @@ void tools::gcc::Common::ConstructJob(Compilation &C, const JobAction &JA,
+                                       const InputInfoList &Inputs,
+                                       const ArgList &Args,
+                                       const char *LinkingOutput) const {
+-  llvm_unreachable("Refusing to construct GCC job");
++  llvm::report_fatal_error("Fil-C driver refuses to construct GCC job",
++                           /*GenCrashDiag=*/false);
+   
+   const Driver &D = getToolChain().getDriver();
+   ArgStringList CmdArgs;
+@@ -283,7 +284,8 @@ std::string PizlonateVersionScript(const std::string& Input) {
+     llvm::errs() << "Failed at byte index " << InputIndex << "\n";
+     llvm::errs() << "Reason: " << Reason << "\n";
+     llvm::errs() << "Output so far: " << Output.str() << "\n";
+-    llvm_unreachable("Failed to parse version script.");
++    llvm::report_fatal_error("Fil-C: failed to parse linker version script",
++                             /*GenCrashDiag=*/false);
+   };
+ 
+   auto atEnd = [&] () {
+@@ -298,7 +300,9 @@ std::string PizlonateVersionScript(const std::string& Input) {
+ 
+   auto take = [&] () {
+     if (atEnd())
+-      llvm_unreachable("Unexpected end of file");
++      llvm::report_fatal_error(
++          "Fil-C: unexpected end of file while parsing linker version script",
++          /*GenCrashDiag=*/false);
+     return Input[InputIndex++];
+   };
+ 
+@@ -737,7 +741,10 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+     std::ofstream OutputStream(OutputVersionScriptFilename);
+     OutputStream << Output;
+     if (!OutputStream.good())
+-      llvm_unreachable((std::string("Could not write ") + OutputVersionScriptFilename).c_str());
++      llvm::report_fatal_error(
++          llvm::Twine("Fil-C: could not write rewritten linker version script: ") +
++              OutputVersionScriptFilename,
++          /*GenCrashDiag=*/false);
+     return OutputVersionScriptFilename;
+   };
+ 
+diff --git a/clang/lib/Sema/SemaChecking.cpp b/clang/lib/Sema/SemaChecking.cpp
+index 2a8395e26..0e3bfe9b0 100644
+--- a/clang/lib/Sema/SemaChecking.cpp
++++ b/clang/lib/Sema/SemaChecking.cpp
+@@ -6957,29 +6957,17 @@ bool Sema::BuiltinConstantArgShiftedByteOrXXFF(CallExpr *TheCall,
+ }
+ 
+ bool Sema::BuiltinLongjmp(CallExpr *TheCall) {
+-  if (!Context.getTargetInfo().hasSjLjLowering())
+-    return Diag(TheCall->getBeginLoc(), diag::err_builtin_longjmp_unsupported)
+-           << SourceRange(TheCall->getBeginLoc(), TheCall->getEndLoc());
+-
+-  Expr *Arg = TheCall->getArg(1);
+-  llvm::APSInt Result;
+-
+-  // TODO: This is less than ideal. Overload this to take a value.
+-  if (BuiltinConstantArg(TheCall, 1, Result))
+-    return true;
+-
+-  if (Result != 1)
+-    return Diag(TheCall->getBeginLoc(), diag::err_builtin_longjmp_invalid_val)
+-           << SourceRange(Arg->getBeginLoc(), Arg->getEndLoc());
+-
+-  return false;
++  // Fil-C does not support __builtin_longjmp / llvm.eh.sjlj intrinsics;
++  // reject cleanly in Sema so feature probes fall back to _setjmp/_longjmp.
++  return Diag(TheCall->getBeginLoc(), diag::err_builtin_longjmp_unsupported)
++         << SourceRange(TheCall->getBeginLoc(), TheCall->getEndLoc());
+ }
+ 
+ bool Sema::BuiltinSetjmp(CallExpr *TheCall) {
+-  if (!Context.getTargetInfo().hasSjLjLowering())
+-    return Diag(TheCall->getBeginLoc(), diag::err_builtin_setjmp_unsupported)
+-           << SourceRange(TheCall->getBeginLoc(), TheCall->getEndLoc());
+-  return false;
++  // Fil-C does not support __builtin_setjmp / llvm.eh.sjlj intrinsics;
++  // reject cleanly in Sema so feature probes fall back to _setjmp/_longjmp.
++  return Diag(TheCall->getBeginLoc(), diag::err_builtin_setjmp_unsupported)
++         << SourceRange(TheCall->getBeginLoc(), TheCall->getEndLoc());
+ }
+ 
+ bool Sema::BuiltinCountedByRef(CallExpr *TheCall) {
+diff --git a/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp b/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp
+index b86df0d98..12e4fa157 100644
+--- a/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp
++++ b/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp
+@@ -423,7 +423,9 @@ public:
+   void error() {
+     errs() << "Error parsing module asm:\n" << MA << "\n";
+     errs() << "The whole module:\n" << M << "\n";
+-    llvm_unreachable("Error parsing module asm");
++    report_fatal_error(
++        "Fil-C: unsupported or invalid module-level inline assembly",
++        /*GenCrashDiag=*/false);
+   }
+ 
+   MAToken getNext() {
+@@ -1149,7 +1151,9 @@ uint64_t SafeAdd64(uint64_t A, uint64_t B) {
+   uint64_t Result;
+   bool DidOverflow = __builtin_add_overflow(A, B, &Result);
+   if (DidOverflow)
+-    llvm_unreachable("Unexpected overflow on add");
++    report_fatal_error(
++        "Fil-C: 64-bit integer overflow during layout calculation (add)",
++        /*GenCrashDiag=*/false);
+   return Result;
+ }
+ 
+@@ -1157,7 +1161,9 @@ uint64_t SafeMul64(uint64_t A, uint64_t B) {
+   uint64_t Result;
+   bool DidOverflow = __builtin_mul_overflow(A, B, &Result);
+   if (DidOverflow)
+-    llvm_unreachable("Unexpected overflow on mul");
++    report_fatal_error(
++        "Fil-C: 64-bit integer overflow during layout calculation (mul)",
++        /*GenCrashDiag=*/false);
+   return Result;
+ }
+ 
+@@ -1932,10 +1938,9 @@ class Pizlonator {
+         toFlightType(VT->getElementType()), VT->getElementCount().getFixedValue());
+     }
+ 
+-    if (isa<ScalableVectorType>(T)) {
+-      llvm_unreachable("Shouldn't see scalable vector types");
+-      return nullptr;
+-    }
++    if (isa<ScalableVectorType>(T))
++      report_fatal_error("Fil-C does not support scalable vector types",
++                         /*GenCrashDiag=*/false);
+     
+     return T;
+   }
+@@ -2427,7 +2432,10 @@ class Pizlonator {
+     }
+ 
+     if (isa<PointerType>(T)) {
+-      assert (!T->getPointerAddressSpace());
++      if (T->getPointerAddressSpace())
++        report_fatal_error(
++            "Fil-C does not support non-zero pointer address spaces",
++            /*GenCrashDiag=*/false);
+       return true;
+     }
+ 
+@@ -2449,10 +2457,9 @@ class Pizlonator {
+     if (FixedVectorType* VT = dyn_cast<FixedVectorType>(T))
+       return hasPtrs(VT->getElementType());
+ 
+-    if (isa<ScalableVectorType>(T)) {
+-      llvm_unreachable("Shouldn't ever see scalable vectors in hasPtrs");
+-      return false;
+-    }
++    if (isa<ScalableVectorType>(T))
++      report_fatal_error("Fil-C does not support scalable vector types",
++                         /*GenCrashDiag=*/false);
+     
+     return false;
+   }
+@@ -2551,10 +2558,9 @@ class Pizlonator {
+       return Result;
+     }
+ 
+-    if (isa<ScalableVectorType>(T)) {
+-      llvm_unreachable("Shouldn't see scalable vector types in loadValueRecurseAfterCheck");
+-      return nullptr;
+-    }
++    if (isa<ScalableVectorType>(T))
++      report_fatal_error("Fil-C does not support scalable vector types",
++                         /*GenCrashDiag=*/false);
+ 
+     llvm_unreachable("Should not get here.");
+     return nullptr;
+@@ -2650,10 +2656,9 @@ class Pizlonator {
+       return;
+     }
+ 
+-    if (isa<ScalableVectorType>(T)) {
+-      llvm_unreachable("Shouldn't see scalable vector types in storeValueRecurseAfterCheck");
+-      return;
+-    }
++    if (isa<ScalableVectorType>(T))
++      report_fatal_error("Fil-C does not support scalable vector types",
++                         /*GenCrashDiag=*/false);
+ 
+     llvm_unreachable("Should not get here.");
+   }
+@@ -4075,10 +4080,9 @@ class Pizlonator {
+       return;
+     }
+ 
+-    if (isa<ScalableVectorType>(T)) {
+-      llvm_unreachable("Shouldn't see scalable vector types in buildChecksRecurse");
+-      return;
+-    }
++    if (isa<ScalableVectorType>(T))
++      report_fatal_error("Fil-C does not support scalable vector types",
++                         /*GenCrashDiag=*/false);
+ 
+     llvm_unreachable("Should not get here.");
+   }
+@@ -6750,8 +6754,8 @@ class Pizlonator {
+       if (CE->getType() == RawPtrTy)
+         return RawNull;
+       
+-      llvm_unreachable("wtf kind of CE is that");
+-      return nullptr;
++      report_fatal_error("Fil-C: unsupported ConstantExpr in constant lowering",
++                         /*GenCrashDiag=*/false);
+     }
+     llvm_unreachable("bad RM");
+   }
+@@ -7986,8 +7990,10 @@ class Pizlonator {
+       case Intrinsic::eh_sjlj_setjmp:
+       case Intrinsic::eh_sjlj_longjmp:
+       case Intrinsic::eh_sjlj_setup_dispatch:
+-        llvm_unreachable("Cannot use sjlj intrinsics.");
+-        return true;
++        report_fatal_error(
++            "Fil-C does not support __builtin_setjmp / llvm.eh.sjlj intrinsics; "
++            "use setjmp/_setjmp/sigsetjmp instead",
++            /*GenCrashDiag=*/false);
+ 
+       case Intrinsic::x86_xgetbv:
+       case Intrinsic::x86_sse2_pause:
+@@ -13833,8 +13839,8 @@ class Pizlonator {
+         Result->setLinkage(F->getLinkage());
+         break;
+       default:
+-        llvm_unreachable("Invalid linkage type");
+-        break;
++        report_fatal_error("Fil-C: unsupported function linkage type",
++                           /*GenCrashDiag=*/false);
+       }
+       Result->addFnAttr(Attribute::NoInline);
+       Result->addFnAttr(Attribute::NoUnwind);
+@@ -14249,7 +14255,10 @@ class Pizlonator {
+ 
+     if (AtomicRMWInst* AI = dyn_cast<AtomicRMWInst>(I)) {
+       if (InstTypes[AI] == RawPtrTy) {
+-        assert(AI->getOperation() == AtomicRMWInst::Xchg);
++        if (AI->getOperation() != AtomicRMWInst::Xchg)
++          report_fatal_error(
++              "Fil-C: unsupported atomicrmw operation on pointer type",
++              /*GenCrashDiag=*/false);
+         storeOrigin(getOrigin(AI->getDebugLoc()), AI);
+         Instruction* Xchg = CallInst::Create(
+           XchgPtr,
+@@ -14309,10 +14318,9 @@ class Pizlonator {
+       return;
+     }
+ 
+-    if (isa<CallBrInst>(I)) {
+-      llvm_unreachable("Don't support CallBr yet (and maybe never will)");
+-      return;
+-    }
++    if (isa<CallBrInst>(I))
++      report_fatal_error("Fil-C does not support asm goto (callbr)",
++                         /*GenCrashDiag=*/false);
+ 
+     if (VAArgInst* VI = dyn_cast<VAArgInst>(I)) {
+       Type* T = VI->getType();
+@@ -14368,35 +14376,16 @@ class Pizlonator {
+       return;
+     }
+ 
+-    if (isa<IndirectBrInst>(I)) {
+-      llvm_unreachable("Don't support IndirectBr yet (and maybe never will)");
+-      return;
+-    }
+-
+-    if (isa<CatchSwitchInst>(I)) {
+-      llvm_unreachable("Don't support CatchSwitch yet");
+-      return;
+-    }
++    if (isa<IndirectBrInst>(I))
++      report_fatal_error("Fil-C: unlowered indirectbr instruction",
++                         /*GenCrashDiag=*/false);
+ 
+-    if (isa<CleanupPadInst>(I)) {
+-      llvm_unreachable("Don't support CleanupPad yet");
+-      return;
+-    }
+-
+-    if (isa<CatchPadInst>(I)) {
+-      llvm_unreachable("Don't support CatchPad yet");
+-      return;
+-    }
+-
+-    if (isa<CatchReturnInst>(I)) {
+-      llvm_unreachable("Don't support CatchReturn yet");
+-      return;
+-    }
+-
+-    if (isa<CleanupReturnInst>(I)) {
+-      llvm_unreachable("Don't support CleanupReturn yet");
+-      return;
+-    }
++    if (isa<CatchSwitchInst>(I) || isa<CleanupPadInst>(I) ||
++        isa<CatchPadInst>(I) || isa<CatchReturnInst>(I) ||
++        isa<CleanupReturnInst>(I))
++      report_fatal_error(
++          "Fil-C does not support Windows SEH / funclet exception handling instructions",
++          /*GenCrashDiag=*/false);
+ 
+     if (isa<UnreachableInst>(I)) {
+       CallInst::Create(
+@@ -14441,7 +14430,8 @@ class Pizlonator {
+     }
+ 
+     errs() << "Unrecognized instruction: " << *I << "\n";
+-    llvm_unreachable("Unknown instruction");
++    report_fatal_error("Fil-C: unsupported LLVM instruction",
++                       /*GenCrashDiag=*/false);
+   }
+ 
+   bool isSetjmp(Function* F) {
+@@ -16151,15 +16141,28 @@ class Pizlonator {
+       for (BasicBlock& BB : F) {
+         for (Instruction& I : BB) {
+           if (isa<IndirectBrInst>(&I))
+-            llvm_unreachable("Don't support IndirectBr yet (and maybe never will)");
++            report_fatal_error("Fil-C: unlowered indirectbr instruction",
++                               /*GenCrashDiag=*/false);
+           if (LoadInst* LI = dyn_cast<LoadInst>(&I))
+-            assert(!LI->getPointerAddressSpace());
++            if (LI->getPointerAddressSpace())
++              report_fatal_error(
++                  "Fil-C does not support non-zero pointer address spaces",
++                  /*GenCrashDiag=*/false);
+           if (StoreInst* SI = dyn_cast<StoreInst>(&I))
+-            assert(!SI->getPointerAddressSpace());
++            if (SI->getPointerAddressSpace())
++              report_fatal_error(
++                  "Fil-C does not support non-zero pointer address spaces",
++                  /*GenCrashDiag=*/false);
+           if (AtomicCmpXchgInst* AI = dyn_cast<AtomicCmpXchgInst>(&I))
+-            assert(!AI->getPointerAddressSpace());
++            if (AI->getPointerAddressSpace())
++              report_fatal_error(
++                  "Fil-C does not support non-zero pointer address spaces",
++                  /*GenCrashDiag=*/false);
+           if (AtomicRMWInst* AI = dyn_cast<AtomicRMWInst>(&I))
+-            assert(!AI->getPointerAddressSpace());
++            if (AI->getPointerAddressSpace())
++              report_fatal_error(
++                  "Fil-C does not support non-zero pointer address spaces",
++                  /*GenCrashDiag=*/false);
+         }
+       }
+ 
+@@ -16444,8 +16447,10 @@ public:
+     for (Function &F : M.functions()) {
+       if (shouldPassThrough(&F)) {
+         if (!F.isDeclaration()) {
+-          errs() << "Cannot define " << F.getName() << "\n";
+-          llvm_unreachable("Attempt to define pass-through function.");
++          report_fatal_error(
++              Twine("Fil-C: cannot define reserved pass-through function '") +
++                  F.getName() + "'",
++              /*GenCrashDiag=*/false);
+         }
+         if (isSetjmp(&F)) {
+           assert(F.hasFnAttribute(Attribute::ReturnsTwice));
+@@ -16453,15 +16458,19 @@ public:
+             if (F.getFunctionType() != SetjmpTy) {
+               errs() << "Unexpected setjmp signature: " << *F.getFunctionType()
+                      << ", expected: " << *SetjmpTy << "\n";
++              report_fatal_error(
++                  Twine("Fil-C: incompatible prototype for '") + F.getName() + "'",
++                  /*GenCrashDiag=*/false);
+             }
+-            assert(F.getFunctionType() == SetjmpTy);
+           } else {
++            assert(F.getName() == "sigsetjmp");
+             if (F.getFunctionType() != SigsetjmpTy) {
+               errs() << "Unexpected setjmp signature: " << *F.getFunctionType()
+                      << ", expected: " << *SigsetjmpTy << "\n";
++              report_fatal_error(
++                  Twine("Fil-C: incompatible prototype for '") + F.getName() + "'",
++                  /*GenCrashDiag=*/false);
+             }
+-            assert(F.getName() == "sigsetjmp");
+-            assert(F.getFunctionType() == SigsetjmpTy);
+           }
+         }
+         continue;

@@ -390,6 +390,79 @@ else
   FAILURES=$((FAILURES + 1))
 fi
 
+echo "=== Running (g) Clean Compile-Time Rejection of Unsupported Constructs ==="
+cat > "$TEST_DIR/reject_builtin_setjmp.c" <<'EOF'
+void *buf[5];
+int f(void) { return __builtin_setjmp(buf); }
+EOF
+
+cat > "$TEST_DIR/reject_builtin_longjmp.c" <<'EOF'
+void *buf[5];
+void f(void) { __builtin_longjmp(buf, 1); }
+EOF
+
+cat > "$TEST_DIR/reject_asm_goto.c" <<'EOF'
+int f(void) {
+    asm goto("" : : : : target);
+    return 0;
+target:
+    return 1;
+}
+EOF
+
+cat > "$TEST_DIR/reject_addrspace.c" <<'EOF'
+int f(int __attribute__((address_space(256))) *p) { return *p; }
+EOF
+
+cat > "$TEST_DIR/reject_module_asm.c" <<'EOF'
+__asm__(".filc_invalid_directive_xyz");
+int f(void) { return 0; }
+EOF
+
+REJECT_OK=1
+check_compile_reject() {
+  local case_id="$1"
+  local src="$2"
+  local expected="$3"
+  local rc=0
+  set +e
+  "$CLANG" -O2 -c "$src" -o "$TEST_DIR/${case_id}.o" \
+    >"$TEST_DIR/${case_id}.stdout" 2>"$TEST_DIR/${case_id}.stderr"
+  rc=$?
+  set -e
+  echo "$rc" >"$TEST_DIR/${case_id}.rc"
+  if [[ "$rc" -eq 0 || "$rc" -ge 128 ]]; then
+    echo "error: reject case '$case_id' unexpected exit code rc=$rc (expected clean non-signal compile error)" >&2
+    cat "$TEST_DIR/${case_id}.stderr" >&2
+    REJECT_OK=0
+    return
+  fi
+  if ! grep -Fq "$expected" "$TEST_DIR/${case_id}.stderr"; then
+    echo "error: reject case '$case_id' missing expected diagnostic '$expected'" >&2
+    cat "$TEST_DIR/${case_id}.stderr" >&2
+    REJECT_OK=0
+    return
+  fi
+  if grep -Eq "PLEASE submit a bug report|UNREACHABLE executed|Stack dump:" "$TEST_DIR/${case_id}.stderr"; then
+    echo "error: reject case '$case_id' crashed compiler instead of emitting clean error" >&2
+    cat "$TEST_DIR/${case_id}.stderr" >&2
+    REJECT_OK=0
+  fi
+}
+
+check_compile_reject reject_builtin_setjmp "$TEST_DIR/reject_builtin_setjmp.c" "__builtin_setjmp is not supported for this target"
+check_compile_reject reject_builtin_longjmp "$TEST_DIR/reject_builtin_longjmp.c" "__builtin_longjmp is not supported for this target"
+check_compile_reject reject_asm_goto "$TEST_DIR/reject_asm_goto.c" "Fil-C does not support asm goto (callbr)"
+check_compile_reject reject_addrspace "$TEST_DIR/reject_addrspace.c" "Fil-C does not support non-zero pointer address spaces"
+check_compile_reject reject_module_asm "$TEST_DIR/reject_module_asm.c" "Fil-C: unsupported or invalid module-level inline assembly"
+
+if [[ "$REJECT_OK" -eq 1 ]]; then
+  STATUS_REJECT="PASS"
+else
+  STATUS_REJECT="FAIL"
+  FAILURES=$((FAILURES + 1))
+fi
+
 OVERALL_STATUS="PASS"
 if (( FAILURES > 0 )); then
   OVERALL_STATUS="FAIL"
@@ -489,6 +562,9 @@ ARCH="$(uname -m)"
   sed 's/^/  | /' "$TEST_DIR/indirectbr_o0.stdout"
   echo "STDOUT_O2:"
   sed 's/^/  | /' "$TEST_DIR/indirectbr_o2.stdout"
+  echo ""
+  echo "--- TEST (g) COMPILE-TIME REJECTION OF UNSUPPORTED CONSTRUCTS [$STATUS_REJECT] ---"
+  echo "REJECT_OK: $REJECT_OK (builtin_setjmp=$(cat "$TEST_DIR/reject_builtin_setjmp.rc"), builtin_longjmp=$(cat "$TEST_DIR/reject_builtin_longjmp.rc"), asm_goto=$(cat "$TEST_DIR/reject_asm_goto.rc"), addrspace=$(cat "$TEST_DIR/reject_addrspace.rc"), module_asm=$(cat "$TEST_DIR/reject_module_asm.rc"))"
   echo "================================================================================"
 } > "$REPORT_FILE"
 

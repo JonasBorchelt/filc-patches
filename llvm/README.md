@@ -15,6 +15,7 @@ Applied by default via `scripts/apply`:
 6. `06a-clang-driver-filc-core.patch`: Fil-C Linux Clang driver (`pizfix`/`optfil`, SARCASM assembler, `-enable-filc-jit`, version scripts, static-PIE).
 7. `06b-clang-driver-wl-version-script.patch`: Rewrites `-Wl,--version-script=` and `-Wl,--version-script,` through `PizlonateVersionScript()` in the Linux Clang driver.
 8. `06c-clang-driver-sarcasm-safe-wa-flags.patch`: Accepts safe no-op assembler metadata flags (`-Wa,--noexecstack`, `-Wa,--generate-missing-build-notes={yes,no}`, `-Wa,-mrelax-relocations={yes,no}`, `-Wa,--compress-debug-sections[=...]`) in `SarcasmAs` while still rejecting unsafe flags.
+9. `07-filc-hardened-compile-diagnostics.patch`: Rejects `__builtin_setjmp`/`__builtin_longjmp` cleanly in Clang Sema and replaces all user-input-reachable `llvm_unreachable`/`assert` sites in `FilPizlonator`, `CGRecordLayoutBuilder`, and `Gnu.cpp` with `report_fatal_error(..., /*GenCrashDiag=*/false)` so Release builds (`LLVM_ENABLE_ASSERTIONS=OFF`) never turn unsupported constructs into compiler UB.
 
 ## Optional (`llvm/series.optional`)
 

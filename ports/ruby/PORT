@@ -1,10 +1,10 @@
 NAME="ruby"
-VERSION="3.3.10"
+VERSION="3.3.14"
 LICENSE="Ruby OR BSD-2-Clause"
-UPSTREAM_URL="https://cache.ruby-lang.org/pub/ruby/3.3/ruby-3.3.10.tar.xz"
-UPSTREAM_SHA256="3a06c3a709672a4ddae4e511d7e82f74799b8b3f550c8cf2d6f32089003cb84c"
+UPSTREAM_URL="https://cache.ruby-lang.org/pub/ruby/3.3/ruby-3.3.14.tar.xz"
+UPSTREAM_SHA256="e24ef6d97095a9c42bf8259a2de33a25aac8d92bb48fefdbdc81724b87784854"
 UPSTREAM_SHA256_SOURCE="sha256:https://cache.ruby-lang.org/pub/ruby/index.txt"
-EXTRACT_DIR="ruby-3.3.10"
+EXTRACT_DIR="ruby-3.3.14"
 TIER=5
 DEPS="openssl libffi zlib yaml ncurses libedit pkgconf"
 BUILD_SYSTEM="autotools"
@@ -13,7 +13,7 @@ MAKE_ARGS=""
 INSTALL_ARGS=""
 TEST_CMD=""
 POLICY_CLASS="P4-Audit"
-POLICY_RATIONALE="Pinned to 3.3.10 because Fil-C's 2,247-line GC replacement in gc.c and 124-file VALUE capability-tagging patch base target Ruby 3.3's monolithic gc.c/RBasic/vm_insnhelper.h architecture (split and refactored in Ruby 3.4/3.5). Audited down from 139 files (+6821/-4703) to 124 files (+3551/-1438, 56.7% line reduction): drops stray configure.txt, 11 test-only spec/ and ext/-test-/ files, and auto-generated parse.c/parse.h/ext/ripper/ripper.c (+3445/-3441, regenerated cleanly during build via bundled lrama and host ruby). Disables YJIT/RJIT, jemalloc, and asm coroutines via P3 configure flags."
+POLICY_RATIONALE="Pinned to the 3.3 series (latest security release 3.3.14) because Fil-C's GC replacement in gc.c and 124-file VALUE capability-tagging patch base target Ruby 3.3's monolithic gc.c/RBasic/vm_insnhelper.h architecture (split and refactored in Ruby 3.4/3.5). Audited down from Fil-C 3.3.10 (139 files, +6821/-4703) and refreshed to 3.3.14 (124 files, +3335/-1222, 60.5% line reduction, 0 fuzz, 0 offset): drops stray configure.txt, 11 test-only spec/ and ext/-test-/ files, auto-generated parse.c/parse.h/ext/ripper/ripper.c (+3445/-3441, regenerated cleanly during build via bundled lrama and host ruby), and obsolete vm_args.c VALUE-index hunk fixed upstream in 3.3.14. Disables YJIT/RJIT, jemalloc, and asm coroutines via P3 configure flags."
 FILC_ORIGIN_REF="50531d7ebf61:projects/ruby-3.3.10"
 
 port_configure() {
@@ -49,7 +49,7 @@ port_test() {
   out="$("$PIZFIX/bin/ruby" --version)"
   ver="${out%%$'\n'*}"
   echo "ruby version: $ver"
-  printf '%s\n' "$ver" | grep -q '^ruby 3\.3\.10 '
+  printf '%s\n' "$ver" | grep -q '^ruby 3\.3\.14 '
   "$PIZFIX/bin/ruby" - <<'EOF' | grep -Fxq 'RUBY_FILC_OK'
 require "digest"
 require "fiddle"

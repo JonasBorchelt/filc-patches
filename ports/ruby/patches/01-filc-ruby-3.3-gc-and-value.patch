@@ -1,6 +1,6 @@
-Subject: Fil-C GC integration and capability-safe VALUE representation for Ruby 3.3.10
+Subject: Fil-C GC integration and capability-safe VALUE representation for Ruby 3.3.14
 Policy-Class: P4-Audit
-Rationale: Audited down from Fil-C ruby-3.3.10 (139 files, +6821/-4703) to 124 core files (+3551/-1438, 56.7% line reduction): drops stray configure.txt, 11 test-only spec/ and ext/-test-/ files, and auto-generated parse.c/parse.h/ext/ripper/ripper.c (+3445/-3441, regenerated cleanly from parse.y/ripper.y by bundled lrama during build). Combines P3 flags (--disable-yjit --disable-rjit --without-jit --without-jemalloc --with-coroutine=pthread) with the Fil-C gc.c and VALUE capability-tagging runtime bridge.
+Rationale: Audited down from Fil-C ruby-3.3.10 (139 files, +6821/-4703) and refreshed to security release 3.3.14 (124 core files, +3335/-1222, 60.5% line reduction, 0 fuzz, 0 offset): drops stray configure.txt, 11 test-only spec/ and ext/-test-/ files, auto-generated parse.c/parse.h/ext/ripper/ripper.c (+3445/-3441, regenerated cleanly from parse.y/ripper.y by bundled lrama during build), and obsolete vm_args.c VALUE-index hunk fixed upstream in 3.3.14. Combines P3 flags (--disable-yjit --disable-rjit --without-jit --without-jemalloc --with-coroutine=pthread) with the Fil-C gc.c and VALUE capability-tagging runtime bridge.
 Upstream-Status: Fil-C-Specific
 Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
 
@@ -17,7 +17,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          D_puts("e reduce");
 --- a/array.c
 +++ b/array.c
-@@ -1854,10 +1854,10 @@
+@@ -1857,10 +1857,10 @@
          return rb_ary_entry(ary, FIX2LONG(arg));
      }
      /* check if idx is Range or ArithmeticSequence */
@@ -31,7 +31,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          return Qnil;
        default:
          return rb_ary_subseq_step(ary, beg, len, step);
-@@ -4190,11 +4190,11 @@
+@@ -4194,11 +4194,11 @@
      }
  
      if (!FIXNUM_P(arg1)) {
@@ -46,7 +46,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
              /* invalid range */
              return Qnil;
            default:
-@@ -6613,7 +6613,7 @@
+@@ -6629,7 +6629,7 @@
          RARRAY_PTR_USE(result, ptr_result, {
              for (i=0; i<n; i++) {
                  long r = RAND_UPTO(len-i) + i;
@@ -55,7 +55,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                  if (r > max_idx) max_idx = r;
              }
              len = RARRAY_LEN(ary);
-@@ -6621,7 +6621,7 @@
+@@ -6637,7 +6637,7 @@
              else if (n > len) n = len;
              RARRAY_PTR_USE(ary, ptr_ary, {
                  for (i=0; i<n; i++) {
@@ -210,7 +210,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
              i += insn_len(insn);
          }
      }
-@@ -1376,7 +1377,7 @@
+@@ -1385,7 +1386,7 @@
  static void
  iseq_insn_each_markable_object(INSN *insn, void (*func)(VALUE, VALUE), VALUE data)
  {
@@ -219,7 +219,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      for (int j = 0; types[j]; j++) {
          char type = types[j];
          switch (type) {
-@@ -1578,11 +1579,11 @@
+@@ -1587,11 +1588,11 @@
      const VALUE *tptr = RARRAY_CONST_PTR(catch_table_ary);
      for (i = 0; i < tlen; i++) {
          const VALUE *ptr = RARRAY_CONST_PTR(tptr[i]);
@@ -234,7 +234,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  
          if (ct != CATCH_TYPE_BREAK
              && ct != CATCH_TYPE_NEXT
-@@ -2012,7 +2013,7 @@
+@@ -2021,7 +2022,7 @@
  
              while (node) {
                  label = NEW_LABEL(nd_line(RNODE(node)));
@@ -243,7 +243,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                  ADD_LABEL(optargs, label);
                  NO_CHECK(COMPILE_POPPED(optargs, "optarg", node->nd_body));
                  node = node->nd_next;
-@@ -2021,14 +2022,14 @@
+@@ -2030,14 +2031,14 @@
  
              /* last label */
              label = NEW_LABEL(nd_line(node_args));
@@ -260,7 +260,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
              }
              rb_ary_clear(labels);
  
-@@ -2208,7 +2209,7 @@
+@@ -2217,7 +2218,7 @@
  cdhash_set_label_i(VALUE key, VALUE val, VALUE ptr)
  {
      struct cdhash_set_label_struct *data = (struct cdhash_set_label_struct *)ptr;
@@ -269,7 +269,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      rb_hash_aset(data->hash, key, INT2FIX(lobj->position - (data->pos+data->len)));
      return ST_CONTINUE;
  }
-@@ -2556,7 +2557,7 @@
+@@ -2565,7 +2566,7 @@
                  /* fprintf(stderr, "insn: %-16s, sp: %d\n", insn_name(iobj->insn_id), sp); */
                  operands = iobj->operands;
                  insn = iobj->insn_id;
@@ -278,7 +278,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                  types = insn_op_types(insn);
                  len = insn_len(insn);
  
-@@ -2569,7 +2570,7 @@
+@@ -2578,7 +2579,7 @@
                          {
                              /* label(destination position) */
                              LABEL *lobj = (LABEL *)operands[j];
@@ -287,7 +287,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                              break;
                          }
                        case TS_CDHASH:
-@@ -2591,7 +2592,7 @@
+@@ -2600,7 +2601,7 @@
                          }
                        case TS_LINDEX:
                        case TS_NUM:	/* ulong */
@@ -296,7 +296,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                          break;
                        case TS_ISEQ:	/* iseq */
                        case TS_VALUE:	/* VALUE */
-@@ -2664,7 +2665,7 @@
+@@ -2673,7 +2674,7 @@
                              break;
                          }
                        case TS_ID: /* ID */
@@ -305,7 +305,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                          break;
                        case TS_FUNCPTR:
                          generated_iseq[code_index + 1 + j] = operands[j];
-@@ -2715,11 +2716,11 @@
+@@ -2724,11 +2725,11 @@
                          if (add_adjust_info(insns_info, positions, insns_info_index, code_index, adjust)) insns_info_index++;
                      }
                      if (diff > 1) {
@@ -320,7 +320,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                      }
                      else if (diff < 0) {
                          int label_no = adjust->label ? adjust->label->label_no : -1;
-@@ -2808,15 +2809,15 @@
+@@ -2817,15 +2818,15 @@
          for (i = 0; i < table->size; i++) {
              ptr = RARRAY_CONST_PTR(tptr[i]);
              entry = UNALIGNED_MEMBER_PTR(table, entries[i]);
@@ -340,7 +340,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                  entry->cont = label_get_position(lobj);
                  entry->sp = label_get_sp(lobj);
  
-@@ -2857,7 +2858,7 @@
+@@ -2866,7 +2867,7 @@
  
      if (ISEQ_BODY(iseq)->param.flags.has_opt) {
          for (i = 0; i < ISEQ_BODY(iseq)->param.opt_num + 1; i++) {
@@ -349,7 +349,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          }
      }
      return COMPILE_OK;
-@@ -2999,7 +3000,7 @@
+@@ -3008,7 +3009,7 @@
      do {
          if (IS_INSN(i)) {
              struct rb_iseq_constant_body *body = ISEQ_BODY(iseq);
@@ -358,7 +358,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
              int pos, len = insn_len(insn);
              for (pos = 0; pos < len; ++pos) {
                  switch (insn_op_types(insn)[pos]) {
-@@ -3020,11 +3021,11 @@
+@@ -3029,11 +3030,11 @@
  static int
  iseq_pop_newarray(rb_iseq_t *iseq, INSN *iobj)
  {
@@ -373,7 +373,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          ELEM_REMOVE(&iobj->link);
          return FALSE;
        default:
-@@ -5074,7 +5075,7 @@
+@@ -5083,7 +5084,7 @@
              only_special_literals = 0;
          }
          else if (NIL_P(rb_hash_lookup(literals, lit))) {
@@ -382,7 +382,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          }
  
          if (nd_type_p(val, NODE_STR)) {
-@@ -5409,9 +5410,9 @@
+@@ -5418,9 +5419,9 @@
      int i; \
      if (memindex == memsize) return 0; \
      for (i=0; i<memindex; i++) { \
@@ -394,7 +394,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  }
  
      if (rhsn == 0 || !nd_type_p(rhsn, NODE_LIST)) {
-@@ -6146,7 +6147,7 @@
+@@ -6155,7 +6156,7 @@
          return argc;
        }
        default: {
@@ -403,7 +403,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
        }
      }
  }
-@@ -7682,7 +7683,7 @@
+@@ -7691,7 +7692,7 @@
      ADD_LABEL(ret, end_label);
      ADD_ADJUST_RESTORE(ret, adjust_label);
  
@@ -412,7 +412,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          /* ADD_INSN(ret, line_node, putundef); */
          COMPILE_ERROR(ERROR_ARGS "unsupported: putundef");
          return COMPILE_NG;
-@@ -10642,7 +10643,7 @@
+@@ -10651,7 +10652,7 @@
              }
            default:
              /* ignore */
@@ -421,7 +421,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          }
          link = link->next;
      }
-@@ -10651,7 +10652,7 @@
+@@ -10660,7 +10661,7 @@
  }
  
  int
@@ -430,7 +430,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  {
      return insn_len(insn);
  }
-@@ -10691,7 +10692,7 @@
+@@ -10700,7 +10701,7 @@
      return label;
  }
  
@@ -439,7 +439,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  get_exception_sym2type(VALUE sym)
  {
      static VALUE symRescue, symEnsure, symRetry;
-@@ -10724,7 +10725,8 @@
+@@ -10733,7 +10734,8 @@
  
      for (i=0; i<RARRAY_LEN(exception); i++) {
          const rb_iseq_t *eiseq;
@@ -449,7 +449,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          LABEL *lstart, *lend, *lcont;
          unsigned int sp;
  
-@@ -10769,7 +10771,7 @@
+@@ -10778,7 +10780,7 @@
      table = st_init_numtable_with_size(VM_INSTRUCTION_SIZE);
  
      for (i=0; i<VM_INSTRUCTION_SIZE; i++) {
@@ -458,7 +458,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      }
  
      return table;
-@@ -10900,12 +10902,12 @@
+@@ -10909,12 +10911,12 @@
              if (st_lookup(insn_table, (st_data_t)insn, &insn_id) == 0) {
                  /* TODO: exception */
                  COMPILE_ERROR(iseq, line_no,
@@ -473,7 +473,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                  COMPILE_ERROR(iseq, line_no,
                                "operand size mismatch");
                  ret = COMPILE_NG;
-@@ -10923,7 +10925,7 @@
+@@ -10932,7 +10934,7 @@
  
                  for (j=0; j<argc; j++) {
                      VALUE op = rb_ary_entry(obj, j+1);
@@ -482,7 +482,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                        case TS_OFFSET: {
                          LABEL *label = register_label(iseq, labels_table, op);
                          argv[j] = (VALUE)label;
-@@ -11003,7 +11005,7 @@
+@@ -11012,7 +11014,7 @@
                                  VALUE sym = RARRAY_AREF(op, i+1);
                                  LABEL *label =
                                    register_label(iseq, labels_table, sym);
@@ -491,7 +491,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                              }
                              RB_GC_GUARD(op);
                              argv[j] = map;
-@@ -11021,7 +11023,7 @@
+@@ -11030,7 +11032,7 @@
                          }
                          break;
                        default:
@@ -500,7 +500,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                      }
                  }
              }
-@@ -11589,7 +11591,7 @@
+@@ -11598,7 +11600,7 @@
  static VALUE
  ibf_dump_object(struct ibf_dump *dump, VALUE obj)
  {
@@ -509,7 +509,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  }
  
  static VALUE
-@@ -11607,7 +11609,7 @@
+@@ -11616,7 +11618,7 @@
      if (id_index == 0) {
          return 0;
      }
@@ -518,7 +518,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      return rb_sym2id(sym);
  }
  
-@@ -11644,10 +11646,10 @@
+@@ -11653,10 +11655,10 @@
   * 0x01000000_00000000 - 0xffffffff_ffffffff: 9byte | 0000 0000 | XXXX XXXX | XXXX XXXX | XXXX XXXX | XXXX XXXX | XXXX XXXX | XXXX XXXX | XXXX XXXX | XXXX XXXX |
   */
  static void
@@ -531,7 +531,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          return;
      }
  
-@@ -11656,6 +11658,8 @@
+@@ -11665,6 +11667,8 @@
      unsigned char bytes[max_byte_length];
      ibf_offset_t n;
  
@@ -540,7 +540,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      for (n = 0; n < sizeof(VALUE) && (x >> (7 - n)); n++, x >>= 8) {
          bytes[max_byte_length - 1 - n] = (unsigned char)x;
      }
-@@ -11689,7 +11693,7 @@
+@@ -11698,7 +11702,7 @@
      ibf_offset_t n =
          c & 1 ? 1 :
          c == 0 ? 9 : ntz_int32(c) + 1;
@@ -549,7 +549,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  
      if (*offset + n > load->current_buffer->size) {
          rb_raise(rb_eRuntimeError, "invalid byte sequence");
-@@ -11698,11 +11702,11 @@
+@@ -11707,11 +11711,11 @@
      ibf_offset_t i;
      for (i = 1; i < n; i++) {
          x <<= 8;
@@ -563,7 +563,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  }
  
  static void
-@@ -11752,11 +11756,11 @@
+@@ -11762,11 +11766,11 @@
  
      for (code_index=0; code_index<iseq_size;) {
          const VALUE insn = orig_code[code_index++];
@@ -577,7 +577,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          ibf_dump_write_small_value(dump, insn);
  
          /* operands */
-@@ -11784,7 +11788,7 @@
+@@ -11794,7 +11798,7 @@
                case TS_ICVARC:
                  {
                      union iseq_inline_storage_entry *is = (union iseq_inline_storage_entry *)op;
@@ -586,7 +586,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                  }
                  break;
                case TS_CALLDATA:
-@@ -11843,7 +11847,7 @@
+@@ -11853,7 +11857,7 @@
      for (code_index=0; code_index<iseq_size;) {
          /* opcode */
          const VALUE insn = code[code_index] = ibf_load_small_value(load, &reading_pos);
@@ -595,7 +595,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          int op_index;
  
          code_index++;
-@@ -11940,7 +11944,7 @@
+@@ -11950,7 +11954,7 @@
                case TS_ID:
                  {
                      VALUE op = ibf_load_small_value(load, &reading_pos);
@@ -604,7 +604,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                  }
                  break;
                case TS_FUNCPTR:
-@@ -11954,7 +11958,7 @@
+@@ -11964,7 +11968,7 @@
                  continue;
              }
          }
@@ -613,7 +613,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
              rb_raise(rb_eRuntimeError, "operand size mismatch");
          }
      }
-@@ -12065,11 +12069,11 @@
+@@ -12075,11 +12079,11 @@
  
      unsigned int i;
      for (i = 0; i < ISEQ_BODY(iseq)->insns_info.size; i++) {
@@ -628,7 +628,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      }
  
      return offset;
-@@ -12101,7 +12105,7 @@
+@@ -12111,7 +12115,7 @@
      unsigned int last = 0;
      unsigned int i;
      for (i = 0; i < size; i++) {
@@ -637,7 +637,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          last = positions[i];
      }
  
-@@ -12133,7 +12137,7 @@
+@@ -12143,7 +12147,7 @@
      int i;
  
      for (i=0; i<size; i++) {
@@ -646,7 +646,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      }
  
      IBF_W_ALIGN(ID);
-@@ -12173,12 +12177,12 @@
+@@ -12183,12 +12187,12 @@
          const ibf_offset_t offset = ibf_dump_pos(dump);
  
          for (i=0; i<table->size; i++) {
@@ -665,7 +665,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          }
          return offset;
      }
-@@ -12230,13 +12234,13 @@
+@@ -12240,13 +12244,13 @@
          const struct rb_callinfo *ci = cds[i].ci;
          if (ci != NULL) {
              ibf_dump_write_small_value(dump, ibf_dump_id(dump, vm_ci_mid(ci)));
@@ -682,7 +682,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                  for (int j=0; j<len; j++) {
                      VALUE keyword = ibf_dump_object(dump, kwarg->keywords[j]);
                      ibf_dump_write_small_value(dump, keyword);
-@@ -12306,9 +12310,9 @@
+@@ -12316,9 +12320,9 @@
          ruby_qsort(ovlist->pairs, size, sizeof(struct outer_variable_pair), outer_variable_cmp, NULL);
          for (size_t i = 0; i < size; ++i) {
              ID id = ovlist->pairs[i].id;
@@ -694,7 +694,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          }
      }
  
-@@ -12332,7 +12336,7 @@
+@@ -12342,7 +12346,7 @@
      for (i = 0; i < ci_size; i++) {
          VALUE mid_index = ibf_load_small_value(load, &reading_pos);
          if (mid_index != (VALUE)-1) {
@@ -703,7 +703,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
              unsigned int flag = (unsigned int)ibf_load_small_value(load, &reading_pos);
              unsigned int argc = (unsigned int)ibf_load_small_value(load, &reading_pos);
  
-@@ -12453,49 +12457,49 @@
+@@ -12463,49 +12467,49 @@
  #  define IBF_BODY_OFFSET(x) (body_offset - (x))
  #endif
  
@@ -796,7 +796,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  
  #undef IBF_BODY_OFFSET
  
-@@ -12565,7 +12569,7 @@
+@@ -12575,7 +12579,7 @@
  
      const unsigned int type = (unsigned int)ibf_load_small_value(load, &reading_pos);
      const unsigned int iseq_size = (unsigned int)ibf_load_small_value(load, &reading_pos);
@@ -805,7 +805,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      const ibf_offset_t bytecode_size = (ibf_offset_t)ibf_load_small_value(load, &reading_pos);
      const unsigned int param_flags = (unsigned int)ibf_load_small_value(load, &reading_pos);
      const unsigned int param_size = (unsigned int)ibf_load_small_value(load, &reading_pos);
-@@ -12575,7 +12579,7 @@
+@@ -12585,7 +12589,7 @@
      const int param_post_start = (int)ibf_load_small_value(load, &reading_pos);
      const int param_post_num = (int)ibf_load_small_value(load, &reading_pos);
      const int param_block_start = (int)ibf_load_small_value(load, &reading_pos);
@@ -814,7 +814,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      const ibf_offset_t param_keyword_offset = (ibf_offset_t)ibf_load_small_value(load, &reading_pos);
      const VALUE location_pathobj_index = ibf_load_small_value(load, &reading_pos);
      const VALUE location_base_label_index = ibf_load_small_value(load, &reading_pos);
-@@ -12586,17 +12590,17 @@
+@@ -12596,17 +12600,17 @@
      const int location_code_location_beg_pos_column = (int)ibf_load_small_value(load, &reading_pos);
      const int location_code_location_end_pos_lineno = (int)ibf_load_small_value(load, &reading_pos);
      const int location_code_location_end_pos_column = (int)ibf_load_small_value(load, &reading_pos);
@@ -838,7 +838,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      const rb_snum_t variable_flip_count = (rb_snum_t)ibf_load_small_value(load, &reading_pos);
      const unsigned int local_table_size = (unsigned int)ibf_load_small_value(load, &reading_pos);
  
-@@ -12627,7 +12631,7 @@
+@@ -12637,7 +12641,7 @@
              if (!NIL_P(realpath)) {
                  if (!RB_TYPE_P(realpath, T_STRING)) {
                      rb_raise(rb_eArgError, "unexpected realpath %"PRIxVALUE
@@ -847,7 +847,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                               realpath, TYPE(realpath), path);
                  }
                  realpath = rb_fstring(realpath);
-@@ -12946,11 +12950,11 @@
+@@ -12956,11 +12960,11 @@
      if (encindex > RUBY_ENCINDEX_BUILTIN_MAX) {
          rb_encoding *enc = rb_enc_from_index((int)encindex);
          const char *enc_name = rb_enc_name(enc);
@@ -862,7 +862,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      IBF_WP(ptr, char, len);
  }
  
-@@ -12964,7 +12968,7 @@
+@@ -12974,7 +12978,7 @@
      const char *ptr = load->current_buffer->buff + reading_pos;
  
      if (encindex > RUBY_ENCINDEX_BUILTIN_MAX) {
@@ -871,7 +871,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          encindex = rb_enc_find_index(RSTRING_PTR(enc_name_str));
      }
  
-@@ -12990,7 +12994,7 @@
+@@ -13000,7 +13004,7 @@
      regexp.srcstr = (long)ibf_dump_object(dump, srcstr);
  
      ibf_dump_write_byte(dump, (unsigned char)regexp.option);
@@ -880,7 +880,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  }
  
  static VALUE
-@@ -12998,9 +13002,9 @@
+@@ -13008,9 +13012,9 @@
  {
      struct ibf_object_regexp regexp;
      regexp.option = ibf_load_byte(load, &offset);
@@ -892,7 +892,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      VALUE reg = rb_reg_compile(srcstr, (int)regexp.option, NULL, 0);
  
      if (header->internal) rb_obj_hide(reg);
-@@ -13013,10 +13017,10 @@
+@@ -13023,10 +13027,10 @@
  ibf_dump_object_array(struct ibf_dump *dump, VALUE obj)
  {
      long i, len = RARRAY_LEN(obj);
@@ -905,7 +905,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      }
  }
  
-@@ -13112,8 +13116,8 @@
+@@ -13122,8 +13126,8 @@
  ibf_load_object_struct(const struct ibf_load *load, const struct ibf_object_header *header, ibf_offset_t offset)
  {
      const struct ibf_object_struct_range *range = IBF_OBJBODY(struct ibf_object_struct_range, offset);
@@ -916,7 +916,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      VALUE obj = rb_range_new(beg, end, range->excl);
      if (header->internal) rb_obj_hide(obj);
      if (header->frozen)   rb_obj_freeze(obj);
-@@ -13199,8 +13203,8 @@
+@@ -13209,8 +13213,8 @@
  ibf_load_object_complex_rational(const struct ibf_load *load, const struct ibf_object_header *header, ibf_offset_t offset)
  {
      const struct ibf_object_complex_rational *nums = IBF_OBJBODY(struct ibf_object_complex_rational, offset);
@@ -927,7 +927,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      VALUE obj = header->type == T_COMPLEX ?
        rb_complex_new(a, b) : rb_rational_new(a, b);
  
-@@ -13225,7 +13229,7 @@
+@@ -13235,7 +13239,7 @@
      const char *ptr = load->current_buffer->buff + reading_pos;
  
      if (encindex > RUBY_ENCINDEX_BUILTIN_MAX) {
@@ -936,7 +936,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          encindex = rb_enc_find_index(RSTRING_PTR(enc_name_str));
      }
  
-@@ -13365,14 +13369,14 @@
+@@ -13375,14 +13379,14 @@
  static VALUE
  ibf_load_object(const struct ibf_load *load, VALUE object_index)
  {
@@ -1163,14 +1163,6 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          /* char length is less than 2 */
 --- a/enc/trans/utf_16_32.c
 +++ b/enc/trans/utf_16_32.c
-@@ -1,6 +1,6 @@
- /* autogenerated. */
- /* src="transcode-tblgen.rb", len=30823, checksum=59589 */
--/* src="utf_16_32.trans", len=15308, checksum=28538 */
-+/* src="utf_16_32.trans", len=15336, checksum=30386 */
- 
- #include "transcode_data.h"
- 
 @@ -575,11 +575,11 @@
      case 0:
          if (s[0] == 0xFE && s[1] == 0xFF) {
@@ -1319,7 +1311,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
              status = INT2FIX(EXIT_FAILURE);
              ++argv;
              --argc;
-@@ -2329,14 +2329,14 @@
+@@ -2331,14 +2331,14 @@
  #define FAKE_CSTR(v, str) rb_setup_fake_str((v), (str), rb_strlen_lit(str), usascii)
          c = s = FAKE_CSTR(&s_str, "");
          obj = ptr->recv;
@@ -1338,7 +1330,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
              c = d = FAKE_CSTR(&d_str, "false");
              break;
            default:
-@@ -2477,7 +2477,7 @@
+@@ -2479,7 +2479,7 @@
  {
      VALUE s = rb_str_new2(str);
  
@@ -1347,7 +1339,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  }
  
  /*
-@@ -2707,7 +2707,7 @@
+@@ -2709,7 +2709,7 @@
  {
      st_data_t error;
  
@@ -1356,7 +1348,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          error = rb_define_class_under(rb_mErrno, name, rb_eSystemCallError);
  
          /* capture nonblock errnos for WaitReadable/WaitWritable subclasses */
-@@ -2728,7 +2728,7 @@
+@@ -2730,7 +2730,7 @@
          }
  
          rb_define_const(error, "Errno", INT2NUM(n));
@@ -1365,7 +1357,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      }
      else {
          rb_define_const(rb_mErrno, name, error);
-@@ -2741,7 +2741,7 @@
+@@ -2743,7 +2743,7 @@
  {
      st_data_t error;
  
@@ -1374,7 +1366,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          char name[8];	/* some Windows' errno have 5 digits. */
  
          snprintf(name, sizeof(name), "E%03d", n);
-@@ -2773,7 +2773,7 @@
+@@ -2775,7 +2775,7 @@
          if (argc == 1 && FIXNUM_P(mesg)) {
              error = mesg; mesg = Qnil;
          }
@@ -1383,7 +1375,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
              klass = (VALUE)data;
              /* change class */
              if (!RB_TYPE_P(self, T_OBJECT)) { /* insurance to avoid type crash */
-@@ -3421,15 +3421,15 @@
+@@ -3423,15 +3423,15 @@
      sym_highlight = ID2SYM(rb_intern_const("highlight"));
  
      warning_categories.id2enum = rb_init_identtable();
@@ -1583,7 +1575,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      if (state) {
 --- a/ext/openssl/ossl_asn1.c
 +++ b/ext/openssl/ossl_asn1.c
-@@ -1758,7 +1758,7 @@
+@@ -1763,7 +1763,7 @@
       * _tagging_ is not set when a ASN.1 structure is parsed using
       * OpenSSL::ASN1.decode.
       */
@@ -1592,7 +1584,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      rb_undef_method(cASN1Primitive, "indefinite_length=");
      rb_undef_method(cASN1Primitive, "infinite_length=");
      rb_define_method(cASN1Primitive, "initialize", ossl_asn1_initialize, -1);
-@@ -1799,7 +1799,7 @@
+@@ -1804,7 +1804,7 @@
       * _tagging_ is not set when a ASN.1 structure is parsed using
       * OpenSSL::ASN1.decode.
       */
@@ -1652,7 +1644,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      rb_define_method(cPKCS7, "initialize", ossl_pkcs7_initialize, -1);
 --- a/ext/openssl/ossl_pkey_ec.c
 +++ b/ext/openssl/ossl_pkey_ec.c
-@@ -955,7 +955,7 @@
+@@ -957,7 +957,7 @@
  {
      EC_GROUP *group = NULL;
      point_conversion_form_t form;
@@ -1855,7 +1847,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      rb_define_alias(cSSLContext, "ssl_timeout=", "timeout=");
 --- a/ext/openssl/ossl_x509ext.c
 +++ b/ext/openssl/ossl_x509ext.c
-@@ -469,11 +469,11 @@
+@@ -478,11 +478,11 @@
      rb_define_alloc_func(cX509ExtFactory, ossl_x509extfactory_alloc);
      rb_define_method(cX509ExtFactory, "initialize", ossl_x509extfactory_initialize, -1);
  
@@ -1874,7 +1866,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      rb_define_method(cX509ExtFactory, "subject_certificate=", ossl_x509extfactory_set_subject_cert, 1);
 --- a/ext/openssl/ossl_x509store.c
 +++ b/ext/openssl/ossl_x509store.c
-@@ -934,25 +934,25 @@
+@@ -932,25 +932,25 @@
       *
       * See also the man page X509_STORE_CTX_set_verify_cb(3).
       */
@@ -1906,7 +1898,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      rb_undef_method(cX509Store, "initialize_copy");
 --- a/ext/ripper/ripper.y
 +++ b/ext/ripper/ripper.y
-@@ -350,7 +350,7 @@
+@@ -360,7 +360,7 @@
      parser_set_lex_state(p, ls, __LINE__)
  static inline enum lex_state_e parser_set_lex_state(struct parser_params *p, enum lex_state_e ls, int line);
  
@@ -1915,7 +1907,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  
  static const rb_code_location_t NULL_LOC = { {0, -1}, {0, -1} };
  
-@@ -1457,6 +1457,7 @@
+@@ -1467,6 +1467,7 @@
  
  #define yyparse ripper_yyparse
  
@@ -1923,7 +1915,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  #define ID2VAL(id) STATIC_ID2SYM(id)
  #define TOKEN2VAL(t) ID2VAL(TOKEN2ID(t))
  #define KWD2EID(t, v) ripper_new_yylval(p, keyword_##t, get_value(v), 0)
-@@ -1502,7 +1503,7 @@
+@@ -1512,7 +1513,7 @@
  }
  
  static VALUE
@@ -1932,7 +1924,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  {
      return ripper_new_yylval2(p, pre_args, rest_arg, post_args);
  }
-@@ -1555,6 +1556,7 @@
+@@ -1565,6 +1566,7 @@
  static VALUE heredoc_dedent(struct parser_params*,VALUE);
  
  #else
@@ -1940,7 +1932,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  #define ID2VAL(id) (id)
  #define TOKEN2VAL(t) ID2VAL(t)
  #define KWD2EID(t, v) keyword_##t
-@@ -3032,7 +3034,7 @@
+@@ -3042,7 +3044,7 @@
                      }
                  | primary_value call_op tIDENTIFIER
                      {
@@ -1949,7 +1941,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  #if 0
                          $$ = attrset(p, $1, $2, $3, &@$);
  #endif
-@@ -3047,7 +3049,7 @@
+@@ -3057,7 +3059,7 @@
                      }
                  | primary_value call_op tCONSTANT
                      {
@@ -1958,7 +1950,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  #if 0
                          $$ = attrset(p, $1, $2, $3, &@$);
  #endif
-@@ -3535,10 +3537,10 @@
+@@ -3545,10 +3547,10 @@
                      }
                  ;
  
@@ -1973,7 +1965,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                  ;
  
  rel_expr	: arg relop arg   %prec '>'
-@@ -3547,7 +3549,7 @@
+@@ -3557,7 +3559,7 @@
                      }
                  | rel_expr relop arg   %prec '>'
                      {
@@ -1982,7 +1974,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                          $$ = call_bin_op(p, $1, $2, $3, &@2, &@$);
                      }
                  ;
-@@ -5887,7 +5889,7 @@
+@@ -5897,7 +5899,7 @@
                              $$ = list_append(p, head, tail);
                          }
  #endif
@@ -1991,7 +1983,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                          if (ripper_is_node_yylval(p, n1)) {
                              s1 = RNODE_RIPPER(n1)->nd_cval;
                              n1 = RNODE_RIPPER(n1)->nd_rval;
-@@ -7413,7 +7415,7 @@
+@@ -7423,7 +7425,7 @@
      }
      p->ast->body.root = tree;
      if (!p->ast->body.script_lines) p->ast->body.script_lines = INT2FIX(p->line_count);
@@ -2000,7 +1992,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  }
  
  static rb_ast_t *
-@@ -9196,7 +9198,7 @@
+@@ -9206,7 +9208,7 @@
  #undef ERR
      }
      shadowing_lvar(p, id);
@@ -2009,7 +2001,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  }
  
  static int
-@@ -14656,7 +14658,7 @@
+@@ -14667,7 +14669,7 @@
      if (is_private_local_id(p, id)) {
          return;
      }
@@ -2018,7 +2010,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          yyerror1(loc, "duplicated variable name");
      }
      else {
-@@ -14665,12 +14667,12 @@
+@@ -14676,12 +14678,12 @@
  }
  
  static void
@@ -2052,7 +2044,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          id = SYM2ID(revlookup);
 --- a/ext/socket/unixsocket.c
 +++ b/ext/socket/unixsocket.c
-@@ -212,7 +212,7 @@
+@@ -213,7 +213,7 @@
  sendmsg_blocking(void *data)
  {
      struct iomsg_arg *arg = data;
@@ -2061,7 +2053,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  }
  
  /*
-@@ -305,7 +305,7 @@
+@@ -306,7 +306,7 @@
  {
      struct iomsg_arg *arg = data;
      int flags = 0;
@@ -2072,271 +2064,10 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  /*
 --- a/gc.c
 +++ b/gc.c
-@@ -77,267 +77,2366 @@
+@@ -338,6 +338,2105 @@
+     }
+ }
  
- #ifdef HAVE_SYS_TIME_H
- # include <sys/time.h>
-+#endif
-+
-+#ifdef HAVE_SYS_RESOURCE_H
-+# include <sys/resource.h>
-+#endif
-+
-+#if defined _WIN32 || defined __CYGWIN__
-+# include <windows.h>
-+#elif defined(HAVE_POSIX_MEMALIGN)
-+#elif defined(HAVE_MEMALIGN)
-+# include <malloc.h>
-+#endif
-+
-+#include <sys/types.h>
-+
-+#ifdef __EMSCRIPTEN__
-+#include <emscripten.h>
-+#endif
-+
-+#ifdef HAVE_MACH_TASK_EXCEPTION_PORTS
-+# include <mach/task.h>
-+# include <mach/mach_init.h>
-+# include <mach/mach_port.h>
-+#endif
-+#undef LIST_HEAD /* ccan/list conflicts with BSD-origin sys/queue.h. */
-+
-+#include "constant.h"
-+#include "darray.h"
-+#include "debug_counter.h"
-+#include "eval_intern.h"
-+#include "id_table.h"
-+#include "internal.h"
-+#include "internal/class.h"
-+#include "internal/compile.h"
-+#include "internal/complex.h"
-+#include "internal/cont.h"
-+#include "internal/error.h"
-+#include "internal/eval.h"
-+#include "internal/gc.h"
-+#include "internal/hash.h"
-+#include "internal/imemo.h"
-+#include "internal/io.h"
-+#include "internal/numeric.h"
-+#include "internal/object.h"
-+#include "internal/proc.h"
-+#include "internal/rational.h"
-+#include "internal/sanitizers.h"
-+#include "internal/struct.h"
-+#include "internal/symbol.h"
-+#include "internal/thread.h"
-+#include "internal/variable.h"
-+#include "internal/warnings.h"
-+#include "rjit.h"
-+#include "probes.h"
-+#include "regint.h"
-+#include "ruby/debug.h"
-+#include "ruby/io.h"
-+#include "ruby/re.h"
-+#include "ruby/st.h"
-+#include "ruby/thread.h"
-+#include "ruby/util.h"
-+#include "ruby_assert.h"
-+#include "ruby_atomic.h"
-+#include "symbol.h"
-+#include "vm_core.h"
-+#include "vm_sync.h"
-+#include "vm_callinfo.h"
-+#include "ractor_core.h"
-+
-+#include "builtin.h"
-+#include "shape.h"
-+
-+#define rb_setjmp(env) RUBY_SETJMP(env)
-+#define rb_jmp_buf rb_jmpbuf_t
-+#undef rb_data_object_wrap
-+
-+#if !defined(MAP_ANONYMOUS) && defined(MAP_ANON)
-+#define MAP_ANONYMOUS MAP_ANON
-+#endif
-+
-+
-+static size_t malloc_offset = 0;
-+#if defined(HAVE_MALLOC_USABLE_SIZE)
-+static size_t
-+gc_compute_malloc_offset(void)
-+{
-+    // Different allocators use different metadata storage strategies which result in different
-+    // ideal sizes.
-+    // For instance malloc(64) will waste 8B with glibc, but waste 0B with jemalloc.
-+    // But malloc(56) will waste 0B with glibc, but waste 8B with jemalloc.
-+    // So we try allocating 64, 56 and 48 bytes and select the first offset that doesn't
-+    // waste memory.
-+    // This was tested on Linux with glibc 2.35 and jemalloc 5, and for both it result in
-+    // no wasted memory.
-+    size_t offset = 0;
-+    for (offset = 0; offset <= 16; offset += 8) {
-+        size_t allocated = (64 - offset);
-+        void *test_ptr = malloc(allocated);
-+        size_t wasted = malloc_usable_size(test_ptr) - allocated;
-+        free(test_ptr);
-+
-+        if (wasted == 0) {
-+            return offset;
-+        }
-+    }
-+    return 0;
-+}
-+#else
-+static size_t
-+gc_compute_malloc_offset(void)
-+{
-+    // If we don't have malloc_usable_size, we use powers of 2.
-+    return 0;
-+}
-+#endif
-+
-+size_t
-+rb_malloc_grow_capa(size_t current, size_t type_size)
-+{
-+    size_t current_capacity = current;
-+    if (current_capacity < 4) {
-+        current_capacity = 4;
-+    }
-+    current_capacity *= type_size;
-+
-+    // We double the current capacity.
-+    size_t new_capacity = (current_capacity * 2);
-+
-+    // And round up to the next power of 2 if it's not already one.
-+    if (rb_popcount64(new_capacity) != 1) {
-+        new_capacity = (size_t)(1 << (64 - nlz_int64(new_capacity)));
-+    }
-+
-+    new_capacity -= malloc_offset;
-+    new_capacity /= type_size;
-+    if (current > new_capacity) {
-+        rb_bug("rb_malloc_grow_capa: current_capacity=%"PRIuSIZE", new_capacity=%"PRIuSIZE", malloc_offset=%"PRIuSIZE"", current, new_capacity, malloc_offset);
-+    }
-+    RUBY_ASSERT(new_capacity > current);
-+    return new_capacity;
-+}
-+
-+static inline struct rbimpl_size_mul_overflow_tag
-+size_add_overflow(size_t x, size_t y)
-+{
-+    size_t z;
-+    bool p;
-+#if 0
-+
-+#elif __has_builtin(__builtin_add_overflow)
-+    p = __builtin_add_overflow(x, y, &z);
-+
-+#elif defined(DSIZE_T)
-+    RB_GNUC_EXTENSION DSIZE_T dx = x;
-+    RB_GNUC_EXTENSION DSIZE_T dy = y;
-+    RB_GNUC_EXTENSION DSIZE_T dz = dx + dy;
-+    p = dz > SIZE_MAX;
-+    z = (size_t)dz;
-+
-+#else
-+    z = x + y;
-+    p = z < y;
-+
-+#endif
-+    return (struct rbimpl_size_mul_overflow_tag) { p, z, };
-+}
-+
-+static inline struct rbimpl_size_mul_overflow_tag
-+size_mul_add_overflow(size_t x, size_t y, size_t z) /* x * y + z */
-+{
-+    struct rbimpl_size_mul_overflow_tag t = rbimpl_size_mul_overflow(x, y);
-+    struct rbimpl_size_mul_overflow_tag u = size_add_overflow(t.right, z);
-+    return (struct rbimpl_size_mul_overflow_tag) { t.left || u.left, u.right };
-+}
-+
-+static inline struct rbimpl_size_mul_overflow_tag
-+size_mul_add_mul_overflow(size_t x, size_t y, size_t z, size_t w) /* x * y + z * w */
-+{
-+    struct rbimpl_size_mul_overflow_tag t = rbimpl_size_mul_overflow(x, y);
-+    struct rbimpl_size_mul_overflow_tag u = rbimpl_size_mul_overflow(z, w);
-+    struct rbimpl_size_mul_overflow_tag v = size_add_overflow(t.right, u.right);
-+    return (struct rbimpl_size_mul_overflow_tag) { t.left || u.left || v.left, v.right };
-+}
-+
-+PRINTF_ARGS(NORETURN(static void gc_raise(VALUE, const char*, ...)), 2, 3);
-+
-+static inline size_t
-+size_mul_or_raise(size_t x, size_t y, VALUE exc)
-+{
-+    struct rbimpl_size_mul_overflow_tag t = rbimpl_size_mul_overflow(x, y);
-+    if (LIKELY(!t.left)) {
-+        return t.right;
-+    }
-+    else if (rb_during_gc()) {
-+        rb_memerror();          /* or...? */
-+    }
-+    else {
-+        gc_raise(
-+            exc,
-+            "integer overflow: %"PRIuSIZE
-+            " * %"PRIuSIZE
-+            " > %"PRIuSIZE,
-+            x, y, (size_t)SIZE_MAX);
-+    }
-+}
-+
-+size_t
-+rb_size_mul_or_raise(size_t x, size_t y, VALUE exc)
-+{
-+    return size_mul_or_raise(x, y, exc);
-+}
-+
-+static inline size_t
-+size_mul_add_or_raise(size_t x, size_t y, size_t z, VALUE exc)
-+{
-+    struct rbimpl_size_mul_overflow_tag t = size_mul_add_overflow(x, y, z);
-+    if (LIKELY(!t.left)) {
-+        return t.right;
-+    }
-+    else if (rb_during_gc()) {
-+        rb_memerror();          /* or...? */
-+    }
-+    else {
-+        gc_raise(
-+            exc,
-+            "integer overflow: %"PRIuSIZE
-+            " * %"PRIuSIZE
-+            " + %"PRIuSIZE
-+            " > %"PRIuSIZE,
-+            x, y, z, (size_t)SIZE_MAX);
-+    }
-+}
-+
-+size_t
-+rb_size_mul_add_or_raise(size_t x, size_t y, size_t z, VALUE exc)
-+{
-+    return size_mul_add_or_raise(x, y, z, exc);
-+}
-+
-+static inline size_t
-+size_mul_add_mul_or_raise(size_t x, size_t y, size_t z, size_t w, VALUE exc)
-+{
-+    struct rbimpl_size_mul_overflow_tag t = size_mul_add_mul_overflow(x, y, z, w);
-+    if (LIKELY(!t.left)) {
-+        return t.right;
-+    }
-+    else if (rb_during_gc()) {
-+        rb_memerror();          /* or...? */
-+    }
-+    else {
-+        gc_raise(
-+            exc,
-+            "integer overflow: %"PRIdSIZE
-+            " * %"PRIdSIZE
-+            " + %"PRIdSIZE
-+            " * %"PRIdSIZE
-+            " > %"PRIdSIZE,
-+            x, y, z, w, (size_t)SIZE_MAX);
-+    }
-+}
-+
 +#define nomem_error GET_VM()->special_exceptions[ruby_error_nomemory]
 +
 +size_t rb_iseq_memsize(const rb_iseq_t *iseq);
@@ -3204,10 +2935,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
 +        return LONG2NUM((SIGNED_VALUE)obj);
 +#else
 +        return LL2NUM((SIGNED_VALUE)obj);
- #endif
--
--#ifdef HAVE_SYS_RESOURCE_H
--# include <sys/resource.h>
++#endif
 +    }
 +    else if (SPECIAL_CONST_P(obj)) {
 +        return LONG2NUM((SIGNED_VALUE)obj);
@@ -3794,285 +3522,100 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
 +
 +#ifdef ruby_sized_xrealloc
 +#undef ruby_sized_xrealloc
- #endif
++#endif
 +void *
 +ruby_sized_xrealloc(void *ptr, size_t new_size, size_t old_size)
 +{
 +    return realloc(ptr, new_size);
 +}
- 
--#if defined _WIN32 || defined __CYGWIN__
--# include <windows.h>
--#elif defined(HAVE_POSIX_MEMALIGN)
--#elif defined(HAVE_MEMALIGN)
--# include <malloc.h>
--#endif
++
 +void *
 +ruby_xrealloc_body(void *ptr, size_t new_size)
 +{
 +    return realloc(ptr, new_size);
 +}
- 
--#include <sys/types.h>
--
--#ifdef __EMSCRIPTEN__
--#include <emscripten.h>
++
 +#ifdef ruby_sized_xrealloc2
 +#undef ruby_sized_xrealloc2
- #endif
++#endif
 +void *
 +ruby_sized_xrealloc2(void *ptr, size_t n, size_t size, size_t old_n)
 +{
 +    size_t len = xmalloc2_size(n, size);
 +    return realloc(ptr, len);
 +}
- 
--#ifdef HAVE_MACH_TASK_EXCEPTION_PORTS
--# include <mach/task.h>
--# include <mach/mach_init.h>
--# include <mach/mach_port.h>
--#endif
--#undef LIST_HEAD /* ccan/list conflicts with BSD-origin sys/queue.h. */
++
 +void *
 +ruby_xrealloc2_body(void *ptr, size_t n, size_t size)
 +{
 +    return ruby_sized_xrealloc2(ptr, n, size, 0);
 +}
- 
--#include "constant.h"
--#include "darray.h"
--#include "debug_counter.h"
--#include "eval_intern.h"
--#include "id_table.h"
--#include "internal.h"
--#include "internal/class.h"
--#include "internal/compile.h"
--#include "internal/complex.h"
--#include "internal/cont.h"
--#include "internal/error.h"
--#include "internal/eval.h"
--#include "internal/gc.h"
--#include "internal/hash.h"
--#include "internal/imemo.h"
--#include "internal/io.h"
--#include "internal/numeric.h"
--#include "internal/object.h"
--#include "internal/proc.h"
--#include "internal/rational.h"
--#include "internal/sanitizers.h"
--#include "internal/struct.h"
--#include "internal/symbol.h"
--#include "internal/thread.h"
--#include "internal/variable.h"
--#include "internal/warnings.h"
--#include "rjit.h"
--#include "probes.h"
--#include "regint.h"
--#include "ruby/debug.h"
--#include "ruby/io.h"
--#include "ruby/re.h"
--#include "ruby/st.h"
--#include "ruby/thread.h"
--#include "ruby/util.h"
--#include "ruby_assert.h"
--#include "ruby_atomic.h"
--#include "symbol.h"
--#include "vm_core.h"
--#include "vm_sync.h"
--#include "vm_callinfo.h"
--#include "ractor_core.h"
--
--#include "builtin.h"
--#include "shape.h"
--
--#define rb_setjmp(env) RUBY_SETJMP(env)
--#define rb_jmp_buf rb_jmpbuf_t
--#undef rb_data_object_wrap
--
--#if !defined(MAP_ANONYMOUS) && defined(MAP_ANON)
--#define MAP_ANONYMOUS MAP_ANON
++
 +#ifdef ruby_sized_xfree
 +#undef ruby_sized_xfree
- #endif
--
--
--static size_t malloc_offset = 0;
--#if defined(HAVE_MALLOC_USABLE_SIZE)
--static size_t
--gc_compute_malloc_offset(void)
++#endif
 +void
 +ruby_sized_xfree(void *x, size_t size)
- {
--    // Different allocators use different metadata storage strategies which result in different
--    // ideal sizes.
--    // For instance malloc(64) will waste 8B with glibc, but waste 0B with jemalloc.
--    // But malloc(56) will waste 0B with glibc, but waste 8B with jemalloc.
--    // So we try allocating 64, 56 and 48 bytes and select the first offset that doesn't
--    // waste memory.
--    // This was tested on Linux with glibc 2.35 and jemalloc 5, and for both it result in
--    // no wasted memory.
--    size_t offset = 0;
--    for (offset = 0; offset <= 16; offset += 8) {
--        size_t allocated = (64 - offset);
--        void *test_ptr = malloc(allocated);
--        size_t wasted = malloc_usable_size(test_ptr) - allocated;
--        free(test_ptr);
--
--        if (wasted == 0) {
--            return offset;
--        }
--    }
--    return 0;
++{
 +    free(x);
- }
--#else
--static size_t
--gc_compute_malloc_offset(void)
++}
 +
 +void
 +ruby_xfree(void *x)
- {
--    // If we don't have malloc_usable_size, we use powers of 2.
--    return 0;
++{
 +    free(x);
- }
--#endif
- 
--size_t
--rb_malloc_grow_capa(size_t current, size_t type_size)
++}
++
 +void *
 +rb_xmalloc_mul_add(size_t x, size_t y, size_t z) /* x * y + z */
- {
--    size_t current_capacity = current;
--    if (current_capacity < 4) {
--        current_capacity = 4;
--    }
--    current_capacity *= type_size;
--
--    // We double the current capacity.
--    size_t new_capacity = (current_capacity * 2);
--
--    // And round up to the next power of 2 if it's not already one.
--    if (rb_popcount64(new_capacity) != 1) {
--        new_capacity = (size_t)(1 << (64 - nlz_int64(new_capacity)));
--    }
--
--    new_capacity -= malloc_offset;
--    new_capacity /= type_size;
--    if (current > new_capacity) {
--        rb_bug("rb_malloc_grow_capa: current_capacity=%"PRIuSIZE", new_capacity=%"PRIuSIZE", malloc_offset=%"PRIuSIZE"", current, new_capacity, malloc_offset);
--    }
--    RUBY_ASSERT(new_capacity > current);
--    return new_capacity;
++{
 +    size_t w = size_mul_add_or_raise(x, y, z, rb_eArgError);
 +    return ruby_xmalloc(w);
- }
- 
--static inline struct rbimpl_size_mul_overflow_tag
--size_add_overflow(size_t x, size_t y)
++}
++
 +void *
 +rb_xcalloc_mul_add(size_t x, size_t y, size_t z) /* x * y + z */
- {
--    size_t z;
--    bool p;
--#if 0
++{
 +    size_t w = size_mul_add_or_raise(x, y, z, rb_eArgError);
 +    return ruby_xcalloc(w, 1);
 +}
- 
--#elif __has_builtin(__builtin_add_overflow)
--    p = __builtin_add_overflow(x, y, &z);
--
--#elif defined(DSIZE_T)
--    RB_GNUC_EXTENSION DSIZE_T dx = x;
--    RB_GNUC_EXTENSION DSIZE_T dy = y;
--    RB_GNUC_EXTENSION DSIZE_T dz = dx + dy;
--    p = dz > SIZE_MAX;
--    z = (size_t)dz;
--
--#else
--    z = x + y;
--    p = z < y;
--
--#endif
--    return (struct rbimpl_size_mul_overflow_tag) { p, z, };
++
 +void *
 +rb_xrealloc_mul_add(const void *p, size_t x, size_t y, size_t z) /* x * y + z */
 +{
 +    size_t w = size_mul_add_or_raise(x, y, z, rb_eArgError);
 +    return ruby_xrealloc((void *)p, w);
- }
- 
--static inline struct rbimpl_size_mul_overflow_tag
--size_mul_add_overflow(size_t x, size_t y, size_t z) /* x * y + z */
++}
++
 +void *
 +rb_xmalloc_mul_add_mul(size_t x, size_t y, size_t z, size_t w) /* x * y + z * w */
- {
--    struct rbimpl_size_mul_overflow_tag t = rbimpl_size_mul_overflow(x, y);
--    struct rbimpl_size_mul_overflow_tag u = size_add_overflow(t.right, z);
--    return (struct rbimpl_size_mul_overflow_tag) { t.left || u.left, u.right };
++{
 +    size_t u = size_mul_add_mul_or_raise(x, y, z, w, rb_eArgError);
 +    return ruby_xmalloc(u);
- }
- 
--static inline struct rbimpl_size_mul_overflow_tag
--size_mul_add_mul_overflow(size_t x, size_t y, size_t z, size_t w) /* x * y + z * w */
++}
++
 +void *
 +rb_xcalloc_mul_add_mul(size_t x, size_t y, size_t z, size_t w) /* x * y + z * w */
- {
--    struct rbimpl_size_mul_overflow_tag t = rbimpl_size_mul_overflow(x, y);
--    struct rbimpl_size_mul_overflow_tag u = rbimpl_size_mul_overflow(z, w);
--    struct rbimpl_size_mul_overflow_tag v = size_add_overflow(t.right, u.right);
--    return (struct rbimpl_size_mul_overflow_tag) { t.left || u.left || v.left, v.right };
++{
 +    size_t u = size_mul_add_mul_or_raise(x, y, z, w, rb_eArgError);
 +    return ruby_xcalloc(u, 1);
- }
- 
--PRINTF_ARGS(NORETURN(static void gc_raise(VALUE, const char*, ...)), 2, 3);
--
--static inline size_t
--size_mul_or_raise(size_t x, size_t y, VALUE exc)
++}
++
 +void *
 +ruby_mimmalloc(size_t size)
- {
--    struct rbimpl_size_mul_overflow_tag t = rbimpl_size_mul_overflow(x, y);
--    if (LIKELY(!t.left)) {
--        return t.right;
--    }
--    else if (rb_during_gc()) {
--        rb_memerror();          /* or...? */
--    }
--    else {
--        gc_raise(
--            exc,
--            "integer overflow: %"PRIuSIZE
--            " * %"PRIuSIZE
--            " > %"PRIuSIZE,
--            x, y, (size_t)SIZE_MAX);
--    }
++{
 +    return malloc(size);
- }
- 
--size_t
--rb_size_mul_or_raise(size_t x, size_t y, VALUE exc)
++}
++
 +void
 +ruby_mimfree(void *ptr)
- {
--    return size_mul_or_raise(x, y, exc);
++{
 +    free(ptr);
- }
- 
--static inline size_t
--size_mul_add_or_raise(size_t x, size_t y, size_t z, VALUE exc)
++}
++
 +void *
 +rb_alloc_tmp_buffer_with_count(volatile VALUE *store, size_t size, size_t cnt)
- {
--    struct rbimpl_size_mul_overflow_tag t = size_mul_add_overflow(x, y, z);
--    if (LIKELY(!t.left)) {
--        return t.right;
--    }
--    else if (rb_during_gc()) {
--        rb_memerror();          /* or...? */
++{
 +    void *ptr;
 +    VALUE imemo;
 +    rb_imemo_tmpbuf_t *tmpbuf;
@@ -4095,15 +3638,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
 +
 +    if (len < 0 || (cnt = (long)roomof(len, sizeof(VALUE))) < 0) {
 +        rb_raise(rb_eArgError, "negative buffer size (or size too big)");
-     }
--    else {
--        gc_raise(
--            exc,
--            "integer overflow: %"PRIuSIZE
--            " * %"PRIuSIZE
--            " + %"PRIuSIZE
--            " > %"PRIuSIZE,
--            x, y, z, (size_t)SIZE_MAX);
++    }
 +
 +    return rb_alloc_tmp_buffer_with_count(store, len, cnt);
 +}
@@ -4116,25 +3651,17 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
 +        void *ptr = ATOMIC_PTR_EXCHANGE(s->ptr, 0);
 +        s->cnt = 0;
 +        ruby_xfree(ptr);
-     }
- }
- 
--size_t
--rb_size_mul_add_or_raise(size_t x, size_t y, size_t z, VALUE exc)
++    }
++}
++
 +void
 +rb_gc_adjust_memory_usage(ssize_t diff)
- {
--    return size_mul_add_or_raise(x, y, z, exc);
- }
- 
--static inline size_t
--size_mul_add_mul_or_raise(size_t x, size_t y, size_t z, size_t w, VALUE exc)
++{
++}
++
 +const char *
 +rb_method_type_name(rb_method_type_t type)
- {
--    struct rbimpl_size_mul_overflow_tag t = size_mul_add_mul_overflow(x, y, z, w);
--    if (LIKELY(!t.left)) {
--        return t.right;
++{
 +    switch (type) {
 +      case VM_METHOD_TYPE_ISEQ:           return "iseq";
 +      case VM_METHOD_TYPE_ATTRSET:        return "attrest";
@@ -4148,9 +3675,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
 +      case VM_METHOD_TYPE_OPTIMIZED:      return "optimized";
 +      case VM_METHOD_TYPE_UNDEF:          return "undef";
 +      case VM_METHOD_TYPE_NOTIMPLEMENTED: return "notimplemented";
-     }
--    else if (rb_during_gc()) {
--        rb_memerror();          /* or...? */
++    }
 +    rb_bug("rb_method_type_name: unreachable (type: %d)", type);
 +}
 +
@@ -4163,7 +3688,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
 +        snprintf(buff, buff_size, " %s@%s:%d",
 +                 RSTRING_PTR(ISEQ_BODY(iseq)->location.label),
 +                 RSTRING_PTR(path), n);
-     }
++    }
 +}
 +
 +static const char *
@@ -4249,15 +3774,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
 +            APPEND_F(" %s", rb_id2name(SYM2ID(obj)));
 +        }
 +    }
-     else {
--        gc_raise(
--            exc,
--            "integer overflow: %"PRIdSIZE
--            " * %"PRIdSIZE
--            " + %"PRIdSIZE
--            " * %"PRIdSIZE
--            " > %"PRIdSIZE,
--            x, y, z, w, (size_t)SIZE_MAX);
++    else {
 +        APPEND_F("%p [%s] %s ",
 +                 obj, zptr_to_new_string(obj), obj_type_name(obj));
 +        if (internal_object_p(obj)) {
@@ -4272,12 +3789,12 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
 +                APPEND_F("(%s)", RSTRING_PTR(class_path));
 +            }
 +        }
-     }
++    }
 +
 +  end:
 +    return pos;
- }
- 
++}
++
 +static size_t
 +rb_raw_obj_info_buitin_type(char *const buff, const size_t buff_size, const VALUE obj, size_t pos)
 +{
@@ -4794,17 +4311,17 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  {
      if ((flags & RUBY_T_MASK) == T_OBJECT) {
          return rb_class_instance_allocate_internal(klass, (flags | ROBJECT_EMBED) & ~FL_WB_PROTECTED, flags & FL_WB_PROTECTED);
-@@ -3012,10 +5101,6 @@
-         return newobj_of(GET_RACTOR(), klass, flags & ~FL_WB_PROTECTED, 0, 0, 0, flags & FL_WB_PROTECTED, RVALUE_SIZE);
+@@ -3013,10 +5102,6 @@
      }
  }
--
+ 
 -#define UNEXPECTED_NODE(func) \
 -    rb_bug(#func"(): GC does not handle T_NODE 0x%x(%p) 0x%"PRIxVALUE, \
 -           BUILTIN_TYPE(obj), (void*)(obj), RBASIC(obj)->flags)
- 
+-
  const char *
  rb_imemo_name(enum imemo_type type)
+ {
 @@ -3048,7 +5133,7 @@
  rb_imemo_new(enum imemo_type type, VALUE v1, VALUE v2, VALUE v3, VALUE v0)
  {
@@ -4831,19 +4348,17 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  typedef int each_page_callback(struct heap_page *, void *);
  
  static void objspace_each_objects(rb_objspace_t *objspace, each_obj_callback *callback, void *data, bool protected);
-@@ -4402,64 +6486,6 @@
-         st_insert(finalizer_table, dest, table);
-     }
+@@ -4404,65 +6488,7 @@
      FL_SET(dest, FL_FINALIZE);
--}
--
+ }
+ 
 -static VALUE
 -run_single_final(VALUE cmd, VALUE objid)
 -{
 -    return rb_check_funcall(cmd, idCall, 1, &objid);
 -}
 -
--static void
+ static void
 -warn_exception_in_finalizer(rb_execution_context_t *ec, VALUE final)
 -{
 -    if (!UNDEF_P(final) && !NIL_P(ruby_verbose)) {
@@ -4893,9 +4408,12 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
 -    }
 -    EC_POP_TAG();
 -#undef RESTORE_FINALIZER
- }
- 
- static void
+-}
+-
+-static void
+ run_final(rb_objspace_t *objspace, VALUE zombie)
+ {
+     st_data_t key, table;
 @@ -4473,7 +6499,7 @@
  
      key = (st_data_t)zombie;
@@ -5497,18 +5015,18 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  # /* Take that. */
  #elif defined(__i386)
  # define UNALIGNED_WORD_ACCESS 1
-@@ -123,6 +126,11 @@
- # define UNALIGNED_WORD_ACCESS 0
- #endif
- 
-+#if defined __FILC__
-+# undef UNALIGNED_WORD_ACCESS
+@@ -120,6 +123,11 @@
+ #elif defined(__mc68020__)
+ # define UNALIGNED_WORD_ACCESS 1
+ #else
 +# define UNALIGNED_WORD_ACCESS 0
 +#endif
 +
- /* Detection of __VA_OPT__ */
- #if ! defined(HAVE_VA_ARGS_MACRO)
- # undef HAVE___VA_OPT__
++#if defined __FILC__
++# undef UNALIGNED_WORD_ACCESS
+ # define UNALIGNED_WORD_ACCESS 0
+ #endif
+ 
 --- a/include/ruby/internal/core/rarray.h
 +++ b/include/ruby/internal/core/rarray.h
 @@ -237,7 +237,7 @@
@@ -5840,7 +5358,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      return RB_FL_TEST_RAW(obj, RUBY_FL_FREEZE);
 --- a/include/ruby/internal/memory.h
 +++ b/include/ruby/internal/memory.h
-@@ -107,69 +107,8 @@
+@@ -112,69 +112,8 @@
  # define RUBY_ALLOCV_LIMIT 1024
  #endif
  
@@ -6430,7 +5948,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  VALUE rb_rational_pow(VALUE self, VALUE other);
 --- a/io.c
 +++ b/io.c
-@@ -1174,7 +1174,7 @@
+@@ -1232,7 +1232,7 @@
  
      if (iis->timeout && !iis->nonblock) {
          if (io_internal_wait(iis->th, iis->fptr, 0, RB_WAITFD_IN, iis->timeout) == -1) {
@@ -6439,7 +5957,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          }
      }
  
-@@ -1184,7 +1184,7 @@
+@@ -1242,7 +1242,7 @@
      if (result < 0 && !iis->nonblock) {
          if (io_again_p(errno)) {
              if (io_internal_wait(iis->th, iis->fptr, errno, RB_WAITFD_IN, iis->timeout) == -1) {
@@ -6448,7 +5966,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
              }
              else {
                  goto retry;
-@@ -1192,7 +1192,7 @@
+@@ -1250,7 +1250,7 @@
          }
      }
  
@@ -6457,7 +5975,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  }
  
  #if defined __APPLE__
-@@ -1209,7 +1209,7 @@
+@@ -1267,7 +1267,7 @@
  
      if (iis->timeout && !iis->nonblock) {
          if (io_internal_wait(iis->th, iis->fptr, 0, RB_WAITFD_OUT, iis->timeout) == -1) {
@@ -6466,7 +5984,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          }
      }
  
-@@ -1220,7 +1220,7 @@
+@@ -1278,7 +1278,7 @@
          int e = errno;
          if (io_again_p(e)) {
              if (io_internal_wait(iis->th, iis->fptr, errno, RB_WAITFD_OUT, iis->timeout) == -1) {
@@ -6475,7 +5993,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
              }
              else {
                  goto retry;
-@@ -1228,7 +1228,7 @@
+@@ -1286,7 +1286,7 @@
          }
      }
  
@@ -6484,7 +6002,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  }
  
  #ifdef HAVE_WRITEV
-@@ -1240,7 +1240,7 @@
+@@ -1298,7 +1298,7 @@
  
      if (iis->timeout && !iis->nonblock) {
          if (io_internal_wait(iis->th, iis->fptr, 0, RB_WAITFD_OUT, iis->timeout) == -1) {
@@ -6493,7 +6011,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          }
      }
  
-@@ -1250,7 +1250,7 @@
+@@ -1308,7 +1308,7 @@
      if (result < 0 && !iis->nonblock) {
          if (io_again_p(errno)) {
              if (io_internal_wait(iis->th, iis->fptr, errno, RB_WAITFD_OUT, iis->timeout) == -1) {
@@ -6502,7 +6020,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
              }
              else {
                  goto retry;
-@@ -1258,7 +1258,7 @@
+@@ -1316,7 +1316,7 @@
          }
      }
  
@@ -6511,7 +6029,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  }
  #endif
  
-@@ -1816,11 +1816,11 @@
+@@ -1874,11 +1874,11 @@
          }
          else {
              // The error was unrelated to waiting for it to become writable, so we fail:
@@ -6525,7 +6043,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  }
  
  inline static void
-@@ -1873,10 +1873,10 @@
+@@ -1931,10 +1931,10 @@
          arg.length = len;
  
          if (!NIL_P(fptr->write_lock)) {
@@ -6538,7 +6056,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          }
      }
      else {
-@@ -2060,7 +2060,7 @@
+@@ -2118,7 +2118,7 @@
              }
  
              if (offset == p->total) {
@@ -6547,7 +6065,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
              }
  
              while (result >= (ssize_t)iov->iov_len) {
-@@ -2071,7 +2071,7 @@
+@@ -2129,7 +2129,7 @@
  
                  if (!--iovcnt) {
                      // I don't believe this code path can ever occur.
@@ -6556,7 +6074,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                  }
              }
  
-@@ -2082,11 +2082,11 @@
+@@ -2140,11 +2140,11 @@
              rb_io_check_closed(fptr);
          }
          else {
@@ -6570,7 +6088,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  }
  
  static long
-@@ -2138,10 +2138,10 @@
+@@ -2196,10 +2196,10 @@
      arg.total = total;
  
      if (!NIL_P(fptr->write_lock)) {
@@ -6583,7 +6101,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      }
  }
  
-@@ -3591,7 +3591,7 @@
+@@ -3654,7 +3654,7 @@
  {
      VALUE ret;
  
@@ -6592,7 +6110,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      if (NIL_P(ret))
          rb_eof_error();
      return ret;
-@@ -6163,7 +6163,7 @@
+@@ -6229,7 +6229,7 @@
          VALUE result = rb_fiber_scheduler_io_pread_memory(scheduler, arg->io, arg->offset, arg->buf, arg->count, 0);
  
          if (!UNDEF_P(result)) {
@@ -6601,7 +6119,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          }
      }
  
-@@ -6245,7 +6245,7 @@
+@@ -6316,7 +6316,7 @@
          VALUE result = rb_fiber_scheduler_io_pwrite_memory(scheduler, arg->io, arg->offset, arg->buf, arg->count, 0);
  
          if (!UNDEF_P(result)) {
@@ -6610,7 +6128,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          }
      }
  
-@@ -7090,8 +7090,8 @@
+@@ -7161,8 +7161,8 @@
      GetOpenFile(io, fptr);
      if (!(fptr->mode & FMODE_READABLE)) return 0;
      if (NIL_P(b1 = rb_io_getbyte(io))) return 0;
@@ -6621,7 +6139,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          if (NIL_P(b2 = rb_io_getbyte(io))) break;
          if (b2 == INT2FIX(0xBB) && !NIL_P(b3 = rb_io_getbyte(io))) {
              if (b3 == INT2FIX(0xBF)) {
-@@ -7102,7 +7102,7 @@
+@@ -7173,7 +7173,7 @@
          rb_io_ungetbyte(io, b2);
          break;
  
@@ -6630,7 +6148,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          if (NIL_P(b2 = rb_io_getbyte(io))) break;
          if (b2 == INT2FIX(0xFF)) {
              return ENCINDEX_UTF_16BE;
-@@ -7110,7 +7110,7 @@
+@@ -7181,7 +7181,7 @@
          rb_io_ungetbyte(io, b2);
          break;
  
@@ -6639,7 +6157,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          if (NIL_P(b2 = rb_io_getbyte(io))) break;
          if (b2 == INT2FIX(0xFE)) {
              b3 = rb_io_getbyte(io);
-@@ -7126,7 +7126,7 @@
+@@ -7197,7 +7197,7 @@
          rb_io_ungetbyte(io, b2);
          break;
  
@@ -6648,7 +6166,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          if (NIL_P(b2 = rb_io_getbyte(io))) break;
          if (b2 == INT2FIX(0) && !NIL_P(b3 = rb_io_getbyte(io))) {
              if (b3 == INT2FIX(0xFE) && !NIL_P(b4 = rb_io_getbyte(io))) {
-@@ -10771,7 +10771,7 @@
+@@ -10841,7 +10841,7 @@
  io_advise_internal(void *arg)
  {
      struct io_advise_struct *ptr = arg;
@@ -6659,7 +6177,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  static VALUE
 --- a/iseq.c
 +++ b/iseq.c
-@@ -573,7 +573,7 @@
+@@ -578,7 +578,7 @@
  set_relation(rb_iseq_t *iseq, const rb_iseq_t *piseq)
  {
      struct rb_iseq_constant_body *const body = ISEQ_BODY(iseq);
@@ -6668,7 +6186,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  
      /* set class nest stack */
      if (type == ISEQ_TYPE_TOP) {
-@@ -1077,7 +1077,7 @@
+@@ -1082,7 +1082,7 @@
      VALUE name, path, realpath, code_location, node_id;
      VALUE type, body, locals, params, exception;
  
@@ -6677,7 +6195,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      rb_compile_option_t option;
      int i = 0;
      rb_code_location_t tmp_loc = { {0, 0}, {-1, -1} };
-@@ -2137,7 +2137,7 @@
+@@ -2142,7 +2142,7 @@
  }
  
  static VALUE
@@ -6686,7 +6204,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  {
      VALUE i;
      VALUE name;
-@@ -2163,7 +2163,7 @@
+@@ -2168,7 +2168,7 @@
      return name;
  }
  
@@ -6695,7 +6213,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  VALUE rb_dump_literal(VALUE lit);
  
  VALUE
-@@ -2171,7 +2171,7 @@
+@@ -2176,7 +2176,7 @@
                         VALUE insn, int op_no, VALUE op,
                         int len, size_t pos, const VALUE *pnop, VALUE child)
  {
@@ -6704,7 +6222,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      char type = types[op_no];
      VALUE ret = Qundef;
  
-@@ -2211,18 +2211,18 @@
+@@ -2216,18 +2216,18 @@
        case TS_LINDEX:{
          int level;
          if (types[op_no+1] == TS_NUM && pnop) {
@@ -6728,7 +6246,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          break;
  
        case TS_VALUE:		/* VALUE */
-@@ -2369,7 +2369,7 @@
+@@ -2374,7 +2374,7 @@
  rb_iseq_disasm_insn(VALUE ret, const VALUE *code, size_t pos,
                      const rb_iseq_t *iseq, VALUE child)
  {
@@ -6737,7 +6255,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      int len = insn_len(insn);
      int j;
      const char *types = insn_op_types(insn);
-@@ -2387,7 +2387,7 @@
+@@ -2392,7 +2392,7 @@
      }
  
      for (j = 0; types[j]; j++) {
@@ -6746,7 +6264,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                                               len, pos, &code[pos + j + 2],
                                               child);
          rb_str_concat(str, opstr);
-@@ -2706,7 +2706,7 @@
+@@ -2711,7 +2711,7 @@
      }
  
      for (i=0; i<body->iseq_size;) {
@@ -6755,7 +6273,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          int len = insn_len(insn);
          const char *types = insn_op_types(insn);
          int j;
-@@ -2913,12 +2913,12 @@
+@@ -2918,12 +2918,12 @@
  register_label(struct st_table *table, unsigned long idx)
  {
      VALUE sym = rb_str_intern(rb_sprintf("label_%lu", idx));
@@ -6770,7 +6288,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  {
      ID id;
      switch (type) {
-@@ -2954,7 +2954,7 @@
+@@ -2959,7 +2959,7 @@
  #define INIT_ID(name) \
    id_##name = rb_intern(#name)
  
@@ -6779,7 +6297,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  iseq_type_id(enum rb_iseq_type type)
  {
      DECL_ID(top);
-@@ -3054,7 +3054,7 @@
+@@ -3060,7 +3060,7 @@
              VALUE arg_opt_labels = rb_ary_new2(len);
  
              for (j = 0; j < len; j++) {
@@ -6788,7 +6306,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                  rb_ary_push(arg_opt_labels, l);
              }
              rb_hash_aset(params, ID2SYM(rb_intern("opt")), arg_opt_labels);
-@@ -3092,7 +3092,7 @@
+@@ -3098,7 +3098,7 @@
      iseq_original = rb_iseq_original_iseq((rb_iseq_t *)iseq);
  
      for (seq = iseq_original; seq < iseq_original + iseq_body->iseq_size; ) {
@@ -6797,7 +6315,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          int j, len = insn_len(insn);
          VALUE *nseq = seq + len - 1;
          VALUE ary = rb_ary_new2(len);
-@@ -3103,13 +3103,13 @@
+@@ -3109,13 +3109,13 @@
  
              switch (op_type) {
                case TS_OFFSET: {
@@ -6813,7 +6331,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                  break;
                case TS_VALUE:
                  rb_ary_push(ary, obj_resurrect(*seq));
-@@ -3173,7 +3173,7 @@
+@@ -3179,7 +3179,7 @@
                  }
                  break;
                case TS_ID:
@@ -6822,7 +6340,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                  break;
                case TS_CDHASH:
                  {
-@@ -3184,7 +3184,7 @@
+@@ -3190,7 +3190,7 @@
                      rb_hash_foreach(hash, cdhash_each, val);
  
                      for (i=0; i<RARRAY_LEN(val); i+=2) {
@@ -6831,7 +6349,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                          unsigned long idx = nseq - iseq_original + pos;
  
                          rb_ary_store(val, i+1,
-@@ -3258,7 +3258,7 @@
+@@ -3264,7 +3264,7 @@
          VALUE ary = RARRAY_AREF(nbody, l);
          st_data_t label;
  
@@ -6840,7 +6358,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
              rb_ary_push(body, (VALUE)label);
          }
  
-@@ -3486,7 +3486,7 @@
+@@ -3495,7 +3495,7 @@
  #else
  #define INSN_CODE(insn) ((VALUE)(insn))
  #endif
@@ -6851,7 +6369,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      for (insn = 0; insn < VM_INSTRUCTION_SIZE/2; insn++) {
 --- a/iseq.h
 +++ b/iseq.h
-@@ -257,12 +257,12 @@
+@@ -250,12 +250,12 @@
   *     NULL.
   */
  enum rb_catch_type {
@@ -6905,7 +6423,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  
 --- a/marshal.c
 +++ b/marshal.c
-@@ -519,7 +519,7 @@
+@@ -534,7 +534,7 @@
          encname = w_encivar(sym, arg);
          w_byte(TYPE_SYMBOL, arg);
          w_bytes(RSTRING_PTR(sym), RSTRING_LEN(sym), arg);
@@ -6914,7 +6432,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          w_encname(encname, arg);
      }
  }
-@@ -695,13 +695,13 @@
+@@ -710,13 +710,13 @@
  {
      int limit = arg->limit;
      if (limit >= 0) ++limit;
@@ -6932,7 +6450,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          return 0;
      }
      w_symbol(ID2SYM(rb_id_encoding()), arg->arg);
-@@ -736,7 +736,7 @@
+@@ -751,7 +751,7 @@
  w_ivar_each(VALUE obj, st_index_t num, struct dump_call_arg *arg)
  {
      shape_id_t shape_id = rb_shape_get_shape_id(arg->obj);
@@ -6941,7 +6459,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      if (!num) return;
      rb_ivar_foreach(obj, w_obj_each, (st_data_t)&ivarg);
  
-@@ -782,8 +782,8 @@
+@@ -797,8 +797,8 @@
      st_data_t num = 0;
  
      rb_ivar_foreach(obj, obj_count_ivars, (st_data_t)&num);
@@ -6952,7 +6470,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  }
  
  #if SIZEOF_LONG > 4
-@@ -839,7 +839,7 @@
+@@ -854,7 +854,7 @@
  static void
  w_remember(VALUE obj, struct dump_arg *arg)
  {
@@ -6961,7 +6479,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  }
  
  static void
-@@ -1582,7 +1582,7 @@
+@@ -1624,7 +1624,7 @@
      st_data_t sym;
      long num = r_long(arg);
  
@@ -6970,7 +6488,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          rb_raise(rb_eArgError, "bad symbol");
      }
      return (VALUE)sym;
-@@ -1658,7 +1658,7 @@
+@@ -1700,7 +1700,7 @@
          /* real_obj is kept if not found */
          st_lookup(arg->compat_tbl, v, &real_obj);
      }
@@ -6979,7 +6497,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      st_insert(arg->partial_objects, (st_data_t)real_obj, Qtrue);
      return v;
  }
-@@ -2019,10 +2019,10 @@
+@@ -2069,10 +2069,10 @@
  
              if (SIZEOF_VALUE >= 8 && len <= 4) {
                  // Representable within uintptr, likely FIXNUM
@@ -7612,7 +7130,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      return -1;
 --- a/parse.y
 +++ b/parse.y
-@@ -350,7 +350,7 @@
+@@ -360,7 +360,7 @@
      parser_set_lex_state(p, ls, __LINE__)
  static inline enum lex_state_e parser_set_lex_state(struct parser_params *p, enum lex_state_e ls, int line);
  
@@ -7621,7 +7139,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  
  static const rb_code_location_t NULL_LOC = { {0, -1}, {0, -1} };
  
-@@ -1457,6 +1457,7 @@
+@@ -1467,6 +1467,7 @@
  
  #define yyparse ripper_yyparse
  
@@ -7629,7 +7147,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  #define ID2VAL(id) STATIC_ID2SYM(id)
  #define TOKEN2VAL(t) ID2VAL(TOKEN2ID(t))
  #define KWD2EID(t, v) ripper_new_yylval(p, keyword_##t, get_value(v), 0)
-@@ -1502,7 +1503,7 @@
+@@ -1512,7 +1513,7 @@
  }
  
  static VALUE
@@ -7638,7 +7156,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  {
      return ripper_new_yylval2(p, pre_args, rest_arg, post_args);
  }
-@@ -1555,6 +1556,7 @@
+@@ -1565,6 +1566,7 @@
  static VALUE heredoc_dedent(struct parser_params*,VALUE);
  
  #else
@@ -7646,7 +7164,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  #define ID2VAL(id) (id)
  #define TOKEN2VAL(t) ID2VAL(t)
  #define KWD2EID(t, v) keyword_##t
-@@ -3032,7 +3034,7 @@
+@@ -3042,7 +3044,7 @@
                      }
                  | primary_value call_op tIDENTIFIER
                      {
@@ -7655,7 +7173,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                      /*%%%*/
                          $$ = attrset(p, $1, $2, $3, &@$);
                      /*% %*/
-@@ -3047,7 +3049,7 @@
+@@ -3057,7 +3059,7 @@
                      }
                  | primary_value call_op tCONSTANT
                      {
@@ -7664,7 +7182,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                      /*%%%*/
                          $$ = attrset(p, $1, $2, $3, &@$);
                      /*% %*/
-@@ -3535,10 +3537,10 @@
+@@ -3545,10 +3547,10 @@
                      }
                  ;
  
@@ -7679,7 +7197,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                  ;
  
  rel_expr	: arg relop arg   %prec '>'
-@@ -3547,7 +3549,7 @@
+@@ -3557,7 +3559,7 @@
                      }
                  | rel_expr relop arg   %prec '>'
                      {
@@ -7688,7 +7206,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                          $$ = call_bin_op(p, $1, $2, $3, &@2, &@$);
                      }
                  ;
-@@ -5887,7 +5889,7 @@
+@@ -5897,7 +5899,7 @@
                              $$ = list_append(p, head, tail);
                          }
                      /*%
@@ -7697,7 +7215,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                          if (ripper_is_node_yylval(p, n1)) {
                              s1 = RNODE_RIPPER(n1)->nd_cval;
                              n1 = RNODE_RIPPER(n1)->nd_rval;
-@@ -7413,7 +7415,7 @@
+@@ -7423,7 +7425,7 @@
      }
      p->ast->body.root = tree;
      if (!p->ast->body.script_lines) p->ast->body.script_lines = INT2FIX(p->line_count);
@@ -7706,7 +7224,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  }
  
  static rb_ast_t *
-@@ -9196,7 +9198,7 @@
+@@ -9206,7 +9208,7 @@
  #undef ERR
      }
      shadowing_lvar(p, id);
@@ -7715,7 +7233,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  }
  
  static int
-@@ -14656,7 +14658,7 @@
+@@ -14667,7 +14669,7 @@
      if (is_private_local_id(p, id)) {
          return;
      }
@@ -7724,7 +7242,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          yyerror1(loc, "duplicated variable name");
      }
      else {
-@@ -14665,12 +14667,12 @@
+@@ -14676,12 +14678,12 @@
  }
  
  static void
@@ -7828,7 +7346,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      scope_node->index_lookup_table = index_lookup_table;
 --- a/proc.c
 +++ b/proc.c
-@@ -670,7 +670,7 @@
+@@ -676,7 +676,7 @@
      vm_block_type_set(&proc->block, block_type_ifunc);
  
      *(VALUE **)&proc->block.as.captured.ep = ep = sproc->env + VM_ENV_DATA_SIZE-1;
@@ -7837,7 +7355,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      ep[VM_ENV_DATA_INDEX_ME_CREF] = Qfalse;
      ep[VM_ENV_DATA_INDEX_SPECVAL] = VM_BLOCK_HANDLER_NONE;
      ep[VM_ENV_DATA_INDEX_ENV]     = Qundef; /* envval */
-@@ -2513,7 +2513,7 @@
+@@ -2525,7 +2525,7 @@
                   int argc, const VALUE *argv, VALUE passed_procval, int kw_splat)
  {
      vm_passed_block_handler_set(ec, proc_to_block_handler(passed_procval));
@@ -7846,7 +7364,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                           method_callable_method_entry(data), kw_splat);
  }
  
-@@ -2724,7 +2724,7 @@
+@@ -2736,7 +2736,7 @@
      const rb_callable_method_entry_t *cme = rb_callable_method_entry(CLASS_OF(recv), data->me->called_id);
      if (data->me == (const rb_method_entry_t *)cme) {
          vm_passed_block_handler_set(ec, proc_to_block_handler(passed_procval));
@@ -8042,7 +7560,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  
      /* Preprocessing */
      for (i = 0; i < 256; ++i)
-@@ -207,7 +207,7 @@
+@@ -210,7 +210,7 @@
  {
      const unsigned char *x = xs, *xe = xs + m;
      const unsigned char *y = ys;
@@ -8051,7 +7569,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  
      /* Preprocessing */
      for (i = 0; i < 512; ++i) {
-@@ -970,7 +970,7 @@
+@@ -986,7 +986,7 @@
  match_alloc(VALUE klass)
  {
      size_t alloc_size = sizeof(struct RMatch) + sizeof(rb_matchext_t);
@@ -8060,7 +7578,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      NEWOBJ_OF(match, struct RMatch, klass, flags, alloc_size, 0);
  
      match->str = Qfalse;
-@@ -2133,12 +2133,12 @@
+@@ -2145,12 +2145,12 @@
      int num_regs = RMATCH_REGS(match)->num_regs;
  
      /* check if idx is Range */
@@ -8076,7 +7594,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
          return Qnil;
        default:
          return match_ary_subseq(match, beg, len, result);
-@@ -2398,7 +2398,7 @@
+@@ -2410,7 +2410,7 @@
          }
          rb_get_kwargs(opt, keyword_ids, 0, 1, &symbolize_names_val);
          if (!UNDEF_P(symbolize_names_val) && RTEST(symbolize_names_val)) {
@@ -8087,21 +7605,21 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  
 --- a/regint.h
 +++ b/regint.h
-@@ -50,6 +50,14 @@
-     defined(ONIG_DEBUG_STATISTICS) || defined(ONIG_DEBUG_MEMLEAK)
- # ifndef ONIG_DEBUG
- #  define ONIG_DEBUG
-+# endif
-+#endif
-+
+@@ -53,6 +53,14 @@
+ # endif
+ #endif
+ 
 +#ifdef __FILC__
 +# if defined UNALIGNED_WORD_ACCESS && UNALIGNED_WORD_ACCESS
 +#  error "UNALIGNED_WORD_ACCESS already defined and true"
 +# else
 +#  define UNALIGNED_WORD_ACCESS 0
- # endif
- #endif
- 
++# endif
++#endif
++
+ /* __POWERPC__ added to accommodate Darwin case. */
+ #ifndef UNALIGNED_WORD_ACCESS
+ # if defined(__i386) || defined(__i386__) || defined(_M_IX86) || \
 --- a/ruby.c
 +++ b/ruby.c
 @@ -63,8 +63,8 @@
@@ -8235,7 +7753,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  
  #define BIT_DIGITS(N)   (((N)*146)/485 + 1)  /* log2(10) =~ 146/485 */
  
-@@ -1107,8 +1108,8 @@
+@@ -1141,8 +1142,8 @@
      if (sign == '+') {
  # define LITERAL(str) (*sz = rb_strlen_lit(str), str)
          /* optimize special const cases */
@@ -8276,7 +7794,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
              // When RSTRING_FSTR strings are swept, they call `st_delete`.
              // To avoid a race condition if an equivalent string was inserted
              // we must remove the flag immediately.
-@@ -1715,11 +1716,11 @@
+@@ -1720,11 +1721,11 @@
  static inline VALUE
  str_duplicate_setup(VALUE klass, VALUE str, VALUE dup)
  {
@@ -8290,7 +7808,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      int encidx = 0;
      if (STR_EMBED_P(str)) {
          long len = RSTRING_LEN(str);
-@@ -5242,10 +5243,10 @@
+@@ -5257,10 +5258,10 @@
      else {
          /* check if indx is Range */
          long beg, len = str_strlen(str, NULL);
@@ -8304,7 +7822,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
              return Qnil;
            default:
              return rb_str_substr(str, beg, len);
-@@ -5624,10 +5625,10 @@
+@@ -5647,10 +5648,10 @@
          goto squash;
      }
      else {
@@ -8318,7 +7836,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
              beg = NUM2LONG(indx);
              if (!(p = rb_str_subpos(str, beg, &len))) return Qnil;
              if (!len) return Qnil;
-@@ -6265,10 +6266,10 @@
+@@ -6288,10 +6289,10 @@
          /* check if indx is Range */
          long beg, len = RSTRING_LEN(str);
  
@@ -8332,7 +7850,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
              return Qnil;
            default:
              return str_byte_substr(str, beg, len, TRUE);
-@@ -9046,7 +9047,7 @@
+@@ -9074,7 +9075,7 @@
              keywords[0] = rb_intern_const("chomp");
          }
          rb_get_kwargs(opts, keywords, 0, 1, &chomp);
@@ -8425,7 +7943,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                  RUBY_DEBUG_LOG("terminated target_th:%u status:%s", rb_th_serial(target_th), thread_status_name(target_th, TRUE));
  
                  /* OK. killed. */
-@@ -4952,7 +4952,7 @@
+@@ -4953,7 +4953,7 @@
      if (w > THREAD_SHIELD_WAITING_MAX)
          rb_raise(rb_eRuntimeError, "waiting count overflow");
      RBASIC(b)->flags &= ~THREAD_SHIELD_WAITING_MASK;
@@ -8434,7 +7952,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  }
  
  static inline void
-@@ -4962,7 +4962,7 @@
+@@ -4963,7 +4963,7 @@
      if (!w) rb_raise(rb_eRuntimeError, "waiting count underflow");
      w--;
      RBASIC(b)->flags &= ~THREAD_SHIELD_WAITING_MASK;
@@ -8839,16 +8357,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                    ISEQ_BODY(class_iseq)->iseq_encoded, GET_SP(),
 --- a/vm_args.c
 +++ b/vm_args.c
-@@ -710,7 +710,7 @@
-     if (ISEQ_BODY(iseq)->param.flags.has_rest) {
-         args_setup_rest_parameter(args, locals + ISEQ_BODY(iseq)->param.rest_start);
-         VALUE ary = *(locals + ISEQ_BODY(iseq)->param.rest_start);
--        VALUE index = RARRAY_LEN(ary) - 1;
-+        uintptr_t index = RARRAY_LEN(ary) - 1;
-         if (splat_flagged_keyword_hash &&
-             !ISEQ_BODY(iseq)->param.flags.ruby2_keywords &&
-             !ISEQ_BODY(iseq)->param.flags.has_kw &&
-@@ -779,7 +779,7 @@
+@@ -787,7 +787,7 @@
      VALUE at;
  
      if (iseq) {
@@ -8859,7 +8368,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                        ec->cfp->sp, 0, 0 /* stack_max */);
 --- a/vm_backtrace.c
 +++ b/vm_backtrace.c
-@@ -1102,8 +1102,8 @@
+@@ -1107,8 +1107,8 @@
        case 1:
          {
              long beg, len, bt_size = backtrace_size(ec);
@@ -8870,7 +8379,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
                  lev = NUM2LONG(level);
                  if (lev < 0) {
                      rb_raise(rb_eArgError, "negative level (%ld)", lev);
-@@ -1111,7 +1111,7 @@
+@@ -1116,7 +1116,7 @@
                  lev += lev_plus;
                  n = ALL_BACKTRACE_LINES;
                  break;
@@ -9467,7 +8976,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  
  /**********************************************************/
  /* deal with values                                       */
-@@ -224,7 +224,247 @@
+@@ -224,6 +224,246 @@
  
  static inline void
  THROW_DATA_STATE_SET(struct vm_throw_data *obj, int st)
@@ -9625,7 +9134,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
 +
 +static inline enum imemo_type
 +imemo_type(VALUE imemo)
- {
++{
 +    return (RBASIC(imemo)->flags >> FL_USHIFT) & IMEMO_MASK;
 +}
 +
@@ -9711,10 +9220,9 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
 +}
 +
 +#endif /* INTERNAL_IMEMO_H */
-+{
+ {
      VM_ASSERT(THROW_DATA_P(obj));
      obj->throw_state = st;
- }
 --- a/vm_method.c
 +++ b/vm_method.c
 @@ -300,10 +300,10 @@
@@ -9772,7 +9280,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  }
  
  void
-@@ -2358,7 +2368,7 @@
+@@ -2369,7 +2379,7 @@
      if (!oldid) {
          rb_print_undef_str(mod, oldname);
      }
@@ -9781,7 +9289,7 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
      rb_alias(mod, id, oldid);
      return ID2SYM(id);
  }
-@@ -2830,7 +2840,7 @@
+@@ -2841,7 +2851,7 @@
                    const rb_callable_method_entry_t *cme, int argc, const VALUE *argv, int kw_splat)
  {
      VALUE passed_block_handler = vm_passed_block_handler(ec);

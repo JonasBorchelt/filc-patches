@@ -1,6 +1,6 @@
-Subject: Fil-C memory-safety adaptations for CPython 3.12.5 VM, GC, and C-API
+Subject: Fil-C memory-safety adaptations for CPython 3.12.16
 Policy-Class: P4-Audit
-Rationale: Audited down from Fil-C Python-3.12.5 (37 files, +230/-403) to 35 files: drops macOS-only Lib/urllib/request.py (_scproxy), unused configure.ac, and moves ac_cv_gcc_asm_for_{x64,x87,mc68881}=no to P3 configure env vars alongside --without-pymalloc --without-freelists --disable-test-modules. Keeps genuine Fil-C GC pointer-tagging, obmalloc, atomic, semaphore, and _sre capability adaptations.
+Rationale: Audited down from Fil-C Python-3.12.5 (37 files, +230/-403) and refreshed to security release 3.12.16 (35 files, +224/-394, 0 fuzz, 0 offset): drops macOS-only Lib/urllib/request.py and unused configure.ac, moves ac_cv_gcc_asm_for_{x64,x87,mc68881}=no to P3 configure env vars, and retains capability-safe GC/object/pointer-tagging, zptrtable, atomic, semaphore, and frame adaptations.
 Upstream-Status: Fil-C-Specific
 Fil-C-Origin-Commits: 4d81217a0e27
 
@@ -112,14 +112,14 @@ Fil-C-Origin-Commits: 4d81217a0e27
      _Py_memory_order_acquire,
 --- a/Include/internal/pycore_code.h
 +++ b/Include/internal/pycore_code.h
-@@ -251,6 +251,8 @@
- extern void _PyStaticCode_Fini(PyCodeObject *co);
+@@ -252,6 +252,8 @@
  /* Function to intern strings of codeobjects and quicken the bytecode */
  extern int _PyStaticCode_Init(PyCodeObject *co);
-+
-+extern zptrtable* _PyCode_PtrTable;
  
++extern zptrtable* _PyCode_PtrTable;
++
  #ifdef Py_STATS
+ 
  
 @@ -304,7 +306,8 @@
  static inline void
@@ -278,7 +278,7 @@ Fil-C-Origin-Commits: 4d81217a0e27
  
 --- a/Include/internal/pycore_object.h
 +++ b/Include/internal/pycore_object.h
-@@ -206,17 +206,17 @@
+@@ -218,17 +218,17 @@
  
      PyGC_Head *gc = _Py_AS_GC(op);
      _PyObject_ASSERT_FROM(op,
@@ -299,7 +299,7 @@ Fil-C-Origin-Commits: 4d81217a0e27
  }
  
  /* Tell the GC to stop tracking this object.
-@@ -246,7 +246,7 @@
+@@ -258,7 +258,7 @@
      _PyGCHead_SET_NEXT(prev, next);
      _PyGCHead_SET_PREV(next, prev);
      gc->_gc_next = 0;
@@ -396,7 +396,7 @@ Fil-C-Origin-Commits: 4d81217a0e27
  #if !defined(Py_LIMITED_API) || Py_LIMITED_API+0 < 0x030b0000
 --- a/Makefile.pre.in
 +++ b/Makefile.pre.in
-@@ -2330,18 +2330,18 @@
+@@ -2347,18 +2347,18 @@
  		$(DESTDIR)$(LIBDEST); \
  	$(INSTALL_DATA) $(srcdir)/LICENSE $(DESTDIR)$(LIBDEST)/LICENSE.txt
  	@ # Build PYC files for the 3 optimization levels (0, 1, 2)
@@ -479,7 +479,7 @@ Fil-C-Origin-Commits: 4d81217a0e27
  #ifdef HAVE_MP_SEMAPHORE
  
  enum { RECURSIVE_MUTEX, SEMAPHORE };
-@@ -207,24 +209,48 @@
+@@ -209,24 +211,48 @@
  
  #else /* !MS_WINDOWS */
  
@@ -538,7 +538,7 @@ Fil-C-Origin-Commits: 4d81217a0e27
  #ifndef HAVE_SEM_UNLINK
  #  define sem_unlink(name) 0
  #endif
-@@ -339,7 +365,7 @@
+@@ -341,7 +367,7 @@
  
      /* Check whether we can acquire without releasing the GIL and blocking */
      do {
@@ -547,7 +547,7 @@ Fil-C-Origin-Commits: 4d81217a0e27
          err = errno;
      } while (res < 0 && errno == EINTR && !PyErr_CheckSignals());
      errno = err;
-@@ -349,10 +375,10 @@
+@@ -351,10 +377,10 @@
          do {
              Py_BEGIN_ALLOW_THREADS
              if (!use_deadline) {
@@ -560,7 +560,7 @@ Fil-C-Origin-Commits: 4d81217a0e27
              }
              Py_END_ALLOW_THREADS
              err = errno;
-@@ -404,7 +430,7 @@
+@@ -406,7 +432,7 @@
          /* We will only check properly the maxvalue == 1 case */
          if (self->maxvalue == 1) {
              /* make sure that already locked */
@@ -569,7 +569,7 @@ Fil-C-Origin-Commits: 4d81217a0e27
                  if (errno != EAGAIN) {
                      PyErr_SetFromErrno(PyExc_OSError);
                      return NULL;
-@@ -412,7 +438,7 @@
+@@ -414,7 +440,7 @@
                  /* it is already locked as expected */
              } else {
                  /* it was not locked so undo wait and raise  */
@@ -578,7 +578,7 @@ Fil-C-Origin-Commits: 4d81217a0e27
                      PyErr_SetFromErrno(PyExc_OSError);
                      return NULL;
                  }
-@@ -427,7 +453,7 @@
+@@ -429,7 +455,7 @@
  
          /* This check is not an absolute guarantee that the semaphore
             does not rise above maxvalue. */
@@ -587,7 +587,7 @@ Fil-C-Origin-Commits: 4d81217a0e27
              return PyErr_SetFromErrno(PyExc_OSError);
          } else if (sval >= self->maxvalue) {
              PyErr_SetString(PyExc_ValueError, "semaphore or lock "
-@@ -437,7 +463,7 @@
+@@ -439,7 +465,7 @@
  #endif
      }
  
@@ -596,7 +596,7 @@ Fil-C-Origin-Commits: 4d81217a0e27
          return PyErr_SetFromErrno(PyExc_OSError);
  
      --self->count;
-@@ -483,7 +509,7 @@
+@@ -485,7 +511,7 @@
                                int maxvalue, const char *name, int unlink)
  /*[clinic end generated code: output=30727e38f5f7577a input=fdaeb69814471c5b]*/
  {
@@ -605,7 +605,7 @@ Fil-C-Origin-Commits: 4d81217a0e27
      PyObject *result;
      char *name_copy = NULL;
  
-@@ -503,7 +529,7 @@
+@@ -505,7 +531,7 @@
      SEM_CLEAR_ERROR();
      handle = SEM_CREATE(name, value, maxvalue);
      /* On Windows we should fail if GetLastError()==ERROR_ALREADY_EXISTS */
@@ -614,7 +614,7 @@ Fil-C-Origin-Commits: 4d81217a0e27
          goto failure;
  
      if (unlink && SEM_UNLINK(name) < 0)
-@@ -519,7 +545,7 @@
+@@ -521,7 +547,7 @@
      if (!PyErr_Occurred()) {
          _PyMp_SetError(NULL, MP_STANDARD_ERROR);
      }
@@ -623,7 +623,7 @@ Fil-C-Origin-Commits: 4d81217a0e27
          SEM_CLOSE(handle);
      PyMem_Free(name_copy);
      return NULL;
-@@ -554,8 +580,8 @@
+@@ -556,8 +582,8 @@
  
  #ifndef MS_WINDOWS
      if (name != NULL) {
@@ -634,8 +634,8 @@ Fil-C-Origin-Commits: 4d81217a0e27
              PyErr_SetFromErrno(PyExc_OSError);
              PyMem_Free(name_copy);
              return NULL;
-@@ -571,7 +597,7 @@
- {
+@@ -574,7 +600,7 @@
+     SemLockObject *self = _SemLockObject_CAST(op);
      PyTypeObject *tp = Py_TYPE(self);
      PyObject_GC_UnTrack(self);
 -    if (self->handle != SEM_FAILED)
@@ -643,7 +643,7 @@ Fil-C-Origin-Commits: 4d81217a0e27
          SEM_CLOSE(self->handle);
      PyMem_Free(self->name);
      tp->tp_free(self);
-@@ -641,12 +667,12 @@
+@@ -644,12 +670,12 @@
  /*[clinic end generated code: output=815d4c878c806ed7 input=294a446418d31347]*/
  {
  #ifdef HAVE_BROKEN_SEM_GETVALUE
@@ -701,7 +701,7 @@ Fil-C-Origin-Commits: 4d81217a0e27
      return 0;
 --- a/Modules/_sre/sre.h
 +++ b/Modules/_sre/sre.h
-@@ -89,7 +89,7 @@
+@@ -97,7 +97,7 @@
      int lastindex;
      const void** mark;
      /* dynamically allocated stuff */
@@ -1034,11 +1034,10 @@ Fil-C-Origin-Commits: 4d81217a0e27
  
 --- a/Objects/codeobject.c
 +++ b/Objects/codeobject.c
-@@ -10,6 +10,14 @@
- #include "pycore_pystate.h"       // _PyInterpreterState_GET()
- #include "pycore_tuple.h"         // _PyTuple_ITEMS()
- #include "clinic/codeobject.c.h"
-+
+@@ -11,6 +11,14 @@
+ 
+ #include <stdbool.h>
+ 
 +zptrtable* _PyCode_PtrTable;
 +
 +static void construct_ptrtable(void) __attribute__((constructor));
@@ -1046,9 +1045,10 @@ Fil-C-Origin-Commits: 4d81217a0e27
 +{
 +    _PyCode_PtrTable = zptrtable_new();
 +}
- 
++
  static PyObject* code_repr(PyCodeObject *co);
  
+ static const char *
 --- a/Objects/listobject.c
 +++ b/Objects/listobject.c
 @@ -1271,11 +1271,10 @@
@@ -1308,7 +1308,7 @@ Fil-C-Origin-Commits: 4d81217a0e27
  static inline void
 --- a/Python/ceval.c
 +++ b/Python/ceval.c
-@@ -1541,8 +1541,7 @@
+@@ -1543,8 +1543,7 @@
      assert(frame->owner == FRAME_OWNED_BY_THREAD);
      // Make sure that this is, indeed, the top frame. We can't check this in
      // _PyThreadState_PopFrame, since f_code is already cleared at that point:
@@ -1340,7 +1340,7 @@ Fil-C-Origin-Commits: 4d81217a0e27
  
 --- a/Python/dtoa.c
 +++ b/Python/dtoa.c
-@@ -313,7 +313,7 @@
+@@ -317,7 +317,7 @@
  // struct Bigint is defined in pycore_dtoa.h.
  typedef struct Bigint Bigint;
  
@@ -1349,7 +1349,7 @@ Fil-C-Origin-Commits: 4d81217a0e27
  
  /* Memory management: memory is allocated from, and returned to, Kmax+1 pools
     of memory, where pool k (0 <= k <= Kmax) is for Bigints b with b->maxwds ==
-@@ -432,7 +432,7 @@
+@@ -436,7 +436,7 @@
      }
  }
  
@@ -1360,7 +1360,7 @@ Fil-C-Origin-Commits: 4d81217a0e27
                            y->wds*sizeof(Long) + 2*sizeof(int))
 --- a/Python/pystate.c
 +++ b/Python/pystate.c
-@@ -1357,9 +1357,7 @@
+@@ -1359,9 +1359,7 @@
      tstate->gilstate_counter = 1;
  
      tstate->cframe = &tstate->root_cframe;
@@ -1371,7 +1371,7 @@ Fil-C-Origin-Commits: 4d81217a0e27
      tstate->what_event = -1;
  
      tstate->_status.initialized = 1;
-@@ -1473,13 +1471,7 @@
+@@ -1475,13 +1473,7 @@
  static void
  clear_datastack(PyThreadState *tstate)
  {
@@ -1386,11 +1386,10 @@ Fil-C-Origin-Commits: 4d81217a0e27
  }
  
  void
-@@ -2945,64 +2937,22 @@
- 
+@@ -2950,63 +2942,21 @@
  
  #define MINIMUM_OVERHEAD 1000
--
+ 
 -static PyObject **
 -push_chunk(PyThreadState *tstate, int size)
 -{
@@ -1415,7 +1414,7 @@ Fil-C-Origin-Commits: 4d81217a0e27
 -    tstate->datastack_top = res + size;
 -    return res;
 -}
- 
+-
  _PyInterpreterFrame *
  _PyThreadState_PushFrame(PyThreadState *tstate, size_t size)
  {
@@ -1459,7 +1458,7 @@ Fil-C-Origin-Commits: 4d81217a0e27
  
 --- a/configure
 +++ b/configure
-@@ -13022,15 +13022,7 @@
+@@ -13045,15 +13045,7 @@
  
  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking perf trampoline" >&5
  printf %s "checking perf trampoline... " >&6; }

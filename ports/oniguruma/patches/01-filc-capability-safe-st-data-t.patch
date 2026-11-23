@@ -1,0 +1,124 @@
+Subject: Use void* for internal st_data_t and hash_data_type to preserve pointer capabilities
+Policy-Class: P2-Package
+Rationale: Oniguruma's internal hash table (src/st.h, src/regint.h) defines st_data_t and hash_data_type as unsigned long, casting pointers such as st_callout_name_key*, st_str_end_key*, NameEntry*, CalloutNameEntry*, and UserDefinedPropertyValue* through integer types. Under Fil-C InvisiCaps, pointer-to-integer-to-pointer round-trips strip capabilities, causing an immediate safety trap on dereference in regparse.c:673 (callout_name_table_hash during onig_initialize_encoding / test_back). Changing the internal (uninstalled) st_data_t and hash_data_type typedefs to void* and passing properly typed hash_data_type* out-parameters preserves pointer provenance and strict aliasing without altering any public header or ABI.
+Upstream-Status: Inappropriate [upstream kkos/oniguruma archived since 2025; candidate for jq/distro forks]
+Fil-C-Origin-Commits: none (root-caused locally during Stage 6b oniguruma test_back failure)
+
+--- a/src/st.h
++++ b/src/st.h
+@@ -5,11 +5,7 @@
+ #ifndef ST_INCLUDED
+ #define ST_INCLUDED
+ 
+-#if SIZEOF_VOIDP == SIZEOF_LONG
+-typedef unsigned long st_data_t;
+-#elif SIZEOF_VOIDP == SIZEOF_LONG_LONG
+-typedef unsigned long long st_data_t;
+-#endif
++typedef void *st_data_t;
+ 
+ #define ST_DATA_T_DEFINED
+ 
+--- a/src/regint.h
++++ b/src/regint.h
+@@ -301,11 +301,7 @@
+ #endif
+ #endif /* _WIN32 */
+ 
+-#if SIZEOF_VOIDP == SIZEOF_LONG
+-typedef unsigned long hash_data_type;
+-#elif SIZEOF_VOIDP == SIZEOF_LONG_LONG
+-typedef unsigned long long hash_data_type;
+-#endif
++typedef void *hash_data_type;
+ 
+ /* strend hash */
+ typedef void* hash_table_type;
+--- a/src/st.c
++++ b/src/st.c
+@@ -558,5 +558,5 @@
+ static int
+ numhash(st_data_t n)
+ {
+-  return n;
++  return (int )(intptr_t )n;
+ }
+--- a/src/regparse.c
++++ b/src/regparse.c
+@@ -845,7 +845,9 @@
+ 
+   e = (NameEntry* )NULL;
+   if (IS_NOT_NULL(t)) {
+-    onig_st_lookup_strend(t, name, name_end, (HashDataType* )((void* )(&e)));
++    HashDataType val = 0;
++    if (onig_st_lookup_strend(t, name, name_end, &val) != 0)
++      e = (NameEntry* )val;
+   }
+   return e;
+ }
+@@ -1445,16 +1447,19 @@
+ 
+   e = (CalloutNameEntry* )NULL;
+   if (IS_NOT_NULL(t)) {
++    HashDataType val = 0;
+     r = onig_st_lookup_callout_name_table(t, enc, is_not_single, name, name_end,
+-                                          (HashDataType* )((void* )(&e)));
++                                          &val);
+     if (r == 0) { /* not found */
+       if (enc != ONIG_ENCODING_ASCII &&
+           ONIGENC_IS_ASCII_COMPATIBLE_ENCODING(enc)) {
+         enc = ONIG_ENCODING_ASCII;
+-        onig_st_lookup_callout_name_table(t, enc, is_not_single, name, name_end,
+-                                          (HashDataType* )((void* )(&e)));
++        r = onig_st_lookup_callout_name_table(t, enc, is_not_single, name, name_end,
++                                              &val);
+       }
+     }
++    if (r != 0)
++      e = (CalloutNameEntry* )val;
+   }
+   return e;
+ }
+@@ -2000,9 +2005,10 @@
+   if (IS_NULL(ext) || IS_NULL(ext->tag_table))
+     return ONIGERR_INVALID_CALLOUT_TAG_NAME;
+ 
+-  r = onig_st_lookup_strend(ext->tag_table, tag, tag_end,
+-                            (HashDataType* )((void* )(&e)));
++  HashDataType val = 0;
++  r = onig_st_lookup_strend(ext->tag_table, tag, tag_end, &val);
+   if (r == 0) return ONIGERR_INVALID_CALLOUT_TAG_NAME;
++  e = (CalloutTagVal )val;
+   return (int )e;
+ }
+ 
+@@ -2013,7 +2019,9 @@
+ 
+   e = -1;
+   if (IS_NOT_NULL(t)) {
+-    onig_st_lookup_strend(t, name, name_end, (HashDataType* )((void* )(&e)));
++    HashDataType val = 0;
++    if (onig_st_lookup_strend(t, name, name_end, &val) != 0)
++      e = (CalloutTagVal )val;
+   }
+   return e;
+ }
+--- a/src/unicode.c
++++ b/src/unicode.c
+@@ -1215,10 +1215,13 @@
+ 
+   if (UserDefinedPropertyTable != 0) {
+     UserDefinedPropertyValue* e;
++    hash_data_type val = 0;
+     e = (UserDefinedPropertyValue* )NULL;
+-    onig_st_lookup_strend(UserDefinedPropertyTable,
+-                          (const UChar* )buf, (const UChar* )buf + len,
+-                          (hash_data_type* )((void* )(&e)));
++    if (onig_st_lookup_strend(UserDefinedPropertyTable,
++                              (const UChar* )buf, (const UChar* )buf + len,
++                              &val) != 0) {
++      e = (UserDefinedPropertyValue* )val;
++    }
+     if (e != 0) {
+       return e->ctype;
+     }

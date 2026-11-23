@@ -12,8 +12,8 @@ CONFIGURE_ARGS="--disable-docs --disable-maintainer-mode --disable-valgrind"
 MAKE_ARGS=""
 INSTALL_ARGS=""
 TEST_CMD=""
-POLICY_CLASS="P0-Clean"
-POLICY_RATIONALE="Builds unmodified upstream jq 1.8.2 against the staged Fil-C oniguruma port (--with-oniguruma, --disable-docs, --disable-valgrind) and runs the upstream make check test suite. Verified against pinned Fil-C (cede3de02b42) that no standalone jq port patch exists upstream."
+POLICY_CLASS="P3-BuildOpt"
+POLICY_RATIONALE="Builds unmodified upstream jq 1.8.2 against the staged Fil-C oniguruma port (--with-oniguruma, --disable-docs, --disable-valgrind) with zero source patches. Under Fil-C's larger capability stack frames, jq's deep-nesting test (#531 in tests/jqtest, 3671x jv_dump_term recursion at jv_print.c:301) triggers a safe 'filc safety error: stack overflow.' at the default 8 MiB stack limit; jq aborts earlier on extreme nesting under Fil-C, but safely. port_test() raises the stack limit to 64 MiB (ulimit -s 65536) for the upstream make check test suite. Verified against pinned Fil-C (cede3de02b42) that no standalone jq port patch exists upstream."
 FILC_ORIGIN_REF="none (new Stage 6b port; verified no jq patch in cede3de02b42)"
 
 port_configure() {
@@ -26,5 +26,5 @@ port_configure() {
 }
 
 port_test() {
-  make -j"$JOBS" check
+  (ulimit -s 65536 && make -j"$JOBS" check)
 }

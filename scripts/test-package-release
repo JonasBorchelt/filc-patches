@@ -167,7 +167,9 @@ MOCK_WORK="$TMP_DIR/mock-tc"
 OUT_DIR="$TMP_DIR/out"
 make_mock_toolchain "$MOCK_WORK" 0
 
-"$REPO_ROOT/scripts/package-release" "$MOCK_WORK" "$OUT_DIR" "0.0.0-mock"
+MOCK_PUBLIC_SHA="0123456789abcdef0123456789abcdef01234567"
+FILC_RELEASE_PUBLIC_COMMIT="$MOCK_PUBLIC_SHA" \
+  "$REPO_ROOT/scripts/package-release" "$MOCK_WORK" "$OUT_DIR" "0.0.0-mock"
 
 (cd "$OUT_DIR" && sha256sum -c SHA256SUMS)
 ARCHIVE="$(ls "$OUT_DIR"/filc-0.0.0-mock-*-linux.tar.xz)"
@@ -175,6 +177,8 @@ test -s "$ARCHIVE"
 test -s "$OUT_DIR/PROVENANCE"
 test -s "$OUT_DIR/MANIFEST"
 test -s "$OUT_DIR/RELEASE_NOTES.md"
+grep -Fxq "FILC_PATCHES_COMMIT=$MOCK_PUBLIC_SHA" "$OUT_DIR/PROVENANCE"
+grep -Fq "$MOCK_PUBLIC_SHA" "$OUT_DIR/RELEASE_NOTES.md"
 
 EXTRACT="$TMP_DIR/extract"
 mkdir -p "$EXTRACT"
@@ -218,4 +222,11 @@ if "$REPO_ROOT/scripts/package-release" "$LEAK_WORK" "$LEAK_OUT" "0.0.0-leak" 2>
   exit 1
 fi
 echo "LEAK-GATE REJECTION OK"
+
+if FILC_RELEASE_PUBLIC_COMMIT="not-a-valid-sha" \
+  "$REPO_ROOT/scripts/package-release" "$MOCK_WORK" "$TMP_DIR/bad-sha-out" "0.0.0-badsha" 2>/dev/null; then
+  echo "FAIL: package-release should have rejected invalid FILC_RELEASE_PUBLIC_COMMIT" >&2
+  exit 1
+fi
+echo "INVALID PUBLIC COMMIT REJECTION OK"
 echo "ALL PACKAGE-RELEASE TESTS PASSED"

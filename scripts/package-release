@@ -53,6 +53,15 @@ SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$REPO_ROOT" log -1 --format=%c
 export SOURCE_DATE_EPOCH
 export LC_ALL=C
 
+PUBLIC_COMMIT="${FILC_RELEASE_PUBLIC_COMMIT:-}"
+if [[ -z "$PUBLIC_COMMIT" && ! -f "$REPO_ROOT/.public-exclude" ]]; then
+  PUBLIC_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
+fi
+if [[ -n "$PUBLIC_COMMIT" && ! "$PUBLIC_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "error: invalid FILC_RELEASE_PUBLIC_COMMIT (expected 40-char lowercase hex SHA): $PUBLIC_COMMIT" >&2
+  exit 1
+fi
+
 ARCHIVE_STEM="filc-${VERSION}-${ARCH}-linux"
 ARCHIVE_NAME="${ARCHIVE_STEM}.tar.xz"
 
@@ -312,6 +321,9 @@ PATCH_SERIES_SHA256=${PATCH_SERIES_SHA256}
 SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 BUILD_OPTIONS=FILC_RELEASE_BUILD=1 CMAKE_BUILD_TYPE=Release LLVM_ENABLE_ASSERTIONS=OFF LIBCXX_HARDENING_MODE=extensive prefix-map-enabled
 EOF
+if [[ -n "$PUBLIC_COMMIT" ]]; then
+  echo "FILC_PATCHES_COMMIT=${PUBLIC_COMMIT}" >> "$STAGE/PROVENANCE"
+fi
 
 cat > "$STAGE/README.txt" <<EOF
 Fil-C Toolchain (${VERSION}, ${ARCH}-linux)
@@ -465,7 +477,8 @@ revisions and the \`filc-patches\` series.
 - Fil-C compiler passes and runtime: \`${FILC_COMMIT:0:12}\`
 - musl libc (yolomusl and usermusl): \`${MUSL_COMMIT:0:12}\`
 - Patch series SHA-256: \`${PATCH_SERIES_SHA256}\`
-
+${PUBLIC_COMMIT:+- \`filc-patches\` commit: \`${PUBLIC_COMMIT}\`
+}
 ## Verification
 
 Tested directly from the unpacked archive in a fresh temporary directory

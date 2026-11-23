@@ -123,6 +123,7 @@ mkdir -p \
 # Stage 1: LLVM + Clang + LLD
 # ---------------------------------------------------------------------------
 echo "=== [1/8] Building LLVM + Clang + LLD ==="
+echo "FILC_ASSERTIONS_CONFIG: LLVM_ENABLE_ASSERTIONS=${FILC_LLVM_ASSERTIONS:-OFF} FILC_PASS_ASSERTIONS=${FILC_PASS_ASSERTIONS:-OFF} FILC_DISABLE_CCACHE=${FILC_DISABLE_CCACHE:-0}"
 T_S1="$(date +%s)"
 LLVM_CMAKE_ARGS=(
   -S "$LLVM_SRC/llvm"
@@ -157,7 +158,7 @@ fi
 if command -v ld.lld >/dev/null 2>&1; then
   LLVM_CMAKE_ARGS+=(-DLLVM_ENABLE_LLD=ON)
 fi
-if command -v ccache >/dev/null 2>&1; then
+if [[ "${FILC_DISABLE_CCACHE:-0}" != "1" ]] && command -v ccache >/dev/null 2>&1; then
   LLVM_CMAKE_ARGS+=(-DLLVM_CCACHE_BUILD=ON)
 fi
 if [[ "$RELEASE_BUILD" == "1" ]]; then

@@ -408,6 +408,7 @@ else
 fi
 
 CURRENT_STAGE="build"
+T_BUILD_START="$(date +%s)"
 if declare -F port_build >/dev/null 2>&1; then
   run_stage_fn port_build
 else
@@ -421,6 +422,8 @@ else
       ;;
   esac
 fi
+BUILD_SECONDS=$(( $(date +%s) - T_BUILD_START ))
+echo "FILC_PORT_BUILD_SECONDS port=$PORT_NAME build_seconds=$BUILD_SECONDS"
 
 CURRENT_STAGE="install"
 if declare -F port_install >/dev/null 2>&1; then
@@ -452,4 +455,4 @@ fi
 touch "$STATE_DIR/$PORT_NAME.installed"
 write_state "$FINAL_STATUS" "" ""
 PORT_DONE=1
-echo "FILC_PORT $PORT_NAME $FINAL_STATUS policy=$POLICY_CLASS duration=$(( $(date +%s) - T_START )) patches=$PATCH_COUNT"
+echo "FILC_PORT $PORT_NAME $FINAL_STATUS policy=$POLICY_CLASS duration=$(( $(date +%s) - T_START )) build=$BUILD_SECONDS patches=$PATCH_COUNT"

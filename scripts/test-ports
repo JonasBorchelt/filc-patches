@@ -374,27 +374,48 @@ port_install()   { :; }
 port_test()      { echo "FAIL: mock_unit_test" > "\$SRC_DIR/test-suite.log"; return 2; }
 EOF
 
+mkdir -p "$FN_DIR/fn-cfg-fail"
+cat > "$FN_DIR/fn-cfg-fail/PORT" <<EOF
+NAME="fn-cfg-fail"
+VERSION="1.0"
+LICENSE="MIT"
+UPSTREAM_URL="file://$TMP_DIR/fn-ok-1.0.tar.gz"
+UPSTREAM_SHA256="$FN_SHA"
+EXTRACT_DIR="fn-ok-1.0"
+TIER=0
+DEPS=""
+BUILD_SYSTEM="custom"
+POLICY_CLASS="P0-Clean"
+
+port_configure() { echo "MOCK_CONFIG_LOG_ERR: libfoo not found" > "\$SRC_DIR/config.log"; return 1; }
+port_build()     { :; }
+port_install()   { :; }
+port_test()      { :; }
+EOF
+
 set +e
 PATH="$FAKE_BIN:$PATH" FILC_TOOLCHAIN_ROOT="$FN_TC" \
-  "$REPO_ROOT/scripts/build-ports" --ports-dir "$FN_DIR" "$FN_WORK"
+  "$REPO_ROOT/scripts/build-ports" --ports-dir "$FN_DIR" "$FN_WORK" >"$TMP_DIR/fn.out" 2>"$TMP_DIR/fn.err"
 FN_RC=$?
 set -e
 if [[ $FN_RC -eq 0 ]]; then
-  echo "FAIL: expected non-zero exit when fn-pkg-fail fails" >&2
+  echo "FAIL: expected non-zero exit when fn-pkg-fail/fn-cfg-fail fail" >&2
   exit 1
 fi
+grep -q "MOCK_CONFIG_LOG_ERR: libfoo not found" "$TMP_DIR/fn.err"
 
 python3 - "$FN_WORK/ports-report.json" "$FN_WORK/ports-report.txt" <<'PY'
 import json, sys
 rep = json.load(open(sys.argv[1]))
 txt = open(sys.argv[2]).read()
 by_name = {p["name"]: p for p in rep["ports"]}
-assert rep["tested"] == 1 and rep["failed"] == 1 and rep["failed_package"] == 1 and rep["failed_runner"] == 0, rep
+assert rep["tested"] == 1 and rep["failed"] == 2 and rep["failed_package"] == 2 and rep["failed_runner"] == 0, rep
 assert by_name["fn-ok"]["status"] == "tested", by_name["fn-ok"]
 assert by_name["fn-pkg-fail"]["status"] == "failed" and by_name["fn-pkg-fail"]["failed_kind"] == "package" and by_name["fn-pkg-fail"]["failed_stage"] == "test", by_name["fn-pkg-fail"]
-assert "PORTS_FAILED=1 (runner=0, package=1)" in txt, txt
-assert "failed:package(test)" in txt, txt
-print("CUSTOM RECIPE FUNCTIONS UNDER TIMEOUT & FAILED_KIND CHECKS OK")
+assert by_name["fn-cfg-fail"]["status"] == "failed" and by_name["fn-cfg-fail"]["failed_kind"] == "package" and by_name["fn-cfg-fail"]["failed_stage"] == "configure", by_name["fn-cfg-fail"]
+assert "PORTS_FAILED=2 (runner=0, package=2)" in txt, txt
+assert "failed:package(test)" in txt and "failed:package(configure)" in txt, txt
+print("CUSTOM RECIPE FUNCTIONS UNDER TIMEOUT, CONFIG.LOG DUMP & FAILED_KIND CHECKS OK")
 PY
 
 echo "ALL PORTS TESTS PASSED"

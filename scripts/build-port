@@ -140,6 +140,15 @@ dump_test_logs() {
   done < <(find "$SRC_DIR" -maxdepth 3 -name 'test-suite.log' -type f 2>/dev/null)
 }
 
+dump_configure_logs() {
+  [[ -n "${SRC_DIR:-}" && -d "${SRC_DIR:-}" ]] || return 0
+  local logf
+  while IFS= read -r logf; do
+    echo "--- CONFIGURE LOG ($logf, last 80 lines) ---" >&2
+    tail -n 80 "$logf" >&2 || true
+  done < <(find "$SRC_DIR" -maxdepth 3 \( -name 'config.log' -o -name 'CMakeError.log' \) -type f 2>/dev/null)
+}
+
 classify_failure_kind() {
   local stage="$1"
   local rc="$2"
@@ -164,6 +173,8 @@ on_exit() {
     fkind="$(classify_failure_kind "$CURRENT_STAGE" "$rc")"
     if [[ "$CURRENT_STAGE" == "test" ]]; then
       dump_test_logs || true
+    elif [[ "$CURRENT_STAGE" == "configure" ]]; then
+      dump_configure_logs || true
     fi
     local dur=$(( $(date +%s) - T_START ))
     echo "FILC_PORT $PORT_NAME failed:$fkind policy=$POLICY_CLASS duration=$dur stage=$CURRENT_STAGE rc=$rc" >&2

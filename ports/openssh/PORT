@@ -9,9 +9,9 @@ UPSTREAM_PGP_KEY="ports/pgp-keys/openssh-release-key.asc"
 UPSTREAM_PGP_FPR="7168B983815A5EEF59A4ADFD2A3F414E736060BA"
 EXTRACT_DIR="openssh-10.6p2"
 TIER=3
-DEPS="zlib openssl libedit"
+DEPS="zlib openssl libedit pkgconf"
 BUILD_SYSTEM="autotools"
-CONFIGURE_ARGS="--without-pam --without-selinux"
+CONFIGURE_ARGS="--with-libedit --without-pam --without-selinux"
 MAKE_ARGS=""
 INSTALL_ARGS="install-nokeys"
 TEST_CMD=""
@@ -21,10 +21,11 @@ FILC_ORIGIN_REF="cede3de02b42:projects/openssh.projeny"
 
 port_configure() {
   CPPFLAGS="-I$PIZFIX/include" LDFLAGS="-L$PIZFIX/lib" \
+    PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" \
     ./configure --prefix="$PIZFIX" \
       --with-ssl-dir="$PIZFIX" \
       --with-zlib="$PIZFIX" \
-      --with-libedit="$PIZFIX" \
+      --with-libedit \
       --without-pam \
       --without-selinux
 }

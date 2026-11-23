@@ -1,0 +1,73 @@
+NAME="cmake"
+VERSION="3.30.2"
+LICENSE="BSD-3-Clause"
+UPSTREAM_URL="https://github.com/Kitware/CMake/releases/download/v3.30.2/cmake-3.30.2.tar.gz"
+UPSTREAM_SHA256="46074c781eccebc433e98f0bbfa265ca3fd4381f245ca3b140e7711531d60db2"
+UPSTREAM_SHA256_SOURCE="sha256:https://github.com/Kitware/CMake/releases/download/v3.30.2/cmake-3.30.2-SHA-256.txt"
+EXTRACT_DIR="cmake-3.30.2"
+TIER=5
+DEPS="curl libarchive libuv expat zlib bzip2 xz zstd openssl nghttp2 ncurses pkgconf"
+BUILD_SYSTEM="custom"
+CONFIGURE_ARGS=""
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P2-Package"
+POLICY_RATIONALE="Builds CMake 3.30.2 against Fil-C system libraries (--system-libs --bootstrap-system-libuv) with 3 minimal patches (+9/-4): lib instead of lib64 in GNUInstallDirs.cmake and long option variables for curl 8.16+ macro compatibility."
+FILC_ORIGIN_REF="fc54fc58e8e5:projects/cmake-3.30.2"
+
+port_configure() {
+  PATH="$PIZFIX/bin:$PATH" \
+    PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" \
+    CPPFLAGS="-I$PIZFIX/include" \
+    LDFLAGS="-L$PIZFIX/lib" \
+    ./bootstrap \
+      --prefix="$PIZFIX" \
+      --parallel="$JOBS" \
+      --system-libs \
+      --bootstrap-system-libuv \
+      --mandir=/share/man \
+      --no-system-jsoncpp \
+      --no-system-cppdap \
+      --no-system-librhash \
+      --docdir=/share/doc/cmake-3.30.2 \
+      -- \
+      -DCMAKE_PREFIX_PATH="$PIZFIX" \
+      -DCMAKE_INCLUDE_PATH="$PIZFIX/include" \
+      -DCMAKE_LIBRARY_PATH="$PIZFIX/lib"
+  find . -name '*.make' -type f -exec sed -i 's|-isystem /usr/include||g' {} +
+}
+
+port_build() {
+  make -j"$JOBS"
+}
+
+port_install() {
+  make install
+}
+
+port_test() {
+  local out ver
+  out="$("$PIZFIX/bin/cmake" --version)"
+  ver="${out%%$'\n'*}"
+  echo "cmake version: $ver"
+  printf '%s\n' "$ver" | grep -Fxq 'cmake version 3.30.2'
+  local td
+  td="$(mktemp -d)"
+  cat > "$td/CMakeLists.txt" <<'EOF'
+cmake_minimum_required(VERSION 3.20)
+project(filc_cmake_smoke C)
+add_executable(smoke main.c)
+EOF
+  cat > "$td/main.c" <<'EOF'
+#include <stdio.h>
+int main(void) {
+    puts("CMAKE_FILC_OK");
+    return 0;
+}
+EOF
+  "$PIZFIX/bin/cmake" -S "$td" -B "$td/build" -DCMAKE_C_COMPILER="$CC"
+  "$PIZFIX/bin/cmake" --build "$td/build"
+  "$td/build/smoke" | grep -Fxq 'CMAKE_FILC_OK'
+  rm -rf "$td"
+}

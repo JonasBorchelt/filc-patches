@@ -1,0 +1,62 @@
+NAME="git"
+VERSION="2.56.0"
+LICENSE="GPL-2.0-only"
+UPSTREAM_URL="https://www.kernel.org/pub/software/scm/git/git-2.56.0.tar.xz"
+UPSTREAM_SHA256="26c56c296b38c0695b26fa95f475f1d01704d2d38e73465ca30b0b2f5dc789d3"
+UPSTREAM_SHA256_SOURCE="sha256:https://www.kernel.org/pub/software/scm/git/sha256sums.asc"
+EXTRACT_DIR="git-2.56.0"
+TIER=5
+DEPS="zlib curl expat openssl pcre2 pkgconf"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--with-libpcre2"
+MAKE_ARGS="NO_RUST=1 NO_GETTEXT=1 NO_TCLTK=1"
+INSTALL_ARGS="NO_RUST=1 NO_GETTEXT=1 NO_TCLTK=1"
+TEST_CMD=""
+POLICY_CLASS="P2-Package"
+POLICY_RATIONALE="Audited down from Fil-C git.projeny (24 files, +74/-96) to 23 source files by passing NO_RUST=1 via MAKE_ARGS instead of patching config.mak. Preserves pointer capabilities in parse-options defval (void* instead of intptr_t) and uses single-object-per-chunk allocation in compat/obstack."
+FILC_ORIGIN_REF="cede3de02b42:projects/git.projeny"
+
+port_configure() {
+  PATH="$PIZFIX/bin:$PATH" \
+    CPPFLAGS="-I$PIZFIX/include" \
+    LDFLAGS="-L$PIZFIX/lib" \
+    PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" \
+    ./configure --prefix="$PIZFIX" \
+      --with-gitconfig=/etc/gitconfig \
+      --with-python=python3 \
+      --with-libpcre2 \
+      --with-curl="$PIZFIX" \
+      --with-expat="$PIZFIX" \
+      --with-zlib="$PIZFIX" \
+      --with-openssl="$PIZFIX"
+}
+
+port_build() {
+  make -j"$JOBS" NO_RUST=1 NO_GETTEXT=1 NO_TCLTK=1
+}
+
+port_install() {
+  make -j"$JOBS" NO_RUST=1 NO_GETTEXT=1 NO_TCLTK=1 install
+}
+
+port_test() {
+  local out ver
+  out="$("$PIZFIX/bin/git" --version)"
+  ver="${out%%$'\n'*}"
+  echo "git version: $ver"
+  printf '%s\n' "$ver" | grep -Fxq 'git version 2.56.0'
+  local td
+  td="$(mktemp -d)"
+  "$PIZFIX/bin/git" -C "$td" init -q -b main
+  "$PIZFIX/bin/git" -C "$td" config user.name "Fil-C Test"
+  "$PIZFIX/bin/git" -C "$td" config user.email "test@example.invalid"
+  printf 'hello filc\nfixed-string-needle\n' > "$td/file.txt"
+  "$PIZFIX/bin/git" -C "$td" add file.txt
+  "$PIZFIX/bin/git" -C "$td" commit -q -m "initial"
+  # Exercises parse-options pointer defval ('git status -u')
+  "$PIZFIX/bin/git" -C "$td" status -u --short
+  # Exercises compat/obstack via kwset ('git grep -F')
+  "$PIZFIX/bin/git" -C "$td" grep -F "fixed-string-needle" | grep -Fq 'file.txt:fixed-string-needle'
+  "$PIZFIX/bin/git" -C "$td" log -n 1 --format=%s | grep -Fxq 'initial'
+  rm -rf "$td"
+}

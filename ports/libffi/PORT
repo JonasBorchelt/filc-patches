@@ -1,0 +1,95 @@
+NAME="libffi"
+VERSION="3.8.0"
+LICENSE="MIT"
+UPSTREAM_URL="https://github.com/libffi/libffi/releases/download/v3.8.0/libffi-3.8.0.tar.gz"
+UPSTREAM_SHA256="7da3e2d9a171eb0a038f592ecad3ff2bb2550f3496d87b3b29ad0cf4430c0db4"
+UPSTREAM_SHA256_SOURCE="github-release-digest:https://api.github.com/repos/libffi/libffi/releases/tags/v3.8.0"
+EXTRACT_DIR="libffi-3.8.0"
+TIER=1
+DEPS="pkgconf"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--disable-exec-static-tramp"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P2-Package"
+POLICY_RATIONALE="Audited down from Fil-C libffi.projeny (13 files, +565/-13) to 7 core ABI files: drops Makefile.{am,in} -Wl,--version-script edits (handled by P1 llvm/06b), README, and local ffitest harness; keeps the genuine FFI_FILC ABI and capability-safe closure bridge for x86_64 and aarch64 with --disable-exec-static-tramp."
+FILC_ORIGIN_REF="cede3de02b42:projects/libffi.projeny"
+
+port_configure() {
+  ./configure --prefix="$PIZFIX" --disable-exec-static-tramp
+}
+
+port_test() {
+  local ver
+  ver="$(PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" "$PIZFIX/bin/pkg-config" --modversion libffi)"
+  echo "libffi pkg-config version: $ver"
+  printf '%s\n' "$ver" | grep -Fxq '3.8.0'
+  local td
+  td="$(mktemp -d)"
+  cat > "$td/test_ffi.c" <<'EOF'
+#include <ffi.h>
+#include <stdio.h>
+#include <string.h>
+
+static int add_scaled(int a, int b, const char *tag) {
+    return (int)strlen(tag) + a * 10 + b;
+}
+
+static void closure_cb(ffi_cif *cif, void *ret, void **args, void *userdata) {
+    (void)cif;
+    int x = *(int *)args[0];
+    int y = *(int *)args[1];
+    int bias = *(int *)userdata;
+    *(ffi_arg *)ret = (ffi_arg)(x + y + bias);
+}
+
+int main(void) {
+    ffi_cif cif;
+    ffi_type *arg_types[3] = { &ffi_type_sint, &ffi_type_sint, &ffi_type_pointer };
+    if (ffi_prep_cif(&cif, FFI_DEFAULT_ABI, 3, &ffi_type_sint, arg_types) != FFI_OK) {
+        return 1;
+    }
+    int a = 3, b = 8;
+    const char *tag = "filc";
+    void *values[3] = { &a, &b, &tag };
+    ffi_arg rc = 0;
+    ffi_call(&cif, FFI_FN(add_scaled), &rc, values);
+    if ((int)rc != 42) {
+        fprintf(stderr, "ffi_call mismatch: %d\n", (int)rc);
+        return 2;
+    }
+
+    ffi_cif ccif;
+    ffi_type *cargs[2] = { &ffi_type_sint, &ffi_type_sint };
+    if (ffi_prep_cif(&ccif, FFI_DEFAULT_ABI, 2, &ffi_type_sint, cargs) != FFI_OK) {
+        return 3;
+    }
+    void *code = NULL;
+    ffi_closure *closure = ffi_closure_alloc(sizeof(ffi_closure), &code);
+    if (!closure || !code) {
+        return 4;
+    }
+    int bias = 100;
+    if (ffi_prep_closure_loc(closure, &ccif, closure_cb, &bias, code) != FFI_OK) {
+        ffi_closure_free(closure);
+        return 5;
+    }
+    int (*fn)(int, int) = (int (*)(int, int))code;
+    int cres = fn(15, 27);
+    ffi_closure_free(closure);
+    if (cres != 142) {
+        fprintf(stderr, "ffi_closure mismatch: %d\n", cres);
+        return 6;
+    }
+    printf("LIBFFI_OK: %d %d\n", (int)rc, cres);
+    return 0;
+}
+EOF
+  local cflags libs
+  cflags="$(PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" "$PIZFIX/bin/pkg-config" --cflags libffi)"
+  libs="$(PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" "$PIZFIX/bin/pkg-config" --libs libffi)"
+  "$CC" -O2 $cflags "$td/test_ffi.c" $libs -o "$td/test_ffi"
+  "$td/test_ffi" | grep -Fxq 'LIBFFI_OK: 42 142'
+  rm -rf "$td"
+}

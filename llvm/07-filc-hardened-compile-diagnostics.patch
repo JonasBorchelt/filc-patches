@@ -19,6 +19,10 @@ reachable rejections and keeps module IR verification active in Release builds:
     SafeAdd64/SafeMul64 64-bit layout overflow checks, unsupported pointer
     atomicrmw, linkage, ConstantExpr, unknown instruction) with
     report_fatal_error(..., /*GenCrashDiag=*/false).
+  * After emitting noreturn filc_error for CallBrInst (asm goto) or unhandled
+    intrinsics, erase the unlowered instruction (replacing CallBrInst with
+    UnreachableInst after updating successor PHIs, and RAUWing non-void results
+    with a dummy LoadInst) so no unlowered OldF arguments survive verification.
   * Always run verifyModule(M, &errs()) after FilPizlonatorPass (even in Release
     builds with LLVM_ENABLE_ASSERTIONS=OFF) so invalid IR is caught immediately
     with full verifier diagnostics instead of silently miscompiling.
@@ -146,7 +150,7 @@ index 2a8395e26..0e3bfe9b0 100644
  
  bool Sema::BuiltinCountedByRef(CallExpr *TheCall) {
 diff --git a/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp b/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp
-index 8f2617fac..361ad287f 100644
+index 8f2617fac..2e2f1fa02 100644
 --- a/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp
 +++ b/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp
 @@ -415,15 +415,21 @@ class MATokenizer {
@@ -331,7 +335,22 @@ index 8f2617fac..361ad287f 100644
  
        case Intrinsic::x86_xgetbv:
        case Intrinsic::x86_sse2_pause:
-@@ -13833,8 +13865,8 @@ class Pizlonator {
+@@ -8075,6 +8107,14 @@ class Pizlonator {
+           outs << "Unhandled intrinsic: " << *II;
+           CallInst::Create(Error, { getString(str), getOrigin(I->getDebugLoc()) }, "", II)
+             ->setDebugLoc(II->getDebugLoc());
++          if (II->getType() != VoidTy) {
++            Type* LowT = toFlightType(II->getType());
++            LoadInst* LI = new LoadInst(LowT, RawNull, "filc_fake_load", II);
++            LI->setDebugLoc(II->getDebugLoc());
++            II->replaceAllUsesWith(LI);
++          }
++          II->eraseFromParent();
++          return true;
+         }
+ 
+         for (Use& U : II->data_ops()) {
+@@ -13833,8 +13873,8 @@ class Pizlonator {
          Result->setLinkage(F->getLinkage());
          break;
        default:
@@ -342,7 +361,46 @@ index 8f2617fac..361ad287f 100644
        }
        Result->addFnAttr(Attribute::NoInline);
        Result->addFnAttr(Attribute::NoUnwind);
-@@ -14249,7 +14281,10 @@ class Pizlonator {
+@@ -13891,19 +13931,27 @@ class Pizlonator {
+     if (verbose)
+       errs() << "Lowering: " << *I << "\n";
+ 
+-    if (isa<CallBrInst>(I)) {
+-      // "asm goto" produces a CallBrInst. We cannot lower it: it is control
+-      // flow out of the inline assembly, and the inline-asm lowering below
+-      // assumes that it can erase the call and RAUW its result. Instead,
+-      // emit a filc_error panic and leave the callbr in place, so the CFG
+-      // stays valid; the process dies at the filc_error call before the
+-      // callbr ever executes. (Don't call lowerConstantOperands on the
+-      // callbr: it would assert on the BlockAddress operands.)
++    if (CallBrInst* CBI = dyn_cast<CallBrInst>(I)) {
++      // "asm goto" produces a CallBrInst. We cannot lower it: emit a noreturn
++      // filc_error panic and replace the CallBrInst with an unreachable
++      // terminator so no unlowered operands (such as OldF arguments or
++      // pre-flight pointers) survive into module verification.
+       std::string str;
+       raw_string_ostream outs(str);
+-      outs << "cannot handle inline asm (asm goto is not supported): " << *I;
+-      CallInst::Create(Error, { getString(str), getOrigin(I->getDebugLoc()) }, "", I)
+-        ->setDebugLoc(I->getDebugLoc());
++      outs << "cannot handle inline asm (asm goto is not supported): " << *CBI;
++      CallInst::Create(Error, { getString(str), getOrigin(CBI->getDebugLoc()) }, "", CBI)
++        ->setDebugLoc(CBI->getDebugLoc());
++      if (CBI->getType() != VoidTy) {
++        Type* LowT = toFlightType(CBI->getType());
++        LoadInst* LI = new LoadInst(LowT, RawNull, "filc_fake_load", CBI);
++        LI->setDebugLoc(CBI->getDebugLoc());
++        CBI->replaceAllUsesWith(LI);
++      }
++      BasicBlock* Pred = CBI->getParent();
++      for (unsigned Idx = 0, NumSucc = CBI->getNumSuccessors(); Idx < NumSucc; ++Idx)
++        CBI->getSuccessor(Idx)->removePredecessor(Pred, /*KeepOneInputPHIs=*/true);
++      (new UnreachableInst(C, CBI))->setDebugLoc(CBI->getDebugLoc());
++      CBI->eraseFromParent();
+       return;
+     }
+ 
+@@ -14249,7 +14297,10 @@ class Pizlonator {
  
      if (AtomicRMWInst* AI = dyn_cast<AtomicRMWInst>(I)) {
        if (InstTypes[AI] == RawPtrTy) {
@@ -354,7 +412,7 @@ index 8f2617fac..361ad287f 100644
          storeOrigin(getOrigin(AI->getDebugLoc()), AI);
          Instruction* Xchg = CallInst::Create(
            XchgPtr,
-@@ -14309,10 +14344,9 @@ class Pizlonator {
+@@ -14309,10 +14360,9 @@ class Pizlonator {
        return;
      }
  
@@ -368,7 +426,7 @@ index 8f2617fac..361ad287f 100644
  
      if (VAArgInst* VI = dyn_cast<VAArgInst>(I)) {
        Type* T = VI->getType();
-@@ -14368,35 +14402,16 @@ class Pizlonator {
+@@ -14368,35 +14418,16 @@ class Pizlonator {
        return;
      }
  
@@ -413,7 +471,7 @@ index 8f2617fac..361ad287f 100644
  
      if (isa<UnreachableInst>(I)) {
        CallInst::Create(
-@@ -14441,7 +14456,8 @@ class Pizlonator {
+@@ -14441,7 +14472,8 @@ class Pizlonator {
      }
  
      errs() << "Unrecognized instruction: " << *I << "\n";
@@ -423,7 +481,7 @@ index 8f2617fac..361ad287f 100644
    }
  
    bool isSetjmp(Function* F) {
-@@ -15315,8 +15331,9 @@ class Pizlonator {
+@@ -15315,8 +15347,9 @@ class Pizlonator {
        if (Tok.Kind == MATokenKind::None)
          break;
        if (Tok.Kind == MATokenKind::Error) {
@@ -434,7 +492,7 @@ index 8f2617fac..361ad287f 100644
        }
        if (Tok.Kind == MATokenKind::EndLine)
          continue;
-@@ -15328,8 +15345,9 @@ class Pizlonator {
+@@ -15328,8 +15361,9 @@ class Pizlonator {
            GlobalValue* GV = getGlobal(Name);
            if (Tok.Str == ".filc_weak") {
              if (!GV) {
@@ -445,7 +503,7 @@ index 8f2617fac..361ad287f 100644
              }
              GV->setLinkage(GlobalValue::WeakAnyLinkage);
            } else {
-@@ -15351,8 +15369,9 @@ class Pizlonator {
+@@ -15351,8 +15385,9 @@ class Pizlonator {
              assert(Result == 1);
              MAT.getNextSpecific(MATokenKind::Comma);
            } else if (PlusTok.Kind != MATokenKind::Comma) {
@@ -456,7 +514,7 @@ index 8f2617fac..361ad287f 100644
            }
            std::string NewName = MAT.getNextSpecific(MATokenKind::Identifier).Str;
            MAT.getNextSpecific(MATokenKind::EndLine);
-@@ -15373,8 +15392,9 @@ class Pizlonator {
+@@ -15373,8 +15408,9 @@ class Pizlonator {
                      TargetGV->getName() == OldName)
                    continue;
                }
@@ -467,7 +525,7 @@ index 8f2617fac..361ad287f 100644
              }
              assert(!Dummy->getNumUses());
              if (!GV) {
-@@ -15431,11 +15451,9 @@ class Pizlonator {
+@@ -15431,11 +15467,9 @@ class Pizlonator {
            }
            GV->setName(NewName);
            if (GV->getName() != NewName) {
@@ -481,7 +539,7 @@ index 8f2617fac..361ad287f 100644
            }
            continue;
          }
-@@ -15448,11 +15466,17 @@ class Pizlonator {
+@@ -15448,11 +15482,17 @@ class Pizlonator {
                         << "\n";
            continue;
          }
@@ -501,7 +559,7 @@ index 8f2617fac..361ad287f 100644
      }
  
      M.setModuleInlineAsm(NewModuleAsm.str());
-@@ -16142,16 +16166,34 @@ class Pizlonator {
+@@ -16142,16 +16182,34 @@ class Pizlonator {
      for (Function& F : M.functions()) {
        for (BasicBlock& BB : F) {
          for (Instruction& I : BB) {
@@ -546,7 +604,7 @@ index 8f2617fac..361ad287f 100644
          }
        }
  
-@@ -16317,6 +16359,10 @@ public:
+@@ -16317,6 +16375,10 @@ public:
      
      makeEHDatas();
      compileModuleAsm();
@@ -557,7 +615,7 @@ index 8f2617fac..361ad287f 100644
      lazifyAllocas();
      canonicalizeGEPs();
      dropUB();
-@@ -16327,6 +16373,10 @@ public:
+@@ -16327,6 +16389,10 @@ public:
      }
  
      prepare();
@@ -568,7 +626,7 @@ index 8f2617fac..361ad287f 100644
  
      // FIXME: We could probably do this anywhere in the pass, and really all we're doing is turning
      // off the non-integralness of address space 0.
-@@ -16436,30 +16486,36 @@ public:
+@@ -16436,30 +16502,36 @@ public:
      for (Function &F : M.functions()) {
        if (shouldPassThrough(&F)) {
          if (!F.isDeclaration()) {
@@ -614,7 +672,7 @@ index 8f2617fac..361ad287f 100644
      for (GlobalAlias &G : M.aliases())
        Aliases.push_back(&G);
      for (GlobalIFunc &G : M.ifuncs())
-@@ -17672,7 +17728,8 @@ public:
+@@ -17672,7 +17744,8 @@ public:
  
      if (lightVerbose || verbose)
        errs() << "Here's the pizlonated module:\n" << M << "\n";

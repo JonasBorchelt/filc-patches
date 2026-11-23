@@ -137,7 +137,95 @@ dump_test_logs() {
   while IFS= read -r logf; do
     echo "--- TEST LOG ($logf) ---" >&2
     grep -E '^(FAIL|XPASS|ERROR):' "$logf" >&2 || true
-    tail -n 120 "$logf" >&2 || true
+    ruby - "$logf" >&2 <<'RB' || tail -n 120 "$logf" >&2 || true
+path = ARGV[0]
+lines = File.binread(path).force_encoding("UTF-8").encode("UTF-8", invalid: :replace, undef: :replace).lines.map { |l| l.chomp("\n").chomp("\r") }
+hdr_re = /\bfilc\b[^\n]*\berror:/i
+end_re = /(?:\bfilc panic:|thwarted a futile attempt)/i
+hdr_idx = lines.rindex { |l| hdr_re.match?(l) }
+end_idx = lines.rindex { |l| end_re.match?(l) }
+
+if hdr_idx.nil? && end_idx.nil?
+  puts lines.last(120)
+  exit 0
+end
+
+start_i = hdr_idx || [0, end_idx - 120].max
+stop_i = (end_idx && end_idx >= start_i) ? end_idx : [lines.length - 1, start_i + 4000].min
+block = lines[start_i..stop_i]
+
+short_label = lambda do |ln|
+  s = ln.strip
+  if s.include?(": ")
+    s.split(": ").last.strip
+  else
+    s
+  end
+end
+
+header_lines = []
+frame_lines = []
+tail_marker = nil
+in_frames = false
+in_semantic_origin = false
+
+block.each_with_index do |ln, idx|
+  if idx == block.length - 1 && end_re.match?(ln)
+    tail_marker = ln
+    next
+  end
+  st = ln.strip
+  if !in_frames
+    header_lines << ln
+    if /\Asemantic origin:/i.match?(st)
+      in_semantic_origin = true
+    elsif /\Acheck scheduled at/i.match?(st)
+      in_semantic_origin = false
+      in_frames = true
+    elsif idx > 0 && !in_semantic_origin && ln.start_with?(" ", "\t") && !/\Apointer:/i.match?(st)
+      header_lines.pop
+      in_frames = true
+      frame_lines << ln
+    end
+  else
+    frame_lines << ln
+  end
+end
+
+runs = []
+frame_lines.each do |ln|
+  if !runs.empty? && runs.last[0].strip == ln.strip
+    runs.last[1] += 1
+  else
+    runs << [ln, 1]
+  end
+end
+
+out = []
+out.concat(header_lines)
+shown_runs = runs.first(20)
+shown_runs.each do |ln, cnt|
+  out << ln
+  out << "    ... #{cnt}x #{short_label.call(ln)}" if cnt > 1
+end
+if runs.length > 20
+  omitted = runs[20..].sum { |_, c| c }
+  out << "    ... (#{omitted} more frames omitted)"
+  tail_frames = runs.last(3)
+  tail_frames.each do |ln, cnt|
+    out << ln
+    out << "    ... #{cnt}x #{short_label.call(ln)}" if cnt > 1
+  end
+end
+out << tail_marker if tail_marker
+
+after = lines[(stop_i + 1)..] || []
+if !after.empty?
+  out << "--- TEST LOG TAIL ---"
+  out.concat(after.last(60))
+end
+puts out
+RB
   done < <(find "$SRC_DIR" -maxdepth 3 -name 'test-suite.log' -type f 2>/dev/null)
 }
 

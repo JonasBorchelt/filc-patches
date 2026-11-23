@@ -504,3 +504,21 @@ filter.
    `filc-live`.
 4. **Milestone 6.4 (Waves 2–3):** Onboard Tiers 2–5 incrementally while auditing
    each adopted Fil-C patch against the Ports policy to minimize patch debt.
+
+---
+
+## 7. Stage 6b: Extended Userland Ports
+
+Building on the 47-package Stage 6 baseline, Stage 6b onboards additional
+high-value libraries, tools, and servers one port per CI cycle in dependency
+order, applying the same pinning (`scripts/verify-pins`), policy classification
+(`P0-Clean` through `P4-Audit`), build-option-first, and upstream test-suite
+requirements:
+
+| # | Package | Tier | Deps | Upstream Version & Source | SHA-256 (12-char) | Fil-C `cede3de02b42` Status | Policy Class | Policy Rationale |
+|---|---|---|---|---|---|---|---|---|
+| 48 | `libsodium` | 0 | none | `libsodium-1.0.22` (download.libsodium.org, PGP-signed) | `adbdd8f16149` | no standalone patch (only unmodified vendored copy in `projects/lute-1.0.0`) | `P3-BuildOpt` | Builds unmodified upstream tarball with `--disable-asm` and runs `make check`. |
+
+Planned follow-ups in dependency order: `oniguruma` -> `jq`, `less`, `perl`,
+`nginx` (`pcre2`, `zlib`, `openssl`), and `postgresql` with `libpq` (`openssl`,
+`icu`, `libxml2`, `libedit`, `zlib`, `lz4`, `zstd`).

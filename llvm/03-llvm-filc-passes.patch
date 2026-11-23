@@ -135,6 +135,8 @@ Rebase-Notes (llvmorg-22.1.8 -> llvmorg-23.1.6):
   - RegisterFilPasses.{h,cpp}: adapted to LLVM 23 enum class OptimizationLevel (#include OptimizationLevel.h, getInlineParamsFromOptLevel(static_cast<unsigned>(Level))).
   - FilPizlonator.cpp: concatenated Module::getModuleInlineAsm() GlobalAsmFragment list into std::string for MATokenizer.
   - FilPizlonator.cpp: updated lowerIndirectBrForFunction and lowerIndirectBr to use BlockAddress::lookup(&BB) because LLVM 23 BlockAddress has 0 operands and no longer appears in BB.uses() or F.users().
+  - FilPizlonator.cpp: updated llvm.lifetime.start/end to the LLVM 23 1-arg (ptr) signature (10 CallInst::Create sites in loadCC/storeCC/lowering plus analyzeLifetimeMarker and lifetime lowering arg index 0).
+  - FilPizlonator.cpp: updated analyzeIntrinsicLoadStore for llvm.masked.load/store to the LLVM 23 3-arg signature with alignment read from CallBase::getParamAlign(0/1).valueOrOne().value().
 
 ---
 diff --git a/llvm/include/llvm/Passes/RegisterFilPasses.h b/llvm/include/llvm/Passes/RegisterFilPasses.h
@@ -752,10 +754,10 @@ index 000000000..669af69e1
 +}
 diff --git a/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp b/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp
 new file mode 100644
-index 000000000..742829f22
+index 000000000..8f2617fac
 --- /dev/null
 +++ b/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp
-@@ -0,0 +1,17693 @@
+@@ -0,0 +1,17685 @@
 +//===- FilPizlonator.cpp - apply GIMSO semantics to LLVM IR ---------------===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -4908,19 +4910,19 @@ index 000000000..742829f22
 +      switch (II->getIntrinsicID()) {
 +      case Intrinsic::masked_load:
 +      case Intrinsic::masked_store:
-+        assert(II->arg_size() == 4);
++        assert(II->arg_size() == 3);
 +        IAD.AK = II->getIntrinsicID() == Intrinsic::masked_store
 +          ? AccessKind::Write : AccessKind::Read;
 +        if (IAD.AK == AccessKind::Write) {
 +          IAD.T = cast<FixedVectorType>(II->getArgOperand(0)->getType());
 +          IAD.Ptr = II->getArgOperand(1);
-+          IAD.Mask = II->getArgOperand(3);
-+          IAD.Alignment = cast<ConstantInt>(II->getArgOperand(2))->getZExtValue();
++          IAD.Mask = II->getArgOperand(2);
++          IAD.Alignment = II->getParamAlign(1).valueOrOne().value();
 +        } else {
 +          IAD.T = cast<FixedVectorType>(II->getType());
 +          IAD.Ptr = II->getArgOperand(0);
-+          IAD.Mask = II->getArgOperand(2);
-+          IAD.Alignment = cast<ConstantInt>(II->getArgOperand(1))->getZExtValue();
++          IAD.Mask = II->getArgOperand(1);
++          IAD.Alignment = II->getParamAlign(0).valueOrOne().value();
 +        }
 +        assert(!hasPtrs(IAD.T));
 +        break;
@@ -7132,9 +7134,9 @@ index 000000000..742829f22
 +      "filc_payload_alloca", &NewF->getEntryBlock().front());
 +    PayloadAlloca->setDebugLoc(DI);
 +    AuxAlloca->setDebugLoc(DI);
-+    CallInst::Create(LifetimeStart, { ConstantInt::get(IntPtrTy, TotalSize), PayloadAlloca }, "",
++    CallInst::Create(LifetimeStart, { PayloadAlloca }, "",
 +                     InsertBefore)->setDebugLoc(DI);
-+    CallInst::Create(LifetimeStart, { ConstantInt::get(IntPtrTy, TotalSize), AuxAlloca }, "",
++    CallInst::Create(LifetimeStart, { AuxAlloca }, "",
 +                     InsertBefore)->setDebugLoc(DI);
 +    Value* InlineBuffer = threadCCInlineBufferPtr(MyThread, InsertBefore);
 +    CallInst* Call = CallInst::Create(
@@ -7227,9 +7229,9 @@ index 000000000..742829f22
 +      
 +      Results.push_back(Result);
 +    });
-+    CallInst::Create(LifetimeEnd, { ConstantInt::get(IntPtrTy, TotalSize), PayloadAlloca }, "",
++    CallInst::Create(LifetimeEnd, { PayloadAlloca }, "",
 +                     InsertBefore)->setDebugLoc(DI);
-+    CallInst::Create(LifetimeEnd, { ConstantInt::get(IntPtrTy, TotalSize), AuxAlloca }, "",
++    CallInst::Create(LifetimeEnd, { AuxAlloca }, "",
 +                     InsertBefore)->setDebugLoc(DI);
 +    return Results;
 +  }
@@ -7274,9 +7276,9 @@ index 000000000..742829f22
 +      "filc_payload_alloca", &NewF->getEntryBlock().front());
 +    PayloadAlloca->setDebugLoc(DI);
 +    AuxAlloca->setDebugLoc(DI);
-+    CallInst::Create(LifetimeStart, { ConstantInt::get(IntPtrTy, TotalSize), PayloadAlloca }, "",
++    CallInst::Create(LifetimeStart, { PayloadAlloca }, "",
 +                     InsertBefore)->setDebugLoc(DI);
-+    CallInst::Create(LifetimeStart, { ConstantInt::get(IntPtrTy, TotalSize), AuxAlloca }, "",
++    CallInst::Create(LifetimeStart, { AuxAlloca }, "",
 +                     InsertBefore)->setDebugLoc(DI);
 +    CallInst* Call = CallInst::Create(
 +      RealMemset,
@@ -7374,9 +7376,9 @@ index 000000000..742829f22
 +      Call->addParamAttr(1, Attribute::getWithAlignment(C, Align(WordSize)));
 +      Call->setDebugLoc(DI);
 +    }
-+    CallInst::Create(LifetimeEnd, { ConstantInt::get(IntPtrTy, TotalSize), PayloadAlloca }, "",
++    CallInst::Create(LifetimeEnd, { PayloadAlloca }, "",
 +                     InsertBefore)->setDebugLoc(DI);
-+    CallInst::Create(LifetimeEnd, { ConstantInt::get(IntPtrTy, TotalSize), AuxAlloca }, "",
++    CallInst::Create(LifetimeEnd, { AuxAlloca }, "",
 +                     InsertBefore)->setDebugLoc(DI);
 +    return ConstantInt::get(IntPtrTy, TotalSize);
 +  }
@@ -8667,7 +8669,7 @@ index 000000000..742829f22
 +
 +      case Intrinsic::lifetime_start:
 +      case Intrinsic::lifetime_end: {
-+        AllocaInst* AI = cast<AllocaInst>(II->getArgOperand(1));
++        AllocaInst* AI = cast<AllocaInst>(II->getArgOperand(0));
 +        assert(LocalAllocaDatas.count(AI));
 +        LocalAllocaData LAD = LocalAllocaDatas[AI];
 +        FrameEntry FE;
@@ -8683,11 +8685,11 @@ index 000000000..742829f22
 +          recordLowerAtIndex(RawNull, FE.Index, II);
 +        CallInst::Create(
 +          II->getFunctionType(), II->getCalledOperand(),
-+          { ConstantInt::get(IntPtrTy, LAD.Size), LAD.Payload },
++          { LAD.Payload },
 +          "", II)->setDebugLoc(II->getDebugLoc());
 +        CallInst::Create(
 +          II->getFunctionType(), II->getCalledOperand(),
-+          { ConstantInt::get(IntPtrTy, LAD.Size), LAD.AuxAlloca },
++          { LAD.AuxAlloca },
 +          "", II)->setDebugLoc(II->getDebugLoc());
 +        if (II->getIntrinsicID() == Intrinsic::lifetime_start)
 +          initializeNonescapingAlloca(LAD, II);
@@ -16221,19 +16223,11 @@ index 000000000..742829f22
 +    if (!LI)
 +      return LifetimeMarker();
 +
-+    AllocaInst* AI = dyn_cast<AllocaInst>(LI->getArgOperand(1));
++    AllocaInst* AI = dyn_cast<AllocaInst>(LI->getArgOperand(0));
 +    if (!AI)
 +      return LifetimeMarker();
 +
 +    if (!allocaHasSizeForUs(AI))
-+      return LifetimeMarker();
-+
-+    ConstantInt* MarkerSize = dyn_cast<ConstantInt>(LI->getArgOperand(0));
-+    if (!MarkerSize)
-+      return LifetimeMarker();
-+
-+    int64_t MarkerSizeInt = MarkerSize->getSExtValue();
-+    if (MarkerSizeInt != -1 && static_cast<uint64_t>(MarkerSizeInt) != originalAllocaSize(AI))
 +      return LifetimeMarker();
 +
 +    switch (LI->getIntrinsicID()) {

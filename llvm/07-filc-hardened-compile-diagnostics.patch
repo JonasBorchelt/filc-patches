@@ -146,7 +146,7 @@ index 2a8395e26..0e3bfe9b0 100644
  
  bool Sema::BuiltinCountedByRef(CallExpr *TheCall) {
 diff --git a/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp b/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp
-index b86df0d98..077cfc959 100644
+index 8f2617fac..361ad287f 100644
 --- a/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp
 +++ b/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp
 @@ -415,15 +415,21 @@ class MATokenizer {
@@ -501,7 +501,7 @@ index b86df0d98..077cfc959 100644
      }
  
      M.setModuleInlineAsm(NewModuleAsm.str());
-@@ -16150,16 +16174,34 @@ class Pizlonator {
+@@ -16142,16 +16166,34 @@ class Pizlonator {
      for (Function& F : M.functions()) {
        for (BasicBlock& BB : F) {
          for (Instruction& I : BB) {
@@ -546,7 +546,7 @@ index b86df0d98..077cfc959 100644
          }
        }
  
-@@ -16325,6 +16367,10 @@ public:
+@@ -16317,6 +16359,10 @@ public:
      
      makeEHDatas();
      compileModuleAsm();
@@ -557,7 +557,7 @@ index b86df0d98..077cfc959 100644
      lazifyAllocas();
      canonicalizeGEPs();
      dropUB();
-@@ -16335,6 +16381,10 @@ public:
+@@ -16327,6 +16373,10 @@ public:
      }
  
      prepare();
@@ -568,7 +568,7 @@ index b86df0d98..077cfc959 100644
  
      // FIXME: We could probably do this anywhere in the pass, and really all we're doing is turning
      // off the non-integralness of address space 0.
-@@ -16444,30 +16494,36 @@ public:
+@@ -16436,30 +16486,36 @@ public:
      for (Function &F : M.functions()) {
        if (shouldPassThrough(&F)) {
          if (!F.isDeclaration()) {
@@ -614,7 +614,7 @@ index b86df0d98..077cfc959 100644
      for (GlobalAlias &G : M.aliases())
        Aliases.push_back(&G);
      for (GlobalIFunc &G : M.ifuncs())
-@@ -17680,7 +17736,8 @@ public:
+@@ -17672,7 +17728,8 @@ public:
  
      if (lightVerbose || verbose)
        errs() << "Here's the pizlonated module:\n" << M << "\n";

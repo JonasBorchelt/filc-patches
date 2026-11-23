@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Offline self-tests for scripts/sync-git-cache and source-cache pin checks.
+# Uses temporary local git repositories (no network required; runs on Linux and macOS).
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SYNC="$REPO_ROOT/scripts/sync-git-cache"
+
+TMP_ROOT="$(mktemp -d)"
+trap 'rm -rf "$TMP_ROOT"' EXIT
+
+UPSTREAM_WORK="$TMP_ROOT/upstream-work"
+UPSTREAM_BARE="$TMP_ROOT/upstream.git"
+CACHE_DIR="$TMP_ROOT/cache"
+
+git init -q "$UPSTREAM_WORK"
+git -C "$UPSTREAM_WORK" config user.email "test@example.com"
+git -C "$UPSTREAM_WORK" config user.name "Test User"
+echo "hello v1" > "$UPSTREAM_WORK/README.txt"
+git -C "$UPSTREAM_WORK" add README.txt
+git -C "$UPSTREAM_WORK" commit -q -m "commit v1"
+COMMIT1="$(git -C "$UPSTREAM_WORK" rev-parse HEAD)"
+git -C "$UPSTREAM_WORK" tag -a test-v1 -m "tag v1"
+
+echo "hello v2" > "$UPSTREAM_WORK/README.txt"
+git -C "$UPSTREAM_WORK" add README.txt
+git -C "$UPSTREAM_WORK" commit -q -m "commit v2"
+COMMIT2="$(git -C "$UPSTREAM_WORK" rev-parse HEAD)"
+
+git clone --bare -q "$UPSTREAM_WORK" "$UPSTREAM_BARE"
+
+pass() { echo "PASS: $1"; }
+fail() { echo "FAIL: $1" >&2; exit 1; }
+
+# 1. Cold cache miss -> bare clone created
+OUT1="$("$SYNC" --name demo --repo "$UPSTREAM_BARE" --commit "$COMMIT1" --ref "refs/tags/test-v1:refs/tags/test-v1" --cache-dir "$CACHE_DIR")"
+echo "$OUT1" | grep -Fq "cache miss -> cloned $COMMIT1" || fail "expected cold clone log, got: $OUT1"
+test -f "$CACHE_DIR/demo.git/HEAD" || fail "bare repo not created"
+pass "1. cold cache miss clones bare repo and verifies pin"
+
+# 2. Warm cache hit -> zero network access (prove by passing invalid upstream URL!)
+OUT2="$("$SYNC" --name demo --repo "/nonexistent/unreachable-repo.git" --commit "$COMMIT1" --cache-dir "$CACHE_DIR")"
+echo "$OUT2" | grep -Fq "cache hit: $COMMIT1" || fail "expected cache hit log, got: $OUT2"
+pass "2. warm cache hit succeeds with unreachable upstream (0 network)"
+
+# 3. Alternate checkout from bare cache succeeds with zero network and matches pin
+CHECKOUT_DIR="$TMP_ROOT/checkout1"
+git init -q "$CHECKOUT_DIR"
+echo "$CACHE_DIR/demo.git/objects" > "$CHECKOUT_DIR/.git/objects/info/alternates"
+git -C "$CHECKOUT_DIR" cat-file -e "${COMMIT1}^{commit}" || fail "alternate missing commit"
+git -C "$CHECKOUT_DIR" checkout -q --force --detach "$COMMIT1"
+ACTUAL1="$(git -C "$CHECKOUT_DIR" rev-parse HEAD)"
+[[ "$ACTUAL1" == "$COMMIT1" ]] || fail "checkout HEAD $ACTUAL1 != $COMMIT1"
+pass "3. alternate checkout from bare cache matches pinned commit"
+
+# 4. Incremental fetch on new pinned commit
+OUT4="$("$SYNC" --name demo --repo "$UPSTREAM_BARE" --commit "$COMMIT2" --cache-dir "$CACHE_DIR")"
+echo "$OUT4" | grep -Fq "cache miss -> fetched $COMMIT2" || fail "expected incremental fetch log, got: $OUT4"
+OUT4B="$("$SYNC" --name demo --repo "/nonexistent/unreachable-repo.git" --commit "$COMMIT2" --cache-dir "$CACHE_DIR")"
+echo "$OUT4B" | grep -Fq "cache hit: $COMMIT2" || fail "expected warm hit on commit2, got: $OUT4B"
+pass "4. incremental fetch adds new pinned commit and hits on subsequent run"
+
+# 5a. Corrupt cache recovery: missing HEAD
+rm -f "$CACHE_DIR/demo.git/HEAD"
+OUT5A="$("$SYNC" --name demo --repo "$UPSTREAM_BARE" --commit "$COMMIT2" --cache-dir "$CACHE_DIR")"
+echo "$OUT5A" | grep -Fq "corrupt cache detected" || fail "expected corrupt detection (HEAD), got: $OUT5A"
+echo "$OUT5A" | grep -Fq "cache rebuilt: $COMMIT2" || fail "expected cache rebuilt (HEAD), got: $OUT5A"
+pass "5a. corrupt cache (missing HEAD) detected and rebuilt atomically"
+
+# 5b. Corrupt cache recovery: partial/promisor config injected
+git -C "$CACHE_DIR/demo.git" config remote.origin.promisor true
+OUT5B="$("$SYNC" --name demo --repo "$UPSTREAM_BARE" --commit "$COMMIT2" --cache-dir "$CACHE_DIR")"
+echo "$OUT5B" | grep -Fq "corrupt cache detected" || fail "expected corrupt detection (promisor), got: $OUT5B"
+echo "$OUT5B" | grep -Fq "cache rebuilt: $COMMIT2" || fail "expected cache rebuilt (promisor), got: $OUT5B"
+pass "5b. corrupt cache (promisor config) detected and rebuilt atomically"
+
+# 5c. Corrupt cache recovery: missing .idx for .pack (create dummy orphan pack)
+mkdir -p "$CACHE_DIR/demo.git/objects/pack"
+touch "$CACHE_DIR/demo.git/objects/pack/pack-deadbeef.pack"
+OUT5C="$("$SYNC" --name demo --repo "$UPSTREAM_BARE" --commit "$COMMIT2" --cache-dir "$CACHE_DIR")"
+echo "$OUT5C" | grep -Fq "corrupt cache detected" || fail "expected corrupt detection (orphan pack), got: $OUT5C"
+echo "$OUT5C" | grep -Fq "cache rebuilt: $COMMIT2" || fail "expected cache rebuilt (orphan pack), got: $OUT5C"
+pass "5c. corrupt cache (orphan .pack without .idx) detected and rebuilt atomically"
+
+# 6. Parallel locking stress test (4 concurrent processes racing on cold cache)
+PAR_CACHE="$TMP_ROOT/par-cache"
+PIDS=()
+for i in 1 2 3 4; do
+  "$SYNC" --name par --repo "$UPSTREAM_BARE" --commit "$COMMIT2" --cache-dir "$PAR_CACHE" > "$TMP_ROOT/par-$i.log" 2>&1 &
+  PIDS+=($!)
+done
+for pid in "${PIDS[@]}"; do
+  wait "$pid" || fail "parallel worker pid=$pid failed"
+done
+# Exactly one worker should have cloned and the other 3 should have hit cache!
+CLONES="$(grep -h 'cache miss -> cloned' "$TMP_ROOT"/par-*.log | wc -l | tr -d ' ')"
+HITS="$(grep -h 'cache hit:' "$TMP_ROOT"/par-*.log | wc -l | tr -d ' ')"
+[[ "$CLONES" == "1" && "$HITS" == "3" ]] || fail "expected 1 clone + 3 hits in parallel test, got clones=$CLONES hits=$HITS"
+if ls -d "$PAR_CACHE"/par.git.tmp.* "$PAR_CACHE"/par.git.broken.* >/dev/null 2>&1; then
+  fail "leftover tmp/broken dirs after parallel sync"
+fi
+pass "6. parallel locking: 4 concurrent runs serialized cleanly (1 clone + 3 hits, 0 leftovers)"
+
+# 7. Pin mismatch / nonexistent commit aborts non-zero
+BAD_SHA="0000000000000000000000000000000000000000"
+if "$SYNC" --name bad --repo "$UPSTREAM_BARE" --commit "$BAD_SHA" --retries 1 --cache-dir "$CACHE_DIR" >/dev/null 2>&1; then
+  fail "expected non-zero exit for nonexistent pinned commit"
+fi
+test ! -d "$CACHE_DIR/bad.git" || fail "failed clone left target directory behind"
+pass "7. missing/mismatched commit pin aborts non-zero without polluting cache"
+
+# 8. build-toolchain UPSTREAM pin verification rejects mismatched checkout HEAD
+MOCK_WORK="$TMP_ROOT/mock-work"
+mkdir -p "$MOCK_WORK"
+for sub in llvm-project filc-runtime yolomusl usermusl; do
+  git clone -q "$UPSTREAM_BARE" "$MOCK_WORK/$sub"
+done
+OUT8="$(FILC_SKIP_FETCH=1 "$REPO_ROOT/scripts/build-toolchain" "$MOCK_WORK" 2>&1 || true)"
+if echo "$OUT8" | grep -Fq "UPSTREAM pin mismatch for llvm-project"; then
+  pass "8. build-toolchain aborts on checked-out HEAD != UPSTREAM pin"
+else
+  fail "expected UPSTREAM pin mismatch abort from build-toolchain, got: $OUT8"
+fi
+
+echo "TEST_SRC_CACHE: ALL 10 CHECKS PASSED"

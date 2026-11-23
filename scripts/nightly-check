@@ -222,13 +222,38 @@ else
   echo "Newer release detected: ${RELEASE_TAG} (${RELEASE_COMMIT}) vs pinned ${PINNED_RELEASE_TAG} (${PINNED_LLVM_COMMIT})"
 fi
 
+NIGHTLY_SRC_CACHE=""
+if [[ -n "${FILC_SRC_CACHE_DIR+x}" ]]; then
+  NIGHTLY_SRC_CACHE="$FILC_SRC_CACHE_DIR"
+elif [[ -n "${CCACHE_DIR:-}" && -d "$CCACHE_DIR" && -w "$CCACHE_DIR" ]]; then
+  NIGHTLY_SRC_CACHE="$CCACHE_DIR/src"
+fi
+
 mkdir -p "$(dirname "$LLVM_DIR")"
 if [[ ! -d "$LLVM_DIR/.git" ]]; then
   git init -q "$LLVM_DIR"
   git -C "$LLVM_DIR" remote add origin "$LLVM_REPO"
 fi
 
-if ! git -C "$LLVM_DIR" cat-file -e "${RELEASE_COMMIT}^{commit}" 2>/dev/null; then
+if [[ -n "$NIGHTLY_SRC_CACHE" ]]; then
+  "$REPO_ROOT/scripts/sync-git-cache" \
+    --name llvm-project \
+    --repo "$LLVM_REPO" \
+    --commit "$RELEASE_COMMIT" \
+    --ref "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}" \
+    --cache-dir "$NIGHTLY_SRC_CACHE"
+  ALT_FILE="$LLVM_DIR/.git/objects/info/alternates"
+  OBJ_DIR="$NIGHTLY_SRC_CACHE/llvm-project.git/objects"
+  if [[ ! -f "$ALT_FILE" ]] || ! grep -Fxq "$OBJ_DIR" "$ALT_FILE"; then
+    echo "$OBJ_DIR" >> "$ALT_FILE"
+  fi
+fi
+
+if git -C "$LLVM_DIR" cat-file -e "${RELEASE_COMMIT}^{commit}" 2>/dev/null; then
+  if [[ -n "$NIGHTLY_SRC_CACHE" ]]; then
+    echo "Using cached git objects from $NIGHTLY_SRC_CACHE/llvm-project.git (no network fetch)"
+  fi
+else
   git -C "$LLVM_DIR" config remote.origin.promisor true
   git -C "$LLVM_DIR" config remote.origin.partialclonefilter blob:none
   git -C "$LLVM_DIR" fetch --depth=1 --no-tags --filter=blob:none origin \
@@ -322,10 +347,20 @@ rm -f "$TOOLCHAIN_REPORT"
 
 if [[ "$PATCH_STATUS" == "PASS" ]]; then
   echo "=== All ${#ALL_PATCHES[@]} patches applied cleanly (${RUN_MODE}); building full toolchain ==="
-  if "$REPO_ROOT/scripts/fetch-runtime" "$RUNTIME_SRC" \
-    && "$REPO_ROOT/scripts/apply-musl" yolomusl "$YOLOMUSL_SRC" \
-    && "$REPO_ROOT/scripts/apply-musl" usermusl --reference "$YOLOMUSL_SRC" "$USERMUSL_SRC" \
-    && FILC_SKIP_FETCH=1 "$REPO_ROOT/scripts/build-toolchain" "$WORK_ROOT"; then
+  RT_REF_ARGS=()
+  MUSL_REF_ARGS=()
+  USERMUSL_REF="$YOLOMUSL_SRC"
+  if [[ -n "$NIGHTLY_SRC_CACHE" ]]; then
+    "$REPO_ROOT/scripts/sync-git-cache" --name fil-c --repo "$FILC_REPO" --commit "$FILC_COMMIT" --cache-dir "$NIGHTLY_SRC_CACHE"
+    "$REPO_ROOT/scripts/sync-git-cache" --name musl --repo "$MUSL_REPO" --commit "$MUSL_COMMIT" --cache-dir "$NIGHTLY_SRC_CACHE"
+    RT_REF_ARGS=(--reference "$NIGHTLY_SRC_CACHE/fil-c.git")
+    MUSL_REF_ARGS=(--reference "$NIGHTLY_SRC_CACHE/musl.git")
+    USERMUSL_REF="$NIGHTLY_SRC_CACHE/musl.git"
+  fi
+  if "$REPO_ROOT/scripts/fetch-runtime" "${RT_REF_ARGS[@]}" "$RUNTIME_SRC" \
+    && "$REPO_ROOT/scripts/apply-musl" yolomusl "${MUSL_REF_ARGS[@]}" "$YOLOMUSL_SRC" \
+    && "$REPO_ROOT/scripts/apply-musl" usermusl --reference "$USERMUSL_REF" "$USERMUSL_SRC" \
+    && FILC_SKIP_FETCH=1 FILC_EXPECTED_LLVM_COMMIT="$RELEASE_COMMIT" "$REPO_ROOT/scripts/build-toolchain" "$WORK_ROOT"; then
     TOOLCHAIN_BUILD_STATUS="PASS"
     echo "=== Running end-to-end runtime tests (Hello, OOB, UAF, C++) ==="
     if FILC_REPORT_ARCHIVE_DIR="" "$REPO_ROOT/scripts/test-toolchain" "$WORK_ROOT" "$TOOLCHAIN_REPORT"; then

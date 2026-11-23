@@ -1,0 +1,283 @@
+#!/usr/bin/env python3
+"""
+Maintain a persistent bare git mirror/cache for an upstream pinned commit.
+
+Features:
+- Exclusive per-repo file lock (fcntl.flock) for safe parallel runs (Linux + macOS).
+- Zero network traffic on cache hit when the pinned commit is already present
+  and passes integrity validation.
+- Strict 40-hex commit pin verification against the requested SHA.
+- Automatic detection of corrupt bare repositories (missing HEAD/objects,
+  partial/promisor config, broken pack/idx pairs, fsck connectivity errors)
+  with atomic directory replacement via a temporary clone.
+"""
+
+import argparse
+import fcntl
+import glob
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+HEX40_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def log(msg: str) -> None:
+    print(msg, flush=True)
+
+
+def run_git(args, cwd=None, check=False):
+    cmd = ["git", "-c", "safe.directory=*"]
+    if cwd is not None:
+        cmd.extend(["-C", cwd])
+    cmd.extend(args)
+    return subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=check,
+    )
+
+
+def validate_bare_repo(repo_dir: str):
+    """Return (is_valid: bool, reason: str)."""
+    if not os.path.isdir(repo_dir):
+        return False, "directory missing"
+    if not os.path.isfile(os.path.join(repo_dir, "HEAD")):
+        return False, "HEAD file missing"
+    objects_dir = os.path.join(repo_dir, "objects")
+    if not os.path.isdir(objects_dir):
+        return False, "objects directory missing"
+
+    proc = run_git(["rev-parse", "--is-bare-repository"], cwd=repo_dir)
+    if proc.returncode != 0 or proc.stdout.strip() != "true":
+        return False, f"not a bare repository (rc={proc.returncode})"
+
+    # scripts/fetch* reject partial/promisor clones as --reference alternates.
+    prom = run_git(
+        ["config", "--get-regexp", r"^(extensions\.partialclone|remote\..*\.promisor)$"],
+        cwd=repo_dir,
+    )
+    if prom.returncode == 0 and prom.stdout.strip():
+        return False, "partial/promisor clone config present"
+
+    pack_dir = os.path.join(objects_dir, "pack")
+    if os.path.isdir(pack_dir):
+        for entry in os.listdir(pack_dir):
+            if entry.startswith(("tmp_pack_", "tmp_idx_")):
+                return False, f"leftover temporary pack file {entry}"
+            if entry.endswith(".pack"):
+                idx_path = os.path.join(pack_dir, entry[:-5] + ".idx")
+                if not os.path.isfile(idx_path) or os.path.getsize(idx_path) == 0:
+                    return False, f"missing or empty index for {entry}"
+
+    fsck = run_git(["fsck", "--connectivity-only", "--no-dangling", "--no-progress"], cwd=repo_dir)
+    if fsck.returncode != 0:
+        detail = (fsck.stderr or fsck.stdout).strip().splitlines()
+        first = detail[0] if detail else f"rc={fsck.returncode}"
+        return False, f"git fsck failed: {first}"
+
+    return True, "ok"
+
+
+def has_commit(repo_dir: str, commit: str) -> bool:
+    rev = run_git(["rev-parse", "--verify", "--quiet", f"{commit}^{{commit}}"], cwd=repo_dir)
+    if rev.returncode != 0 or rev.stdout.strip().lower() != commit:
+        return False
+    tree = run_git(["ls-tree", commit], cwd=repo_dir)
+    return tree.returncode == 0
+
+
+def ensure_origin(repo_dir: str, repo_url: str) -> None:
+    cur = run_git(["remote", "get-url", "origin"], cwd=repo_dir)
+    if cur.returncode != 0:
+        add = run_git(["remote", "add", "origin", repo_url], cwd=repo_dir)
+        if add.returncode != 0:
+            raise RuntimeError(f"git remote add origin failed: {add.stderr.strip()}")
+    elif cur.stdout.strip() != repo_url:
+        upd = run_git(["remote", "set-url", "origin", repo_url], cwd=repo_dir)
+        if upd.returncode != 0:
+            raise RuntimeError(f"git remote set-url origin failed: {upd.stderr.strip()}")
+
+
+def fetch_commit(repo_dir: str, repo_url: str, commit: str, ref: str, retries: int) -> None:
+    ensure_origin(repo_dir, repo_url)
+    backoffs = [0, 2, 5]
+    last_err = ""
+    for attempt in range(1, max(1, retries) + 1):
+        if attempt > 1:
+            wait_s = backoffs[min(attempt - 1, len(backoffs) - 1)]
+            if wait_s:
+                time.sleep(wait_s)
+
+        # Build candidate fetch commands: prefer shallow fetch of ref/commit,
+        # falling back to full non-shallow fetch for servers (such as musl)
+        # that disallow shallow fetch-by-SHA.
+        candidates = []
+        if ref:
+            candidates.append(["fetch", "--depth=1", "--no-tags", "origin", ref])
+        candidates.append(["fetch", "--depth=1", "--no-tags", "origin", commit])
+        candidates.append(["fetch", "--no-tags", "origin"])
+
+        for fetch_args in candidates:
+            proc = run_git(fetch_args, cwd=repo_dir)
+            if proc.returncode == 0 and has_commit(repo_dir, commit):
+                return
+            err = (proc.stderr or proc.stdout).strip()
+            if proc.returncode == 0:
+                last_err = (
+                    f"fetched {fetch_args[-1]} from {repo_url}, "
+                    f"but pinned commit {commit} is not present"
+                )
+            else:
+                last_err = err or f"git fetch exited {proc.returncode}"
+
+    raise RuntimeError(f"failed to fetch pinned commit {commit} from {repo_url}: {last_err}")
+
+
+def cleanup_stale_temps(cache_dir: str, name: str) -> None:
+    for pattern in (f"{name}.git.tmp.*", f"{name}.git.broken.*"):
+        for path in glob.glob(os.path.join(cache_dir, pattern)):
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def reclone_atomic(cache_dir: str, name: str, repo_url: str, commit: str, ref: str, retries: int) -> None:
+    target_dir = os.path.join(cache_dir, f"{name}.git")
+    tmp_dir = os.path.join(cache_dir, f"{name}.git.tmp.{os.getpid()}")
+    broken_dir = os.path.join(cache_dir, f"{name}.git.broken.{os.getpid()}")
+
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    shutil.rmtree(broken_dir, ignore_errors=True)
+    try:
+        init_p = run_git(["init", "--bare", "-q", tmp_dir])
+        if init_p.returncode != 0:
+            raise RuntimeError(f"git init --bare failed: {init_p.stderr.strip()}")
+        fetch_commit(tmp_dir, repo_url, commit, ref, retries)
+        ok, reason = validate_bare_repo(tmp_dir)
+        if not ok:
+            raise RuntimeError(f"fresh bare clone failed validation: {reason}")
+        if not has_commit(tmp_dir, commit):
+            raise RuntimeError(f"fresh bare clone missing pinned commit {commit}")
+
+        moved_old = False
+        if os.path.exists(target_dir):
+            os.rename(target_dir, broken_dir)
+            moved_old = True
+        try:
+            os.rename(tmp_dir, target_dir)
+        except Exception:
+            if moved_old and os.path.exists(broken_dir) and not os.path.exists(target_dir):
+                os.rename(broken_dir, target_dir)
+            raise
+        if moved_old:
+            shutil.rmtree(broken_dir, ignore_errors=True)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        shutil.rmtree(broken_dir, ignore_errors=True)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Sync a persistent bare git source cache.")
+    parser.add_argument("--name", required=True, help="Logical cache name (e.g. llvm-project)")
+    parser.add_argument("--repo", required=True, help="Upstream git repository URL or path")
+    parser.add_argument("--commit", required=True, help="Pinned 40-hex commit SHA")
+    parser.add_argument("--ref", default="", help="Optional git refspec (e.g. refs/tags/llvmorg-23.1.6:refs/tags/llvmorg-23.1.6)")
+    parser.add_argument("--cache-dir", required=True, help="Persistent cache directory")
+    parser.add_argument("--force-reclone", action="store_true", help="Force atomic fresh reclone")
+    parser.add_argument("--retries", type=int, default=3, help="Fetch retry count on transient failure")
+    args = parser.parse_args()
+
+    commit = args.commit.strip().lower()
+    if not HEX40_RE.match(commit):
+        print(f"error: --commit must be a 40-hex SHA, got: {args.commit!r}", file=sys.stderr)
+        return 2
+
+    cache_dir = os.path.abspath(args.cache_dir)
+    os.makedirs(cache_dir, exist_ok=True)
+    target_dir = os.path.join(cache_dir, f"{args.name}.git")
+    lock_path = os.path.join(cache_dir, f"{args.name}.lock")
+
+    t0 = time.monotonic()
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o666)
+    try:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            log(f"src-cache[{args.name}]: waiting for lock {lock_path} ...")
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+
+        cleanup_stale_temps(cache_dir, args.name)
+
+        if not args.force_reclone and os.path.exists(target_dir):
+            valid, reason = validate_bare_repo(target_dir)
+            if valid:
+                if has_commit(target_dir, commit):
+                    elapsed = int(round(time.monotonic() - t0))
+                    log(f"src-cache[{args.name}]: cache hit: {commit} ({elapsed}s)")
+                    log(f"FILC_SRC_CACHE {args.name} hit {commit} {elapsed}s")
+                    return 0
+
+                # Healthy cache, but pinned commit is not cached yet: incremental fetch.
+                log(f"src-cache[{args.name}]: cache miss (commit {commit} not cached); fetching ...")
+                try:
+                    fetch_commit(target_dir, args.repo, commit, args.ref, args.retries)
+                    valid2, reason2 = validate_bare_repo(target_dir)
+                    if not valid2:
+                        raise RuntimeError(f"post-fetch validation failed: {reason2}")
+                    if not has_commit(target_dir, commit):
+                        raise RuntimeError(f"commit {commit} missing after fetch")
+                    elapsed = int(round(time.monotonic() - t0))
+                    log(f"src-cache[{args.name}]: cache miss -> fetched {commit} ({elapsed}s)")
+                    log(f"FILC_SRC_CACHE {args.name} miss {commit} {elapsed}s")
+                    return 0
+                except Exception as exc:  # noqa: BLE001
+                    log(
+                        f"src-cache[{args.name}]: incremental fetch failed ({exc}); "
+                        "recloning atomically ..."
+                    )
+                    reclone_atomic(cache_dir, args.name, args.repo, commit, args.ref, args.retries)
+                    elapsed = int(round(time.monotonic() - t0))
+                    log(f"src-cache[{args.name}]: cache rebuilt: {commit} ({elapsed}s)")
+                    log(f"FILC_SRC_CACHE {args.name} rebuilt {commit} {elapsed}s")
+                    return 0
+            else:
+                log(
+                    f"src-cache[{args.name}]: corrupt cache detected ({reason}); "
+                    "recloning atomically ..."
+                )
+                reclone_atomic(cache_dir, args.name, args.repo, commit, args.ref, args.retries)
+                elapsed = int(round(time.monotonic() - t0))
+                log(f"src-cache[{args.name}]: cache rebuilt: {commit} ({elapsed}s)")
+                log(f"FILC_SRC_CACHE {args.name} rebuilt {commit} {elapsed}s")
+                return 0
+
+        # Cold cache or --force-reclone
+        action_word = "rebuilt" if args.force_reclone else "miss"
+        if args.force_reclone:
+            log(f"src-cache[{args.name}]: force-reclone requested; recloning atomically ...")
+        else:
+            log(f"src-cache[{args.name}]: cold cache; cloning bare mirror for {commit} ...")
+        reclone_atomic(cache_dir, args.name, args.repo, commit, args.ref, args.retries)
+        elapsed = int(round(time.monotonic() - t0))
+        if args.force_reclone:
+            log(f"src-cache[{args.name}]: cache rebuilt: {commit} ({elapsed}s)")
+        else:
+            log(f"src-cache[{args.name}]: cache miss -> cloned {commit} ({elapsed}s)")
+        log(f"FILC_SRC_CACHE {args.name} {action_word} {commit} {elapsed}s")
+        return 0
+    except Exception as exc:  # noqa: BLE001
+        print(f"error: src-cache[{args.name}]: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

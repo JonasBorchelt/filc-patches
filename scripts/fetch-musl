@@ -41,10 +41,10 @@ if [[ ! -d "$TARGET_DIR/.git" ]]; then
 fi
 
 if [[ -n "$REFERENCE" ]]; then
-  if git -C "$REFERENCE" config --get-regexp '^(extensions\.partialclone|remote\..*\.promisor)$' >/dev/null 2>&1; then
+  if git -c safe.directory='*' -C "$REFERENCE" config --get-regexp '^(extensions\.partialclone|remote\..*\.promisor)$' >/dev/null 2>&1; then
     echo "note: skipping --reference $REFERENCE (partial/promisor clone); fetching from $MUSL_REPO" >&2
   else
-    OBJ_DIR="$(git -C "$REFERENCE" rev-parse --git-path objects)"
+    OBJ_DIR="$(git -c safe.directory='*' -C "$REFERENCE" rev-parse --git-path objects)"
     if [[ "$OBJ_DIR" != /* ]]; then
       OBJ_DIR="$(cd "$REFERENCE" && cd "$OBJ_DIR" && pwd)"
     fi
@@ -55,7 +55,11 @@ if [[ -n "$REFERENCE" ]]; then
   fi
 fi
 
-if ! git -C "$TARGET_DIR" cat-file -e "${MUSL_COMMIT}^{commit}" 2>/dev/null; then
+if git -C "$TARGET_DIR" cat-file -e "${MUSL_COMMIT}^{commit}" 2>/dev/null; then
+  if [[ -n "$REFERENCE" ]]; then
+    echo "Using cached git objects from $REFERENCE (no network fetch)"
+  fi
+else
   if ! git -C "$TARGET_DIR" fetch --depth=1 --no-tags origin "$MUSL_COMMIT" 2>/dev/null; then
     git -C "$TARGET_DIR" fetch --no-tags origin
   fi

@@ -69,15 +69,58 @@ if [[ "$RELEASE_BUILD" == "1" ]]; then
   PREFIX_MAP_FLAGS="-ffile-prefix-map=${WORK_ROOT}=/filc-build -ffile-prefix-map=${REPO_ROOT}=/filc-src -fdebug-prefix-map=${WORK_ROOT}=/filc-build -fdebug-prefix-map=${REPO_ROOT}=/filc-src -fmacro-prefix-map=${WORK_ROOT}=/filc-build -fmacro-prefix-map=${REPO_ROOT}=/filc-src"
 fi
 
+if [[ -n "${FILC_SRC_CACHE_DIR+x}" ]]; then
+  SRC_CACHE_DIR="$FILC_SRC_CACHE_DIR"
+elif [[ -n "${CCACHE_DIR:-}" && -d "$CCACHE_DIR" && -w "$CCACHE_DIR" ]]; then
+  SRC_CACHE_DIR="$CCACHE_DIR/src"
+else
+  SRC_CACHE_DIR=""
+fi
+
 echo "=== Fil-C Full Toolchain Build ==="
 echo "WORK_ROOT:    $WORK_ROOT"
 echo "ARCH:         $ARCH"
 echo "LLVM:         ${LLVM_TAG:-$LLVM_COMMIT} ($LLVM_COMMIT)"
 echo "FILC_COMMIT:  $FILC_COMMIT"
 echo "MUSL_COMMIT:  $MUSL_COMMIT"
+echo "SRC_CACHE:    ${SRC_CACHE_DIR:-disabled}"
 echo "Host:         nproc=${NPROC}, mem=${MEM_MB} MiB -> compile_jobs=${COMPILE_JOBS}, link_jobs=${LINK_JOBS}"
 
 T_TOTAL_START="$(date +%s)"
+
+verify_checkout_pin() {
+  local name="$1"
+  local dir="$2"
+  local expected="$3"
+  local actual
+  if ! actual="$(git -c safe.directory='*' -C "$dir" rev-parse HEAD 2>/dev/null)"; then
+    echo "error: UPSTREAM pin verification failed for $name ($dir): not a valid git checkout" >&2
+    exit 1
+  fi
+  if [[ "$actual" != "$expected" ]]; then
+    echo "error: UPSTREAM pin mismatch for $name ($dir): HEAD=$actual != pinned $expected" >&2
+    exit 1
+  fi
+  echo "src-verify[$name]: HEAD=$actual matches UPSTREAM pin"
+}
+
+sync_cache_repo() {
+  local name="$1"
+  local repo_url="$2"
+  local commit="$3"
+  local ref="${4:-}"
+  local force_flag="${5:-}"
+  local cmd=(
+    "$REPO_ROOT/scripts/sync-git-cache"
+    --name "$name"
+    --repo "$repo_url"
+    --commit "$commit"
+    --cache-dir "$SRC_CACHE_DIR"
+  )
+  [[ -n "$ref" ]] && cmd+=(--ref "$ref")
+  [[ "$force_flag" == "--force-reclone" ]] && cmd+=(--force-reclone)
+  "${cmd[@]}"
+}
 
 # ---------------------------------------------------------------------------
 # Stage 0: Fetch and patch sources
@@ -86,22 +129,94 @@ if [[ "${FILC_SKIP_FETCH:-0}" != "1" ]]; then
   echo "=== [0/8] Fetching & applying LLVM, Fil-C runtime, yolomusl, usermusl ==="
   T_S0="$(date +%s)"
   echo "FILC_PHASE fetch running"
+
+  # 1) LLVM
+  T_LLVM_S0="$(date +%s)"
+  LLVM_REF="${FILC_LLVM_REFERENCE:-}"
+  LLVM_CACHE_USED=0
+  if [[ -z "$LLVM_REF" && -n "$SRC_CACHE_DIR" ]]; then
+    LLVM_REFSPEC=""
+    [[ -n "${LLVM_TAG:-}" ]] && LLVM_REFSPEC="refs/tags/${LLVM_TAG}:refs/tags/${LLVM_TAG}"
+    sync_cache_repo "llvm-project" "$LLVM_REPO" "$LLVM_COMMIT" "$LLVM_REFSPEC"
+    LLVM_REF="$SRC_CACHE_DIR/llvm-project.git"
+    LLVM_CACHE_USED=1
+  fi
   APPLY_LLVM_ARGS=(--sparse)
-  [[ -n "${FILC_LLVM_REFERENCE:-}" ]] && APPLY_LLVM_ARGS+=(--reference "$FILC_LLVM_REFERENCE")
-  "$REPO_ROOT/scripts/apply" "${APPLY_LLVM_ARGS[@]}" "$LLVM_SRC"
+  [[ -n "$LLVM_REF" ]] && APPLY_LLVM_ARGS+=(--reference "$LLVM_REF")
+  if ! "$REPO_ROOT/scripts/apply" "${APPLY_LLVM_ARGS[@]}" "$LLVM_SRC"; then
+    if [[ "$LLVM_CACHE_USED" == "1" ]] && ! git -c safe.directory='*' -C "$LLVM_REF" fsck --no-dangling --no-progress >/dev/null 2>&1; then
+      echo "src-cache[llvm-project]: checkout failed on corrupt cache; recloning and retrying once ..."
+      rm -rf "$LLVM_SRC"
+      sync_cache_repo "llvm-project" "$LLVM_REPO" "$LLVM_COMMIT" "${LLVM_REFSPEC:-}" "--force-reclone"
+      "$REPO_ROOT/scripts/apply" "${APPLY_LLVM_ARGS[@]}" "$LLVM_SRC"
+    else
+      exit 1
+    fi
+  fi
+  T_LLVM_S0="$(( $(date +%s) - T_LLVM_S0 ))"
 
+  # 2) Fil-C runtime
+  T_RT_S0="$(date +%s)"
+  RT_REF="${FILC_RUNTIME_REFERENCE:-}"
+  RT_CACHE_USED=0
+  if [[ -z "$RT_REF" && -n "$SRC_CACHE_DIR" ]]; then
+    sync_cache_repo "fil-c" "$FILC_REPO" "$FILC_COMMIT"
+    RT_REF="$SRC_CACHE_DIR/fil-c.git"
+    RT_CACHE_USED=1
+  fi
   FETCH_RT_ARGS=()
-  [[ -n "${FILC_RUNTIME_REFERENCE:-}" ]] && FETCH_RT_ARGS+=(--reference "$FILC_RUNTIME_REFERENCE")
-  "$REPO_ROOT/scripts/fetch-runtime" "${FETCH_RT_ARGS[@]}" "$RUNTIME_SRC"
+  [[ -n "$RT_REF" ]] && FETCH_RT_ARGS+=(--reference "$RT_REF")
+  if ! "$REPO_ROOT/scripts/fetch-runtime" "${FETCH_RT_ARGS[@]}" "$RUNTIME_SRC"; then
+    if [[ "$RT_CACHE_USED" == "1" ]] && ! git -c safe.directory='*' -C "$RT_REF" fsck --no-dangling --no-progress >/dev/null 2>&1; then
+      echo "src-cache[fil-c]: checkout failed on corrupt cache; recloning and retrying once ..."
+      rm -rf "$RUNTIME_SRC"
+      sync_cache_repo "fil-c" "$FILC_REPO" "$FILC_COMMIT" "" "--force-reclone"
+      "$REPO_ROOT/scripts/fetch-runtime" "${FETCH_RT_ARGS[@]}" "$RUNTIME_SRC"
+    else
+      exit 1
+    fi
+  fi
+  T_RT_S0="$(( $(date +%s) - T_RT_S0 ))"
 
+  # 3) yolomusl + usermusl
+  T_MUSL_S0="$(date +%s)"
+  MUSL_REF="${FILC_MUSL_REFERENCE:-}"
+  MUSL_CACHE_USED=0
+  if [[ -z "$MUSL_REF" && -n "$SRC_CACHE_DIR" ]]; then
+    sync_cache_repo "musl" "$MUSL_REPO" "$MUSL_COMMIT"
+    MUSL_REF="$SRC_CACHE_DIR/musl.git"
+    MUSL_CACHE_USED=1
+  fi
   APPLY_YOLO_ARGS=(yolomusl)
-  [[ -n "${FILC_MUSL_REFERENCE:-}" ]] && APPLY_YOLO_ARGS+=(--reference "$FILC_MUSL_REFERENCE")
-  "$REPO_ROOT/scripts/apply-musl" "${APPLY_YOLO_ARGS[@]}" "$YOLOMUSL_SRC"
+  [[ -n "$MUSL_REF" ]] && APPLY_YOLO_ARGS+=(--reference "$MUSL_REF")
+  if ! "$REPO_ROOT/scripts/apply-musl" "${APPLY_YOLO_ARGS[@]}" "$YOLOMUSL_SRC"; then
+    if [[ "$MUSL_CACHE_USED" == "1" ]] && ! git -c safe.directory='*' -C "$MUSL_REF" fsck --no-dangling --no-progress >/dev/null 2>&1; then
+      echo "src-cache[musl]: checkout failed on corrupt cache; recloning and retrying once ..."
+      rm -rf "$YOLOMUSL_SRC"
+      sync_cache_repo "musl" "$MUSL_REPO" "$MUSL_COMMIT" "" "--force-reclone"
+      "$REPO_ROOT/scripts/apply-musl" "${APPLY_YOLO_ARGS[@]}" "$YOLOMUSL_SRC"
+    else
+      exit 1
+    fi
+  fi
 
-  # Reuse yolomusl git object store so musl is only downloaded once.
-  "$REPO_ROOT/scripts/apply-musl" usermusl --reference "$YOLOMUSL_SRC" "$USERMUSL_SRC"
-  echo "FILC_PHASE fetch success $(( $(date +%s) - T_S0 ))"
+  # Reuse persistent musl bare cache (or yolomusl git object store) so musl is only downloaded once.
+  USERMUSL_REF="${MUSL_REF:-$YOLOMUSL_SRC}"
+  "$REPO_ROOT/scripts/apply-musl" usermusl --reference "$USERMUSL_REF" "$USERMUSL_SRC"
+  T_MUSL_S0="$(( $(date +%s) - T_MUSL_S0 ))"
+
+  T_S0_TOTAL="$(( $(date +%s) - T_S0 ))"
+  echo "FILC_SRC_CACHE_SUMMARY: dir=${SRC_CACHE_DIR:-disabled} llvm_s=${T_LLVM_S0} runtime_s=${T_RT_S0} musl_s=${T_MUSL_S0} total_s=${T_S0_TOTAL}"
+  echo "STAGE0_FETCH_SECONDS=${T_S0_TOTAL}"
+  echo "FILC_PHASE fetch success ${T_S0_TOTAL}"
 fi
+
+# Always verify every checked-out source tree against UPSTREAM commit pins.
+EXPECTED_LLVM_COMMIT="${FILC_EXPECTED_LLVM_COMMIT:-$LLVM_COMMIT}"
+verify_checkout_pin "llvm-project" "$LLVM_SRC" "$EXPECTED_LLVM_COMMIT"
+verify_checkout_pin "filc-runtime" "$RUNTIME_SRC" "$FILC_COMMIT"
+verify_checkout_pin "yolomusl" "$YOLOMUSL_SRC" "$MUSL_COMMIT"
+verify_checkout_pin "usermusl" "$USERMUSL_SRC" "$MUSL_COMMIT"
 
 # Fresh pizfix sysroot
 rm -rf "$PIZFIX"

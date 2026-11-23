@@ -1,0 +1,21 @@
+NAME="oniguruma"
+VERSION="6.9.10"
+LICENSE="BSD-2-Clause"
+UPSTREAM_URL="https://github.com/kkos/oniguruma/releases/download/v6.9.10/onig-6.9.10.tar.gz"
+UPSTREAM_SHA256="2a5cfc5ae259e4e97f86b68dfffc152cdaffe94e2060b770cb827238d769fc05"
+UPSTREAM_SHA256_SOURCE="sha256:https://github.com/kkos/oniguruma/releases/download/v6.9.10/onig-6.9.10.tar.gz.sha256"
+EXTRACT_DIR="onig-6.9.10"
+TIER=0
+DEPS=""
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--enable-posix-api"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P0-Clean"
+POLICY_RATIONALE="Builds unmodified upstream Oniguruma 6.9.10 C library with POSIX API enabled and runs the upstream make check test suite. Verified against pinned Fil-C (cede3de02b42) that no standalone oniguruma port patch exists upstream. Upstream kkos/oniguruma has been archived since 2025 (unmaintained upstream); security fixes must be tracked via own CVE triage and the jq community."
+FILC_ORIGIN_REF="none (new Stage 6b port; verified no oniguruma patch in cede3de02b42)"
+
+port_test() {
+  make -j"$JOBS" check
+}

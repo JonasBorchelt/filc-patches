@@ -11,26 +11,36 @@ EXTRACT_DIR="ncurses-6.6"
 TIER=2
 DEPS="pkgconf"
 BUILD_SYSTEM="autotools"
-CONFIGURE_ARGS="--disable-lib-suffixes --with-shared --without-ada --enable-pc-files"
+CONFIGURE_ARGS="--enable-widec --with-shared --without-ada --enable-pc-files"
 MAKE_ARGS=""
 INSTALL_ARGS=""
 TEST_CMD=""
 POLICY_CLASS="P0-Clean"
-POLICY_RATIONALE="Builds unmodified upstream ncurses 6.6 with shared libraries and pkg-config files."
+POLICY_RATIONALE="Builds unmodified upstream ncurses 6.6 with --enable-widec, shared libraries, pkg-config files, and compatibility symlinks to libncursesw for non-wide consumers."
 FILC_ORIGIN_REF="cede3de02b42:build_ncurses.sh"
 
 port_configure() {
   ./configure --prefix="$PIZFIX" \
-    --disable-lib-suffixes --with-shared --without-ada --enable-pc-files \
+    --enable-widec --with-shared --without-ada --enable-pc-files \
     --with-pkg-config-libdir="$PIZFIX/lib/pkgconfig"
 }
 
 port_install() {
   make install
-  ln -fs ncurses6-config "$PIZFIX/bin/ncursesw6-config"
+  local lib
+  for lib in ncurses panel menu form; do
+    ln -fs "lib${lib}w.so" "$PIZFIX/lib/lib${lib}.so"
+    if [[ -f "$PIZFIX/lib/pkgconfig/${lib}w.pc" ]]; then
+      ln -fs "${lib}w.pc" "$PIZFIX/lib/pkgconfig/${lib}.pc"
+    fi
+  done
+  ln -fs libncursesw.so "$PIZFIX/lib/libcurses.so"
 }
 
 port_test() {
-  "$PIZFIX/bin/ncurses6-config" --version
+  "$PIZFIX/bin/ncursesw6-config" --version
+  "$PIZFIX/bin/ncursesw6-config" --libs | grep -q -- '-lncursesw'
+  test -f "$PIZFIX/include/ncursesw/ncurses.h"
+  test -f "$PIZFIX/lib/pkgconfig/ncursesw.pc"
   "$PIZFIX/bin/infocmp" -V
 }

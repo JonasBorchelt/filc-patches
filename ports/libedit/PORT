@@ -17,7 +17,7 @@ POLICY_RATIONALE="Single-line guard in src/chartype.h skips the __STDC_ISO_10646
 FILC_ORIGIN_REF="cede3de02b42:projects/libedit.projeny"
 
 port_configure() {
-  CPPFLAGS="-I$PIZFIX/include -I$PIZFIX/include/ncurses" LDFLAGS="-L$PIZFIX/lib" \
+  CPPFLAGS="-I$PIZFIX/include -I$PIZFIX/include/ncursesw" LDFLAGS="-L$PIZFIX/lib" \
     ./configure --prefix="$PIZFIX"
 }
 

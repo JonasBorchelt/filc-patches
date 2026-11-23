@@ -17,7 +17,7 @@ POLICY_RATIONALE="Builds unmodified upstream tmux 3.8 against Fil-C libevent and
 FILC_ORIGIN_REF="cede3de02b42:projects/tmux.projeny"
 
 port_configure() {
-  CPPFLAGS="-I$PIZFIX/include -I$PIZFIX/include/ncurses" \
+  CPPFLAGS="-I$PIZFIX/include -I$PIZFIX/include/ncursesw" \
     LDFLAGS="-L$PIZFIX/lib" \
     PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" \
     ./configure --prefix="$PIZFIX"

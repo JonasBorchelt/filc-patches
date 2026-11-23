@@ -8,16 +8,16 @@ EXTRACT_DIR="util-linux-2.42.4"
 TIER=4
 DEPS="ncurses zlib pkgconf"
 BUILD_SYSTEM="autotools"
-CONFIGURE_ARGS="--without-ncursesw --with-ncurses --disable-chfn-chsh --disable-login --disable-nologin --disable-su --disable-setpriv --disable-runuser --disable-pylibmount --disable-liblastlog2 --disable-static --without-python --without-systemd --without-systemdsystemunitdir --disable-makeinstall-chown --disable-makeinstall-setuid --disable-asciidoc --disable-poman"
+CONFIGURE_ARGS="--with-ncursesw --disable-chfn-chsh --disable-login --disable-nologin --disable-su --disable-setpriv --disable-runuser --disable-pylibmount --disable-liblastlog2 --disable-static --without-python --without-systemd --without-systemdsystemunitdir --disable-makeinstall-chown --disable-makeinstall-setuid --disable-asciidoc --disable-poman"
 MAKE_ARGS=""
 INSTALL_ARGS=""
 TEST_CMD=""
 POLICY_CLASS="P2-Package"
-POLICY_RATIONALE="Audited down from Fil-C util-linux.projeny (3 files, +19/-11) to 1 file (+2/-1): P1 llvm/06b eliminates all -Wl,--version-script hunks, --without-ncursesw --with-ncurses matches our non-suffixed libncurses.so so configure detects HAVE_VW_PRINTW cleanly, leaving only the capability-safe fsopen(\"\", ...) probe in libmount/src/hook_mount.c."
+POLICY_RATIONALE="Audited down from Fil-C util-linux.projeny (3 files, +19/-11) to 1 file (+2/-1): P1 llvm/06b eliminates all -Wl,--version-script hunks, and wide-char ncurses (--with-ncursesw) provides libncursesw and HAVE_VW_PRINTW cleanly, leaving only the capability-safe fsopen(\"\", ...) probe in libmount/src/hook_mount.c."
 FILC_ORIGIN_REF="cede3de02b42:projects/util-linux.projeny"
 
 port_configure() {
-  CPPFLAGS="-I$PIZFIX/include -I$PIZFIX/include/ncurses" \
+  CPPFLAGS="-I$PIZFIX/include -I$PIZFIX/include/ncursesw" \
     LDFLAGS="-L$PIZFIX/lib" \
     PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" \
     ./configure --prefix="$PIZFIX" $CONFIGURE_ARGS

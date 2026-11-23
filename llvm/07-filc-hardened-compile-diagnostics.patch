@@ -146,7 +146,7 @@ index 2a8395e26..0e3bfe9b0 100644
  
  bool Sema::BuiltinCountedByRef(CallExpr *TheCall) {
 diff --git a/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp b/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp
-index b86df0d98..fd71e3712 100644
+index b86df0d98..077cfc959 100644
 --- a/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp
 +++ b/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp
 @@ -415,15 +415,21 @@ class MATokenizer {
@@ -213,7 +213,7 @@ index b86df0d98..fd71e3712 100644
 +  }
 +
 +  void abortModuleOnError() {
-+    M.setModuleInlineAsm("");
++    M.setModuleInlineAsm(ArrayRef<Module::GlobalAsmFragment>{});
 +    M.setDataLayout(M.getDataLayoutAfterFilC());
 +    if (Dummy) {
 +      Dummy->deleteValue();

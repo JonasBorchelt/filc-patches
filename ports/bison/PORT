@@ -25,7 +25,10 @@ port_configure() {
 }
 
 port_test() {
-  "$PIZFIX/bin/bison" --version | grep -q 'GNU Bison.*3\.8\.2'
+  local ver
+  ver="$("$PIZFIX/bin/bison" --version | head -n 1)"
+  echo "bison version: $ver"
+  printf '%s\n' "$ver" | grep -Fxq 'bison (GNU Bison) 3.8.2'
   local td
   td="$(mktemp -d)"
   cat > "$td/calc.y" <<'EOF'

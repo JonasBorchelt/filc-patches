@@ -24,8 +24,9 @@ port_configure() {
 }
 
 port_test() {
-  local ver
-  ver="$("$PIZFIX/bin/m4" --version | head -n 1)"
+  local out ver
+  out="$("$PIZFIX/bin/m4" --version)"
+  ver="${out%%$'\n'*}"
   echo "m4 version: $ver"
   printf '%s\n' "$ver" | grep -Fxq 'm4 (GNU M4) 1.4.21'
   printf 'define(SQ, eval(($1)*($1)))SQ(7)\n' | "$PIZFIX/bin/m4" | grep -Fxq '49'

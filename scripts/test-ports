@@ -96,6 +96,54 @@ for series in sorted(glob.glob(os.path.join(ports_dir, "*", "patches", "series")
 print(f"PATCH HEADERS OK (checked={checked})")
 PY
 
+echo "=== 2a. port_test pipefail SIGPIPE guard (no '| head') ==="
+python3 - "$REPO_ROOT/ports" <<'PY'
+import glob, os, re, sys
+
+PIPE_HEAD_RE = re.compile(r"(?<!\|)\|\s*head(?:\s|$|\))")
+
+def check_port_test(port_file: str) -> list:
+    errs = []
+    in_test = False
+    for lineno, raw in enumerate(open(port_file, encoding="utf-8"), 1):
+        stripped = raw.strip()
+        if re.match(r"^port_test\s*\(\s*\)", stripped):
+            in_test = True
+            continue
+        if in_test and raw.startswith("}"):
+            in_test = False
+            continue
+        if in_test and not stripped.startswith("#"):
+            if PIPE_HEAD_RE.search(raw):
+                errs.append(
+                    f"{port_file}:{lineno}: '| head' inside port_test() causes SIGPIPE (rc=141) under pipefail"
+                )
+    return errs
+
+ports_dir = sys.argv[1]
+all_errs = []
+port_files = sorted(glob.glob(os.path.join(ports_dir, "*", "PORT")))
+for pf in port_files:
+    all_errs.extend(check_port_test(pf))
+if all_errs:
+    for e in all_errs:
+        print(f"FAIL: {e}", file=sys.stderr)
+    sys.exit(1)
+
+# Negative self-test: ensure '| head' inside port_test() is rejected
+import tempfile
+with tempfile.NamedTemporaryFile("w", suffix=".PORT", delete=False) as tf:
+    tf.write("port_test() {\n  foo --version | head -n 1\n}\n")
+    bad_path = tf.name
+try:
+    bad_errs = check_port_test(bad_path)
+    assert len(bad_errs) == 1, f"expected 1 error on negative test, got {bad_errs}"
+finally:
+    os.unlink(bad_path)
+
+print(f"PORT_TEST SIGPIPE GUARD OK (checked={len(port_files)}, negative-test=PASS)")
+PY
+
 echo "=== 2b. Zero-fuzz zero-offset patch-apply verification ==="
 VP_DIR="$TMP_DIR/vp-ports"
 VP_CACHE="$TMP_DIR/vp-cache"

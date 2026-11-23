@@ -1,6 +1,6 @@
 Subject: Fil-C GC integration and capability-safe VALUE representation for Ruby 3.3.14
 Policy-Class: P4-Audit
-Rationale: Audited down from Fil-C ruby-3.3.10 (139 files, +6821/-4703) and refreshed to security release 3.3.14 (124 core files, +3335/-1222, 60.5% line reduction, 0 fuzz, 0 offset): drops stray configure.txt, 11 test-only spec/ and ext/-test-/ files, auto-generated parse.c/parse.h/ext/ripper/ripper.c (+3445/-3441, regenerated cleanly from parse.y/ripper.y by bundled lrama during build), and obsolete vm_args.c VALUE-index hunk fixed upstream in 3.3.14. Combines P3 flags (--disable-yjit --disable-rjit --without-jit --without-jemalloc --with-coroutine=pthread) with the Fil-C gc.c and VALUE capability-tagging runtime bridge.
+Rationale: Audited down from Fil-C ruby-3.3.10 (139 files, +6821/-4703) and refreshed to security release 3.3.14 (130 files, +3350/-1237, 60.2% line reduction, 0 fuzz, 0 offset): drops stray configure.txt, 5 unbuilt spec/ruby/optional/capi/ext/ files, auto-generated parse.c/parse.h/ext/ripper/ripper.c (+3445/-3441, regenerated cleanly from parse.y/ripper.y by bundled lrama during build), and obsolete vm_args.c VALUE-index hunk fixed upstream in 3.3.14, while keeping the 6 built ext/-test-/ extensions. Combines P3 flags (--disable-yjit --disable-rjit --without-jit --without-jemalloc --with-coroutine=pthread --with-setjmp-type=_setjmp) with the Fil-C gc.c and VALUE capability-tagging runtime bridge.
 Upstream-Status: Fil-C-Specific
 Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
 
@@ -1413,6 +1413,113 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
        default:
          if (!FIXNUM_P(v)) return TRUE;
          s = FIX2INT(v);
+--- a/ext/-test-/cxxanyargs/cxxanyargs.cpp
++++ b/ext/-test-/cxxanyargs/cxxanyargs.cpp
+@@ -419,7 +419,7 @@
+ 
+ namespace test_rb_ivar_foreach {
+     static int
+-    iter(VALUE, VALUE, VALUE)
++    iter(ID, VALUE, VALUE)
+     {
+         return ST_CONTINUE;
+     }
+--- a/ext/-test-/memory_view/memory_view.c
++++ b/ext/-test-/memory_view/memory_view.c
+@@ -198,7 +198,7 @@
+ 
+     st_data_t count;
+     if (st_lookup(table, (st_data_t)obj, &count)) {
+-        return ULL2NUM(count);
++        return ULL2NUM((unsigned long long)count);
+     }
+ 
+     return Qnil;
+--- a/ext/-test-/st/foreach/foreach.c
++++ b/ext/-test-/st/foreach/foreach.c
+@@ -1,7 +1,7 @@
+ #include <ruby.h>
+ #include <ruby/st.h>
+ 
+-static st_data_t expect_size = 32;
++static uintptr_t expect_size = 32;
+ struct checker {
+     st_table *tbl;
+     st_index_t nr;
+@@ -12,13 +12,13 @@
+ force_unpack_check(struct checker *c, st_data_t key, st_data_t val)
+ {
+     if (c->nr == 0) {
+-        st_data_t i;
++        uintptr_t i;
+ 
+         if (c->tbl->bins != NULL) rb_bug("should be packed");
+ 
+         /* force unpacking during iteration: */
+         for (i = 1; i < expect_size; i++)
+-            st_add_direct(c->tbl, i, i);
++            st_add_direct(c->tbl, (st_data_t)i, (st_data_t)i);
+ 
+         if (c->tbl->bins == NULL) rb_bug("should be unpacked");
+     }
+@@ -86,7 +86,7 @@
+ 
+     if (tbl->bins != NULL) rb_bug("should still be packed");
+ 
+-    st_foreach_check(tbl, unp_fec_i, (st_data_t)&c, -1);
++    st_foreach_check(tbl, unp_fec_i, (st_data_t)&c, (st_data_t)-1);
+ 
+     if (c.test == ID2SYM(rb_intern("delete2"))) {
+         if (c.nr != 1) {
+--- a/ext/-test-/st/numhash/numhash.c
++++ b/ext/-test-/st/numhash/numhash.c
+@@ -77,10 +77,10 @@
+ update_func(st_data_t *key, st_data_t *value, st_data_t arg, int existing)
+ {
+     VALUE ret = rb_yield_values(existing ? 2 : 1, (VALUE)*key, (VALUE)*value);
+-    switch (ret) {
+-      case Qfalse:
++    switch ((uintptr_t)ret) {
++      case (uintptr_t)Qfalse:
+         return ST_STOP;
+-      case Qnil:
++      case (uintptr_t)Qnil:
+         return ST_DELETE;
+       default:
+         *value = ret;
+--- a/ext/-test-/st/update/update.c
++++ b/ext/-test-/st/update/update.c
+@@ -5,10 +5,10 @@
+ update_func(st_data_t *key, st_data_t *value, st_data_t arg, int existing)
+ {
+     VALUE ret = rb_yield_values(existing ? 2 : 1, (VALUE)*key, (VALUE)*value);
+-    switch (ret) {
+-      case Qfalse:
++    switch ((uintptr_t)ret) {
++      case (uintptr_t)Qfalse:
+         return ST_STOP;
+-      case Qnil:
++      case (uintptr_t)Qnil:
+         return ST_DELETE;
+       default:
+         *value = ret;
+--- a/ext/-test-/vm/at_exit.c
++++ b/ext/-test-/vm/at_exit.c
+@@ -21,11 +21,11 @@
+ static VALUE
+ register_at_exit(VALUE self, VALUE t)
+ {
+-    switch (t) {
+-      case Qtrue:
++    switch ((uintptr_t)t) {
++      case (uintptr_t)Qtrue:
+         ruby_vm_at_exit(print_begin);
+         break;
+-      case Qfalse:
++      case (uintptr_t)Qfalse:
+         ruby_vm_at_exit(print_end);
+         break;
+       default:
 --- a/ext/bigdecimal/bigdecimal.c
 +++ b/ext/bigdecimal/bigdecimal.c
 @@ -2906,7 +2906,7 @@

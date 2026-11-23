@@ -1,327 +1,349 @@
-#!/usr/bin/env python3
-"""
-Verify that every patch in ports/*/patches/series applies cleanly to its
-pinned, SHA-256-verified upstream tarball with zero fuzz (--fuzz=0) and zero
-line offset.
+#!/usr/bin/env ruby
+# frozen_string_literal: true
 
-Usage:
-  scripts/verify-patches [--all | --ports a,b [--with-deps] | <port>...]
-                         [--cache-dir <dir>] [--cached-only] [--ports-dir <dir>]
-"""
+# Verify that every patch in ports/*/patches/series applies cleanly to its
+# pinned, SHA-256-verified upstream tarball with zero fuzz (--fuzz=0) and zero
+# line offset.
+#
+# Usage:
+#   scripts/verify-patches [--all | --ports a,b [--with-deps] | <port>...]
+#                          [--cache-dir <dir>] [--cached-only] [--ports-dir <dir>]
 
-import argparse
-import hashlib
-import os
-import re
-import subprocess
-import sys
-import tempfile
+require "digest"
+require "fileutils"
+require "open3"
+require "optparse"
+require "set"
+require "tmpdir"
 
+def parse_port_file(port_file)
+  data = {}
+  File.foreach(port_file, encoding: "UTF-8") do |raw|
+    line = raw.strip
+    next if line.empty? || line.start_with?("#")
+    break if line.start_with?("port_") && line.include?("()")
 
-def parse_port_file(port_file: str) -> dict:
-    data = {}
-    with open(port_file, "r", encoding="utf-8") as f:
-        for raw in f:
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("port_") and "()" in line:
-                break
-            m = re.match(r"^([A-Z0-9_]+)=(.*)$", line)
-            if not m:
-                continue
-            key, val = m.group(1), m.group(2).strip()
-            if len(val) >= 2 and (
-                (val[0] == '"' and val[-1] == '"')
-                or (val[0] == "'" and val[-1] == "'")
-            ):
-                val = val[1:-1]
-            data[key] = val
-    return data
+    m = /\A([A-Z0-9_]+)=(.*)\z/.match(line)
+    next unless m
 
+    key = m[1]
+    val = m[2].strip
+    if val.length >= 2 && ((val.start_with?('"') && val.end_with?('"')) ||
+                           (val.start_with?("'") && val.end_with?("'")))
+      val = val[1..-2]
+    end
+    data[key] = val
+  end
+  data
+end
 
-def read_series(port_dir: str) -> list:
-    series = os.path.join(port_dir, "patches", "series")
-    if not os.path.isfile(series):
-        return []
-    out = []
-    with open(series, "r", encoding="utf-8") as f:
-        for raw in f:
-            name = raw.split("#", 1)[0].strip()
-            if name:
-                out.append(os.path.join(port_dir, "patches", name))
-    return out
+def read_series(port_dir)
+  series = File.join(port_dir, "patches", "series")
+  return [] unless File.file?(series)
 
+  out = []
+  File.foreach(series, encoding: "UTF-8") do |raw|
+    name = raw.split("#", 2).first.to_s.strip
+    out << File.join(port_dir, "patches", name) unless name.empty?
+  end
+  out
+end
 
-def extract_patch_targets(patch_files: list) -> list:
-    targets = []
-    seen = set()
-    for pfile in patch_files:
-        with open(pfile, "r", encoding="utf-8", errors="replace") as f:
-            for raw in f:
-                if raw.startswith("--- ") or raw.startswith("+++ "):
-                    path = raw[4:].split("\t", 1)[0].strip()
-                    if path == "/dev/null":
-                        continue
-                    if path.startswith("a/") or path.startswith("b/"):
-                        path = path[2:]
-                    if path and path not in seen:
-                        seen.add(path)
-                        targets.append(path)
-    return targets
+def read_lines_lossy(path)
+  File.binread(path).force_encoding("UTF-8").encode("UTF-8", invalid: :replace, undef: :replace).lines
+end
 
+def extract_patch_targets(patch_files)
+  targets = []
+  seen = Set.new
+  patch_files.each do |pfile|
+    read_lines_lossy(pfile).each do |raw|
+      next unless raw.start_with?("--- ", "+++ ")
 
-def sha256_file(path: str) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        while True:
-            chunk = f.read(1024 * 1024)
-            if not chunk:
-                break
-            h.update(chunk)
-    return h.hexdigest()
+      path = raw[4..].split("\t", 2).first.to_s.strip
+      next if path == "/dev/null"
 
+      path = path[2..] if path.start_with?("a/", "b/")
+      next if path.empty? || seen.include?(path)
 
-def ensure_tarball(meta: dict, cache_dir: str, cached_only: bool):
-    name = meta["NAME"]
-    version = meta["VERSION"]
-    expected = meta["UPSTREAM_SHA256"]
-    url = meta["UPSTREAM_URL"]
-    tarball_name = os.path.basename(url.split("?", 1)[0])
-    os.makedirs(cache_dir, exist_ok=True)
-    tarball_path = os.path.join(cache_dir, f"{name}-{version}-{expected[:12]}-{tarball_name}")
+      seen.add(path)
+      targets << path
+    end
+  end
+  targets
+end
 
-    if not os.path.isfile(tarball_path):
-        if cached_only:
-            return None
-        tmp_path = f"{tarball_path}.part.{os.getpid()}"
-        try:
-            subprocess.run(
-                ["curl", "-fsSL", "--retry", "3", "--retry-delay", "2", "-o", tmp_path, url],
-                check=True,
-            )
-            os.replace(tmp_path, tarball_path)
-        finally:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
+def sha256_file(path)
+  Digest::SHA256.file(path).hexdigest
+end
 
-    actual = sha256_file(tarball_path)
-    if actual != expected:
-        os.unlink(tarball_path)
-        raise RuntimeError(
-            f"{name}: SHA-256 mismatch for {tarball_name}: expected {expected}, got {actual}"
-        )
-    return tarball_path
+def ensure_tarball(meta, cache_dir, cached_only)
+  name = meta.fetch("NAME")
+  version = meta.fetch("VERSION")
+  expected = meta.fetch("UPSTREAM_SHA256")
+  url = meta.fetch("UPSTREAM_URL")
+  tarball_name = File.basename(url.split("?", 2).first)
+  FileUtils.mkdir_p(cache_dir)
+  tarball_path = File.join(cache_dir, "#{name}-#{version}-#{expected[0, 12]}-#{tarball_name}")
 
+  unless File.file?(tarball_path)
+    return nil if cached_only
 
-def verify_exact_hunks(src_dir: str, pfile: str) -> None:
-    """Verify every unified-diff hunk matches its exact line numbers (0 fuzz, 0 offset)."""
-    pname = os.path.basename(pfile)
-    with open(pfile, "r", encoding="utf-8", errors="replace", newline="\n") as pf:
-        lines = pf.readlines()
-    i = 0
-    cur_file = None
-    cur_lines = None
-    while i < len(lines):
-        ln = lines[i]
-        if ln.startswith("--- "):
-            path = ln[4:].split("\t", 1)[0].strip()
-            if path == "/dev/null":
-                cur_file = None
-                cur_lines = None
-            else:
-                if path.startswith("a/"):
-                    path = path[2:]
-                cur_file = path
-                full = os.path.join(src_dir, path)
-                if not os.path.isfile(full):
-                    raise RuntimeError(f"{pname}: target file missing: {path}")
-                with open(full, "r", encoding="utf-8", errors="replace", newline="\n") as tf:
-                    cur_lines = [l.rstrip("\r\n") for l in tf.readlines()]
-            i += 1
-            continue
-        if ln.startswith("@@ "):
-            m = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", ln)
-            if not m:
-                raise RuntimeError(f"{pname}: malformed hunk header: {ln.strip()}")
-            old_start = int(m.group(1))
-            old_count = int(m.group(2)) if m.group(2) is not None else 1
-            i += 1
-            if cur_file is None or cur_lines is None:
-                # New file creation (/dev/null)
-                while i < len(lines) and not lines[i].startswith(("@@ ", "--- ", "diff --git ")):
-                    i += 1
-                continue
-            expected_old = []
-            while i < len(lines) and len(expected_old) < old_count:
-                hl = lines[i]
-                if hl.startswith("\\ No newline"):
-                    i += 1
-                    continue
-                if hl.startswith((" ", "-")):
-                    expected_old.append(hl[1:].rstrip("\r\n"))
-                    i += 1
-                elif hl.startswith("+"):
-                    i += 1
-                else:
-                    break
-            idx0 = old_start - 1
-            actual_old = cur_lines[idx0 : idx0 + len(expected_old)]
-            if actual_old != expected_old:
-                raise RuntimeError(
-                    f"{pname}: {cur_file} hunk at line {old_start} does not match verbatim "
-                    f"(offset or fuzz required)"
-                )
-            continue
-        i += 1
+    tmp_path = "#{tarball_path}.part.#{Process.pid}"
+    begin
+      _out, err, status = Open3.capture3("curl", "-fsSL", "--retry", "3", "--retry-delay", "2", "-o", tmp_path, url)
+      raise "#{name}: curl failed for #{url} (rc=#{status.exitstatus}): #{err.strip}" unless status.success?
 
+      File.rename(tmp_path, tarball_path)
+    ensure
+      File.unlink(tmp_path) if File.exist?(tmp_path)
+    end
+  end
 
-def verify_port_patches(name: str, meta: dict, port_dir: str, cache_dir: str, cached_only: bool) -> str:
-    patches = read_series(port_dir)
-    if not patches:
-        return f"SKIP [no-patches] {name} {meta['VERSION']}"
+  actual = sha256_file(tarball_path)
+  if actual != expected
+    File.unlink(tarball_path)
+    raise "#{name}: SHA-256 mismatch for #{tarball_name}: expected #{expected}, got #{actual}"
+  end
 
-    tarball_path = ensure_tarball(meta, cache_dir, cached_only)
-    if tarball_path is None:
-        return f"SKIP [uncached] {name} {meta['VERSION']}"
+  tarball_path
+end
 
-    extract_dir = meta["EXTRACT_DIR"]
-    targets = extract_patch_targets(patches)
+def strip_eol(line)
+  line.sub(/\r?\n\z/, "")
+end
 
-    with tempfile.TemporaryDirectory(prefix=f"filc-vpatch-{name}-") as td:
-        members = [f"{extract_dir}/{t}" for t in targets]
-        # Fast selective extract first; fall back to full extract if a patch creates new files
-        sel = subprocess.run(
-            ["tar", "-xf", tarball_path, "-C", td] + members,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        if sel.returncode != 0:
-            subprocess.run(
-                ["tar", "-xf", tarball_path, "-C", td],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-            )
+def verify_exact_hunks(src_dir, pfile)
+  pname = File.basename(pfile)
+  lines = read_lines_lossy(pfile)
+  i = 0
+  cur_file = nil
+  cur_lines = nil
 
-        src_dir = os.path.join(td, extract_dir)
-        if not os.path.isdir(src_dir):
-            raise RuntimeError(f"{name}: extract dir {extract_dir!r} not found in {tarball_path}")
+  while i < lines.length
+    ln = lines[i]
+    if ln.start_with?("--- ")
+      path = ln[4..].split("\t", 2).first.to_s.strip
+      if path == "/dev/null"
+        cur_file = nil
+        cur_lines = nil
+      else
+        path = path[2..] if path.start_with?("a/")
+        cur_file = path
+        full = File.join(src_dir, path)
+        raise "#{pname}: target file missing: #{path}" unless File.file?(full)
 
-        for pfile in patches:
-            pname = os.path.basename(pfile)
-            verify_exact_hunks(src_dir, pfile)
-            with open(pfile, "rb") as pf:
-                patch_bytes = pf.read()
-            proc = subprocess.run(
-                ["patch", "-d", src_dir, "-p1", "--batch", "--forward", "--fuzz=0"],
-                input=patch_bytes,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-            combined = (
-                proc.stdout.decode("utf-8", errors="replace")
-                + "\n"
-                + proc.stderr.decode("utf-8", errors="replace")
-            ).strip()
-            if proc.returncode != 0:
-                raise RuntimeError(f"{name}/{pname}: patch failed (rc={proc.returncode}):\n{combined}")
-            if re.search(r"\b(offset|fuzz)\b", combined, re.IGNORECASE):
-                raise RuntimeError(
-                    f"{name}/{pname}: patch applied with fuzz or line offset (must be exact):\n{combined}"
-                )
+        cur_lines = read_lines_lossy(full).map { |l| strip_eol(l) }
+      end
+      i += 1
+      next
+    end
 
-    return f"OK [patches={len(patches)}, fuzz=0, offset=0] {name} {meta['VERSION']}"
+    if ln.start_with?("@@ ")
+      m = /\A@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.match(ln)
+      raise "#{pname}: malformed hunk header: #{ln.strip}" unless m
 
+      old_start = m[1].to_i
+      old_count = m[2].nil? ? 1 : m[2].to_i
+      i += 1
+      if cur_file.nil? || cur_lines.nil?
+        # New file creation (/dev/null)
+        i += 1 while i < lines.length && !lines[i].start_with?("@@ ", "--- ", "diff --git ")
+        next
+      end
 
-def expand_deps(all_ports: dict, names: list) -> list:
-    selected = set()
-    stack = list(names)
-    while stack:
-        cur = stack.pop()
-        if cur not in all_ports:
-            raise ValueError(f"unknown port: {cur}")
-        if cur in selected:
-            continue
-        selected.add(cur)
-        for dep in all_ports[cur].get("DEPS", "").split():
-            if dep:
-                stack.append(dep)
-    return sorted(selected)
+      expected_old = []
+      while i < lines.length && expected_old.length < old_count
+        hl = lines[i]
+        if hl.start_with?("\\ No newline")
+          i += 1
+          next
+        end
+        if hl.start_with?(" ", "-")
+          expected_old << strip_eol(hl[1..])
+          i += 1
+        elsif hl.start_with?("+")
+          i += 1
+        else
+          break
+        end
+      end
 
+      idx0 = old_start - 1
+      actual_old = if expected_old.empty?
+                     []
+                   elsif idx0 < 0 || idx0 >= cur_lines.length
+                     nil
+                   else
+                     cur_lines[idx0, expected_old.length]
+                   end
+      if actual_old != expected_old
+        raise "#{pname}: #{cur_file} hunk at line #{old_start} does not match verbatim " \
+              "(offset or fuzz required)"
+      end
+      next
+    end
 
-def main() -> int:
-    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    parser = argparse.ArgumentParser(
-        description="Verify port patches apply cleanly to pinned upstream tarballs with zero fuzz and zero offset"
-    )
-    parser.add_argument("port_names", nargs="*", help="Specific port names to check")
-    parser.add_argument("--all", action="store_true", help="Check all patched ports")
-    parser.add_argument("--ports", default="", help="Comma-separated list of port names")
-    parser.add_argument("--with-deps", action="store_true", help="Include transitive dependencies of selected ports")
-    parser.add_argument("--cached-only", action="store_true", help="Only verify ports whose tarball is already in cache")
-    parser.add_argument("--ports-dir", default=os.path.join(repo_root, "ports"))
-    parser.add_argument(
-        "--cache-dir",
-        default=os.environ.get("FILC_PORTS_CACHE_DIR", os.path.join(repo_root, ".work", "ports", "ports-cache")),
-    )
-    args = parser.parse_args()
+    i += 1
+  end
+end
 
-    all_ports = {}
-    for entry in sorted(os.listdir(args.ports_dir)):
-        pfile = os.path.join(args.ports_dir, entry, "PORT")
-        if os.path.isfile(pfile):
-            all_ports[entry] = parse_port_file(pfile)
+def verify_port_patches(name, meta, port_dir, cache_dir, cached_only)
+  patches = read_series(port_dir)
+  return "SKIP [no-patches] #{name} #{meta['VERSION']}" if patches.empty?
 
-    wanted = list(args.port_names)
-    if args.ports:
-        wanted.extend(p.strip() for p in args.ports.split(",") if p.strip())
+  tarball_path = ensure_tarball(meta, cache_dir, cached_only)
+  return "SKIP [uncached] #{name} #{meta['VERSION']}" if tarball_path.nil?
 
-    if wanted:
-        selected = expand_deps(all_ports, wanted) if args.with_deps else sorted(set(wanted))
-    else:
-        selected = sorted(all_ports.keys())
+  extract_dir = meta.fetch("EXTRACT_DIR")
+  targets = extract_patch_targets(patches)
 
-    patched_selected = [
-        n for n in selected if read_series(os.path.join(args.ports_dir, n))
-    ]
-    if not patched_selected:
-        print("VERIFY_PATCHES: PASS (0 patched ports in selection)")
-        return 0
+  Dir.mktmpdir("filc-vpatch-#{name}-") do |td|
+    members = targets.map { |t| "#{extract_dir}/#{t}" }
+    # Fast selective extract first; fall back to full extract if a patch creates new files
+    _sout, _serr, sel_status = Open3.capture3("tar", "-xf", tarball_path, "-C", td, *members)
+    unless sel_status.success?
+      _fout, ferr, full_status = Open3.capture3("tar", "-xf", tarball_path, "-C", td)
+      raise "#{name}: tar extract failed (rc=#{full_status.exitstatus}): #{ferr.strip}" unless full_status.success?
+    end
 
-    checked = 0
-    skipped = 0
-    failures = []
-    for name in patched_selected:
-        if name not in all_ports:
-            print(f"error: unknown port: {name}", file=sys.stderr)
-            return 1
-        try:
-            msg = verify_port_patches(
-                name,
-                all_ports[name],
-                os.path.join(args.ports_dir, name),
-                args.cache_dir,
-                args.cached_only,
-            )
-            print(msg, flush=True)
-            if msg.startswith("SKIP "):
-                skipped += 1
-            else:
-                checked += 1
-        except Exception as exc:
-            print(f"FAIL [{name}] {exc}", file=sys.stderr, flush=True)
-            failures.append((name, str(exc)))
+    src_dir = File.join(td, extract_dir)
+    raise "#{name}: extract dir #{extract_dir.inspect} not found in #{tarball_path}" unless File.directory?(src_dir)
 
-    if failures:
-        print(f"VERIFY_PATCHES: FAILED ({len(failures)}/{len(patched_selected)})", file=sys.stderr)
-        return 1
+    patches.each do |pfile|
+      pname = File.basename(pfile)
+      verify_exact_hunks(src_dir, pfile)
+      patch_bytes = File.binread(pfile)
+      out, err, status = Open3.capture3(
+        "patch", "-d", src_dir, "-p1", "--batch", "--forward", "--fuzz=0",
+        stdin_data: patch_bytes,
+        binmode: true
+      )
+      combined = [
+        out.force_encoding("UTF-8").encode("UTF-8", invalid: :replace, undef: :replace),
+        err.force_encoding("UTF-8").encode("UTF-8", invalid: :replace, undef: :replace),
+      ].join("\n").strip
+      unless status.success?
+        raise "#{name}/#{pname}: patch failed (rc=#{status.exitstatus}):\n#{combined}"
+      end
+      if combined.match?(/\b(offset|fuzz)\b/i)
+        raise "#{name}/#{pname}: patch applied with fuzz or line offset (must be exact):\n#{combined}"
+      end
+    end
+  end
 
-    print(f"VERIFY_PATCHES: PASS (checked={checked}, skipped={skipped})")
+  "OK [patches=#{patches.length}, fuzz=0, offset=0] #{name} #{meta['VERSION']}"
+end
+
+def expand_deps(all_ports, names)
+  selected = Set.new
+  stack = names.dup
+  until stack.empty?
+    cur = stack.pop
+    raise ArgumentError, "unknown port: #{cur}" unless all_ports.key?(cur)
+    next if selected.include?(cur)
+
+    selected.add(cur)
+    all_ports[cur].fetch("DEPS", "").split.each { |dep| stack << dep unless dep.empty? }
+  end
+  selected.to_a.sort
+end
+
+def main(argv)
+  repo_root = File.expand_path("..", __dir__)
+  opts = {
+    all: false,
+    ports: "",
+    with_deps: false,
+    cached_only: false,
+    ports_dir: File.join(repo_root, "ports"),
+    cache_dir: ENV.fetch("FILC_PORTS_CACHE_DIR", File.join(repo_root, ".work", "ports", "ports-cache")),
+  }
+
+  parser = OptionParser.new do |o|
+    o.banner = "Usage: verify-patches [--all | --ports a,b [--with-deps] | <port>...] [options]"
+    o.on("--all", "Check all patched ports") { opts[:all] = true }
+    o.on("--ports LIST", "Comma-separated list of port names") { |v| opts[:ports] = v }
+    o.on("--with-deps", "Include transitive dependencies of selected ports") { opts[:with_deps] = true }
+    o.on("--cached-only", "Only verify ports whose tarball is already in cache") { opts[:cached_only] = true }
+    o.on("--ports-dir DIR", "Ports directory") { |v| opts[:ports_dir] = v }
+    o.on("--cache-dir DIR", "Tarball cache directory") { |v| opts[:cache_dir] = v }
+  end
+
+  begin
+    remaining = parser.parse(argv)
+  rescue OptionParser::ParseError => e
+    warn "error: #{e.message}"
+    return 2
+  end
+
+  all_ports = {}
+  Dir.children(opts[:ports_dir]).sort.each do |entry|
+    pfile = File.join(opts[:ports_dir], entry, "PORT")
+    all_ports[entry] = parse_port_file(pfile) if File.file?(pfile)
+  end
+
+  wanted = remaining.dup
+  unless opts[:ports].empty?
+    opts[:ports].split(",").each do |p|
+      s = p.strip
+      wanted << s unless s.empty?
+    end
+  end
+
+  selected = if !wanted.empty?
+               if opts[:with_deps]
+                 expand_deps(all_ports, wanted)
+               else
+                 wanted.uniq.sort
+               end
+             else
+               all_ports.keys.sort
+             end
+
+  patched_selected = selected.select { |n| !read_series(File.join(opts[:ports_dir], n)).empty? }
+  if patched_selected.empty?
+    puts "VERIFY_PATCHES: PASS (0 patched ports in selection)"
     return 0
+  end
 
+  checked = 0
+  skipped = 0
+  failures = []
+  patched_selected.each do |name|
+    unless all_ports.key?(name)
+      warn "error: unknown port: #{name}"
+      return 1
+    end
+    begin
+      msg = verify_port_patches(
+        name,
+        all_ports[name],
+        File.join(opts[:ports_dir], name),
+        opts[:cache_dir],
+        opts[:cached_only]
+      )
+      $stdout.puts(msg)
+      $stdout.flush
+      if msg.start_with?("SKIP ")
+        skipped += 1
+      else
+        checked += 1
+      end
+    rescue StandardError => e
+      $stderr.puts("FAIL [#{name}] #{e.message}")
+      $stderr.flush
+      failures << [name, e.message]
+    end
+  end
 
-if __name__ == "__main__":
-    sys.exit(main())
+  unless failures.empty?
+    warn "VERIFY_PATCHES: FAILED (#{failures.length}/#{patched_selected.length})"
+    return 1
+  end
+
+  puts "VERIFY_PATCHES: PASS (checked=#{checked}, skipped=#{skipped})"
+  0
+end
+
+exit(main(ARGV)) if $PROGRAM_NAME == __FILE__

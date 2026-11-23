@@ -1,0 +1,30 @@
+NAME="jq"
+VERSION="1.8.2"
+LICENSE="MIT"
+UPSTREAM_URL="https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-1.8.2.tar.gz"
+UPSTREAM_SHA256="71b8d6e8f5fe81f6c6d0d110e3892251f6ce76ed095abd315e26e6e1193af3af"
+UPSTREAM_SHA256_SOURCE="sha256:https://github.com/jqlang/jq/releases/download/jq-1.8.2/sha256sum.txt"
+EXTRACT_DIR="jq-1.8.2"
+TIER=1
+DEPS="oniguruma"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--disable-docs --disable-maintainer-mode --disable-valgrind"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P0-Clean"
+POLICY_RATIONALE="Builds unmodified upstream jq 1.8.2 against the staged Fil-C oniguruma port (--with-oniguruma, --disable-docs, --disable-valgrind) and runs the upstream make check test suite. Verified against pinned Fil-C (cede3de02b42) that no standalone jq port patch exists upstream."
+FILC_ORIGIN_REF="none (new Stage 6b port; verified no jq patch in cede3de02b42)"
+
+port_configure() {
+  CPPFLAGS="-I$PIZFIX/include" LDFLAGS="-L$PIZFIX/lib" \
+    ./configure --prefix="$PIZFIX" \
+      --with-oniguruma="$PIZFIX" \
+      --disable-docs \
+      --disable-maintainer-mode \
+      --disable-valgrind
+}
+
+port_test() {
+  make -j"$JOBS" check
+}

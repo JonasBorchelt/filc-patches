@@ -519,6 +519,7 @@ requirements:
 |---|---|---|---|---|---|---|---|---|
 | 48 | `libsodium` | 0 | none | `libsodium-1.0.22` (download.libsodium.org, PGP-signed) | `adbdd8f16149` | no standalone patch (only unmodified vendored copy in `projects/lute-1.0.0`) | `P3-BuildOpt` | Builds unmodified upstream tarball with `--disable-asm` and runs `make check`. |
 | 49 | `oniguruma` | 0 | none | `onig-6.9.10` (github.com/kkos/oniguruma, `.sha256`) | `2a5cfc5ae259` | none | `P2-Package` | Builds upstream tarball (`--enable-posix-api`) with 1 minimal patch changing internal `st_data_t`/`hash_data_type` from `unsigned long` to `void*` for pointer capability provenance (fixes safety trap in `regparse.c:673 callout_name_table_hash`), and runs `make check`. Maintenance note: upstream `kkos/oniguruma` has been archived since 2025 (unmaintained upstream); security fixes only come from our own patches or the `jq` community, so dedicated CVE tracking is mandatory. |
+| 50 | `jq` | 1 | `oniguruma` | `jq-1.8.2` (github.com/jqlang/jq, `sha256sum.txt`) | `71b8d6e8f5fe` | none | `P0-Clean` | Builds unmodified upstream tarball against staged `oniguruma` (`--disable-docs --disable-valgrind`) and runs `make check`. |
 
 Planned follow-ups in dependency order: `oniguruma` -> `jq`, `less`, `perl`,
 `nginx` (`pcre2`, `zlib`, `openssl`), and `postgresql` with `libpq` (`openssl`,

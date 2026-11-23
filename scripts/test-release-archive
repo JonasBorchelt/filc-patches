@@ -7,9 +7,10 @@ set -euo pipefail
 #   2. Setup:     ./setup.sh host kernel header symlinks
 #   3. C Hello World
 #   4. C++ Hello World (libc++ + exceptions)
-#   5. Out-of-Bounds safety trap
-#   6. Use-After-Free safety trap
+#   5. Out-of-Bounds and Use-After-Free safety traps
+#   6. Computed-goto (indirectbr / BlockAddress) runtime check at -O0 and -O2
 #   7. Wave 1 package build and test (zlib)
+#   8. Lua 5.4.7 build and test with default computed-goto jump table (P0-Clean)
 #
 # Usage: scripts/test-release-archive <ARCHIVE.tar.xz> [REPO_ROOT]
 
@@ -35,7 +36,7 @@ if [[ -z "$ROOT_DIR" || ! -d "$ROOT_DIR" ]]; then
 fi
 echo "Extracted root: $ROOT_DIR"
 
-echo "=== [1/6] Verifying LICENSES, NOTICE, PROVENANCE, and MANIFEST ==="
+echo "=== [1/8] Verifying LICENSES, NOTICE, PROVENANCE, and MANIFEST ==="
 for req in \
   LICENSES/LLVM-Apache-2.0-WITH-LLVM-exception.txt \
   LICENSES/FilC-Runtime-BSD-2-Clause.txt \
@@ -55,7 +56,7 @@ done
 (cd "$ROOT_DIR" && sha256sum -c MANIFEST >/dev/null)
 echo "MANIFEST OK"
 
-echo "=== [2/6] Running setup.sh ==="
+echo "=== [2/8] Running setup.sh ==="
 "$ROOT_DIR/setup.sh"
 
 CLANG="$ROOT_DIR/bin/clang"
@@ -63,7 +64,7 @@ CLANGXX="$ROOT_DIR/bin/clang++"
 WORK="$TMP_BASE/tests"
 mkdir -p "$WORK"
 
-echo "=== [3/6] C Hello World ==="
+echo "=== [3/8] C Hello World ==="
 cat > "$WORK/hello.c" <<'EOF'
 #include <stdio.h>
 int main(void) {
@@ -75,7 +76,7 @@ EOF
 "$WORK/hello" | grep -Fxq "Hello from Fil-C release!"
 echo "C HELLO OK"
 
-echo "=== [4/6] C++ Hello World (libc++ + exceptions) ==="
+echo "=== [4/8] C++ Hello World (libc++ + exceptions) ==="
 cat > "$WORK/hello.cpp" <<'EOF'
 #include <iostream>
 #include <stdexcept>
@@ -97,7 +98,7 @@ EOF
 "$WORK/hello_cxx" | grep -Fxq "CXX_RELEASE_OK:release-ok"
 echo "C++ HELLO OK"
 
-echo "=== [5/6] Memory-Safety Traps (OOB + UAF) ==="
+echo "=== [5/8] Memory-Safety Traps (OOB + UAF) ==="
 cat > "$WORK/oob.c" <<'EOF'
 #include <stdio.h>
 #include <stdlib.h>
@@ -146,10 +147,50 @@ if [[ "$UAF_RC" -eq 0 ]] || ! grep -qi "filc safety error" "$WORK/uaf.err"; then
 fi
 echo "OOB + UAF TRAPS OK"
 
-echo "=== [6/6] Wave 1 Package Build & Test (zlib) ==="
+echo "=== [6/8] Computed-Goto (indirectbr / BlockAddress) at -O0 and -O2 ==="
+cat > "$WORK/indirectbr_test.c" <<'EOF'
+#include <stdio.h>
+
+__attribute__((noinline))
+static int run_vm(const unsigned char *code, int x) {
+    static const void *const disptab[3] = { &&op_add, &&op_sub, &&op_ret };
+    const unsigned char *pc = code;
+    goto *disptab[*pc++];
+op_add:
+    x += 3;
+    goto *disptab[*pc++];
+op_sub:
+    x -= 1;
+    goto *disptab[*pc++];
+op_ret:
+    return x;
+}
+
+int main(void) {
+    static const unsigned char prog1[] = { 0, 0, 1, 0, 2 };
+    static const unsigned char prog2[] = { 1, 1, 0, 1, 2 };
+    int r1 = run_vm(prog1, 10);
+    int r2 = run_vm(prog2, 20);
+    printf("INDIRECTBR_OK: %d %d\n", r1, r2);
+    return (r1 == 18 && r2 == 20) ? 0 : 1;
+}
+EOF
+"$CLANG" -O0 -Wall -Wextra -Werror "$WORK/indirectbr_test.c" -o "$WORK/indirectbr_o0"
+"$CLANG" -O2 -Wall -Wextra -Werror "$WORK/indirectbr_test.c" -o "$WORK/indirectbr_o2"
+"$WORK/indirectbr_o0" | grep -Fxq "INDIRECTBR_OK: 18 20"
+"$WORK/indirectbr_o2" | grep -Fxq "INDIRECTBR_OK: 18 20"
+echo "COMPUTED-GOTO (-O0 AND -O2) OK"
+
+echo "=== [7/8] Wave 1 Package Build & Test (zlib) ==="
 ZLIB_WORK="$TMP_BASE/zlib-work"
 mkdir -p "$ZLIB_WORK"
 FILC_TOOLCHAIN_ROOT="$ROOT_DIR" "$REPO_ROOT/scripts/build-port" zlib "$ZLIB_WORK"
 echo "ZLIB PACKAGE OK"
+
+echo "=== [8/8] Lua 5.4.7 Build & Test with Computed-Goto Jump Table ==="
+LUA_WORK="$TMP_BASE/lua-work"
+mkdir -p "$LUA_WORK"
+FILC_TOOLCHAIN_ROOT="$ROOT_DIR" "$REPO_ROOT/scripts/build-port" lua "$LUA_WORK"
+echo "LUA JUMP-TABLE PACKAGE OK"
 
 echo "=== RELEASE ARCHIVE VERIFICATION PASSED ==="

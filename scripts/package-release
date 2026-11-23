@@ -488,7 +488,8 @@ without access to the build tree:
 - C++20 Hello World with \`libc++\` and exception handling
 - Out-of-Bounds memory-safety trap
 - Use-After-Free memory-safety trap
-- Wave 1 upstream package build and test (\`zlib\`)
+- Computed-goto (\`indirectbr\`) runtime verification at \`-O0\` and \`-O2\`
+- Upstream package build and test (\`zlib\` and \`lua\` 5.4.7 with jump table)
 
 ## Quickstart
 

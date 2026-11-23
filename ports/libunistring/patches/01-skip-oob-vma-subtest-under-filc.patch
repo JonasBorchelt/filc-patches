@@ -7,7 +7,7 @@ Fil-C-Origin-Commits: original
 diff --git a/tests/test-free.c b/tests/test-free.c
 --- a/tests/test-free.c
 +++ b/tests/test-free.c
-@@ -88,7 +88,7 @@
+@@ -92,7 +92,7 @@
  
    /* Skip this test when an address sanitizer is in use, because it would report
       a "heap buffer overflow".  */

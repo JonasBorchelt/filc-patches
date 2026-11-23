@@ -1,7 +1,7 @@
 Subject: Use void* for internal st_data_t and hash_data_type to preserve pointer capabilities
 Policy-Class: P2-Package
 Rationale: Oniguruma's internal hash table (src/st.h, src/regint.h) defines st_data_t and hash_data_type as unsigned long, casting pointers such as st_callout_name_key*, st_str_end_key*, NameEntry*, CalloutNameEntry*, and UserDefinedPropertyValue* through integer types. Under Fil-C InvisiCaps, pointer-to-integer-to-pointer round-trips strip capabilities, causing an immediate safety trap on dereference in regparse.c:673 (callout_name_table_hash during onig_initialize_encoding / test_back). Changing the internal (uninstalled) st_data_t and hash_data_type typedefs to void* and passing properly typed hash_data_type* out-parameters preserves pointer provenance and strict aliasing without altering any public header or ABI.
-Upstream-Status: Inappropriate [upstream kkos/oniguruma archived since 2025; candidate for jq/distro forks]
+Upstream-Status: Inappropriate [upstream kkos/oniguruma archived since 2025; also relevant for CHERI and other capability platforms, candidate for jq and distro forks]
 Fil-C-Origin-Commits: none (root-caused locally during Stage 6b oniguruma test_back failure)
 
 --- a/src/st.h

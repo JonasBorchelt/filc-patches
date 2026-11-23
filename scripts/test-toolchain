@@ -401,13 +401,8 @@ void *buf[5];
 void f(void) { __builtin_longjmp(buf, 1); }
 EOF
 
-cat > "$TEST_DIR/reject_asm_goto.c" <<'EOF'
-int f(void) {
-    asm goto("" : : : : target);
-    return 0;
-target:
-    return 1;
-}
+cat > "$TEST_DIR/reject_define_setjmp.c" <<'EOF'
+int setjmp(void *env) { (void)env; return 0; }
 EOF
 
 cat > "$TEST_DIR/reject_addrspace.c" <<'EOF'
@@ -417,6 +412,27 @@ EOF
 cat > "$TEST_DIR/reject_module_asm.c" <<'EOF'
 __asm__(".filc_invalid_directive_xyz");
 int f(void) { return 0; }
+EOF
+
+cat > "$TEST_DIR/trap_asm_goto.c" <<'EOF'
+#include <stdio.h>
+
+__attribute__((noinline))
+static int do_asm_goto(int x) {
+    asm goto("nop" : : "r"(x) : : target1, target2);
+    return x + 1;
+target1:
+    return x + 2;
+target2:
+    return x + 3;
+}
+
+int main(void) {
+    volatile int x = 7;
+    int r = do_asm_goto(x);
+    printf("UNEXPECTED_ASM_GOTO_SURVIVED=%d\n", r);
+    return 0;
+}
 EOF
 
 REJECT_OK=1
@@ -452,9 +468,21 @@ check_compile_reject() {
 
 check_compile_reject reject_builtin_setjmp "$TEST_DIR/reject_builtin_setjmp.c" "__builtin_setjmp is not supported for this target"
 check_compile_reject reject_builtin_longjmp "$TEST_DIR/reject_builtin_longjmp.c" "__builtin_longjmp is not supported for this target"
-check_compile_reject reject_asm_goto "$TEST_DIR/reject_asm_goto.c" "Fil-C does not support asm goto (callbr)"
+check_compile_reject reject_define_setjmp "$TEST_DIR/reject_define_setjmp.c" "Fil-C: cannot define reserved pass-through function 'setjmp'"
 check_compile_reject reject_addrspace "$TEST_DIR/reject_addrspace.c" "Fil-C does not support non-zero pointer address spaces"
 check_compile_reject reject_module_asm "$TEST_DIR/reject_module_asm.c" "Fil-C: unsupported or invalid module-level inline assembly"
+
+# Verify asm goto (CallBrInst) lowers to a memory-safe Fil-C runtime panic (FilPizlonator intentional inline-asm policy)
+"$CLANG" -O2 "$TEST_DIR/trap_asm_goto.c" -o "$TEST_DIR/trap_asm_goto"
+run_and_capture trap_asm_goto "$TEST_DIR/trap_asm_goto"
+RC_ASM_GOTO="$(cat "$TEST_DIR/trap_asm_goto.rc")"
+if [[ "$RC_ASM_GOTO" -eq 0 ]] \
+  || grep -q "UNEXPECTED_ASM_GOTO_SURVIVED" "$TEST_DIR/trap_asm_goto.stdout" \
+  || ! grep -Fq "asm goto is not supported" "$TEST_DIR/trap_asm_goto.stderr"; then
+  echo "error: trap_asm_goto did not safely panic at runtime (rc=$RC_ASM_GOTO)" >&2
+  cat "$TEST_DIR/trap_asm_goto.stderr" >&2
+  REJECT_OK=0
+fi
 
 if [[ "$REJECT_OK" -eq 1 ]]; then
   STATUS_REJECT="PASS"
@@ -564,7 +592,7 @@ ARCH="$(uname -m)"
   sed 's/^/  | /' "$TEST_DIR/indirectbr_o2.stdout"
   echo ""
   echo "--- TEST (g) COMPILE-TIME REJECTION OF UNSUPPORTED CONSTRUCTS [$STATUS_REJECT] ---"
-  echo "REJECT_OK: $REJECT_OK (builtin_setjmp=$(cat "$TEST_DIR/reject_builtin_setjmp.rc"), builtin_longjmp=$(cat "$TEST_DIR/reject_builtin_longjmp.rc"), asm_goto=$(cat "$TEST_DIR/reject_asm_goto.rc"), addrspace=$(cat "$TEST_DIR/reject_addrspace.rc"), module_asm=$(cat "$TEST_DIR/reject_module_asm.rc"))"
+  echo "REJECT_OK: $REJECT_OK (builtin_setjmp=$(cat "$TEST_DIR/reject_builtin_setjmp.rc"), builtin_longjmp=$(cat "$TEST_DIR/reject_builtin_longjmp.rc"), define_setjmp=$(cat "$TEST_DIR/reject_define_setjmp.rc"), addrspace=$(cat "$TEST_DIR/reject_addrspace.rc"), module_asm=$(cat "$TEST_DIR/reject_module_asm.rc"), trap_asm_goto=$RC_ASM_GOTO)"
   echo "================================================================================"
 } > "$REPORT_FILE"
 

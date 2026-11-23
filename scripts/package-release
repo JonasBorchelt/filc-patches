@@ -106,12 +106,22 @@ mkdir -p \
   "$STAGE/pizfix/lib" \
   "$STAGE/LICENSES"
 
-# 1. Compiler and linker binaries (stripped, no build RPATH)
+# 1. Compiler and linker binaries (stripped, no build RPATH; ELF files only)
+is_elf_file() {
+  [[ -f "$1" && ! -L "$1" ]] && python3 -c 'import sys; sys.exit(0 if open(sys.argv[1], "rb").read(4) == b"\x7fELF" else 1)' "$1"
+}
+is_elf_or_ar_file() {
+  [[ -f "$1" && ! -L "$1" ]] && python3 -c 'import sys; b = open(sys.argv[1], "rb").read(8); sys.exit(0 if b.startswith(b"\x7fELF") or b.startswith(b"!<arch>\n") else 1)' "$1"
+}
+
 cp "$CLANG_REAL" "$STAGE/build/bin/$CLANG_BASENAME"
 cp "$LLD_REAL" "$STAGE/build/bin/$LLD_BASENAME"
-strip --strip-all "$STAGE/build/bin/$CLANG_BASENAME" "$STAGE/build/bin/$LLD_BASENAME"
-patchelf --remove-rpath "$STAGE/build/bin/$CLANG_BASENAME" || true
-patchelf --remove-rpath "$STAGE/build/bin/$LLD_BASENAME" || true
+for bin in "$STAGE/build/bin/$CLANG_BASENAME" "$STAGE/build/bin/$LLD_BASENAME"; do
+  if is_elf_file "$bin"; then
+    strip --strip-all "$bin"
+    patchelf --remove-rpath "$bin" || true
+  fi
+done
 
 (
   cd "$STAGE/build/bin"
@@ -174,7 +184,7 @@ fi
 
 # Remove debug build paths from runtime libraries and set relocatable $ORIGIN RPATH
 for lib in "$STAGE/pizfix/lib"/*.so "$STAGE/pizfix/lib"/*.so.*; do
-  [[ -f "$lib" && ! -L "$lib" ]] || continue
+  is_elf_file "$lib" || continue
   base="$(basename "$lib")"
   strip --strip-debug "$lib" || true
   if [[ "$base" != "libyoloc.so" ]]; then
@@ -182,7 +192,7 @@ for lib in "$STAGE/pizfix/lib"/*.so "$STAGE/pizfix/lib"/*.so.*; do
   fi
 done
 for arlib in "$STAGE/pizfix/lib"/*.a "$STAGE/pizfix/lib"/*.o; do
-  [[ -f "$arlib" ]] || continue
+  is_elf_or_ar_file "$arlib" || continue
   strip --strip-debug "$arlib" || true
 done
 

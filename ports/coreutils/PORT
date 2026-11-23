@@ -1,0 +1,42 @@
+NAME="coreutils"
+VERSION="9.12"
+LICENSE="GPL-3.0-or-later"
+UPSTREAM_URL="https://ftpmirror.gnu.org/gnu/coreutils/coreutils-9.12.tar.xz"
+UPSTREAM_SHA256="a480198559733e9b3da999e90543ac6f888a2caa544d8d664c5a1f17e528e210"
+UPSTREAM_SHA256_SOURCE="pgp:https://ftpmirror.gnu.org/gnu/coreutils/coreutils-9.12.tar.xz.sig key:ports/pgp-keys/gnu-brady-release-key.asc fpr:6C37DC12121A5006BC1DB804DF6FD971306037D9"
+UPSTREAM_SIG_URL="https://ftpmirror.gnu.org/gnu/coreutils/coreutils-9.12.tar.xz.sig"
+UPSTREAM_PGP_KEY="ports/pgp-keys/gnu-brady-release-key.asc"
+UPSTREAM_PGP_FPR="6C37DC12121A5006BC1DB804DF6FD971306037D9"
+EXTRACT_DIR="coreutils-9.12"
+TIER=4
+DEPS="attr gmp openssl pkgconf"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS=""
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P2-Package"
+POLICY_RATIONALE="Audited down from Fil-C coreutils.projeny (11 files, +6063/-4978) to 2 files (+44/-49): drops the 9-file Fedora/RedHat multibyte i18n patch (src/sort.c +5410/-4885, src/pr.c +400/-43, 7 i18n tests +209/-1; 0 Fil-C hunks) and keeps only capability-preserving zmkptr() alignment and single-object-per-chunk allocation in gnulib lib/obstack.c and lib/obstack.in.h."
+FILC_ORIGIN_REF="cede3de02b42:projects/coreutils.projeny"
+
+port_configure() {
+  FORCE_UNSAFE_CONFIGURE=1 \
+    CPPFLAGS="-I$PIZFIX/include" \
+    LDFLAGS="-L$PIZFIX/lib" \
+    PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" \
+    ./configure --prefix="$PIZFIX"
+}
+
+port_test() {
+  "$PIZFIX/bin/sort" --version | grep -q 'GNU coreutils.*9\.12'
+  printf 'c\na\nb\n' | "$PIZFIX/bin/sort" | tr '\n' ',' | grep -Fxq 'a,b,c,'
+  printf 'hello\n' | "$PIZFIX/bin/sha256sum" | grep -q '^5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03 '
+  "$PIZFIX/bin/expr" 123456789012345678901234567890 + 1 | grep -Fxq '123456789012345678901234567891'
+  printf 'filc-coreutils\n' | "$PIZFIX/bin/base64" | "$PIZFIX/bin/base64" -d | grep -Fxq 'filc-coreutils'
+  local td
+  td="$(mktemp -d)"
+  printf 'line1\nline2\n' > "$td/a.txt"
+  "$PIZFIX/bin/cp" "$td/a.txt" "$td/b.txt"
+  "$PIZFIX/bin/wc" -l < "$td/b.txt" | tr -d ' ' | grep -Fxq '2'
+  rm -rf "$td"
+}

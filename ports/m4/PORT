@@ -1,0 +1,30 @@
+NAME="m4"
+VERSION="1.4.21"
+LICENSE="GPL-3.0-or-later"
+UPSTREAM_URL="https://ftpmirror.gnu.org/gnu/m4/m4-1.4.21.tar.xz"
+UPSTREAM_SHA256="f25c6ab51548a73a75558742fb031e0625d6485fe5f9155949d6486a2408ab66"
+UPSTREAM_SHA256_SOURCE="pgp:https://ftpmirror.gnu.org/gnu/m4/m4-1.4.21.tar.xz.sig key:ports/pgp-keys/gnu-blake-release-key.asc fpr:71C2CC22B1C4602927D2F3AAA7A16B4A2527436A"
+UPSTREAM_SIG_URL="https://ftpmirror.gnu.org/gnu/m4/m4-1.4.21.tar.xz.sig"
+UPSTREAM_PGP_KEY="ports/pgp-keys/gnu-blake-release-key.asc"
+UPSTREAM_PGP_FPR="71C2CC22B1C4602927D2F3AAA7A16B4A2527436A"
+EXTRACT_DIR="m4-1.4.21"
+TIER=4
+DEPS=""
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS=""
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P2-Package"
+POLICY_RATIONALE="Audited down from Fil-C m4.projeny (20 files) to 6 core files: replaces x87 fnstcw/fldcw inline asm in lib/fpucw.h with zmath_getcw()/zmath_setcw(), uses single-object-per-chunk obstack with zmkptr() alignment, disables raw sigsegv stack-overflow recovery under __FILC__, preserves capability provenance in src/macro.c, and checks posix_spawn_file_actions_addchdir declaration in configure."
+FILC_ORIGIN_REF="cede3de02b42:projects/m4.projeny"
+
+port_configure() {
+  ./configure --prefix="$PIZFIX"
+}
+
+port_test() {
+  "$PIZFIX/bin/m4" --version | grep -q 'GNU M4 1\.4\.21'
+  printf 'define(SQ, eval(($1)*($1)))SQ(7)\n' | "$PIZFIX/bin/m4" | grep -Fxq '49'
+  printf 'define(GREET, ifelse($1, filc, OK, BAD))GREET(filc)\n' | "$PIZFIX/bin/m4" | grep -Fxq 'OK'
+}

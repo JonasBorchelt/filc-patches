@@ -1,0 +1,36 @@
+NAME="sed"
+VERSION="4.10"
+LICENSE="GPL-3.0-or-later"
+UPSTREAM_URL="https://ftpmirror.gnu.org/gnu/sed/sed-4.10.tar.xz"
+UPSTREAM_SHA256="b8e72182b2ec96a3574e2998c47b7aaa64cc20ce000d8e9ac313cc07cecf28c7"
+UPSTREAM_SHA256_SOURCE="pgp:https://ftpmirror.gnu.org/gnu/sed/sed-4.10.tar.xz.sig key:ports/pgp-keys/gnu-meyering-release-key.asc fpr:155D3FC500C834486D1EEA677FD9FCCB000BEEEE"
+UPSTREAM_SIG_URL="https://ftpmirror.gnu.org/gnu/sed/sed-4.10.tar.xz.sig"
+UPSTREAM_PGP_KEY="ports/pgp-keys/gnu-meyering-release-key.asc"
+UPSTREAM_PGP_FPR="155D3FC500C834486D1EEA677FD9FCCB000BEEEE"
+EXTRACT_DIR="sed-4.10"
+TIER=4
+DEPS=""
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS=""
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P2-Package"
+POLICY_RATIONALE="Audited down from Fil-C sed-4.10 (8 files) to 2 core files (lib/obstack.c, lib/obstack.in.h): allocates one object per obstack chunk so inter-object OOB accesses are caught by Fil-C capability bounds."
+FILC_ORIGIN_REF="7e2f54ae378d:projects/sed-4.10"
+
+port_configure() {
+  ./configure --prefix="$PIZFIX"
+}
+
+port_test() {
+  "$PIZFIX/bin/sed" --version | grep -q 'GNU sed.*4\.10'
+  printf 'hello filc world\n' | "$PIZFIX/bin/sed" 's/filc/FILC/g' | grep -Fxq 'hello FILC world'
+  printf 'a123b\n' | "$PIZFIX/bin/sed" -E 's/([a-z]+)([0-9]+)([a-z]+)/\3-\2-\1/' | grep -Fxq 'b-123-a'
+  local td
+  td="$(mktemp -d)"
+  printf 'one\ntwo\nthree\n' > "$td/in.txt"
+  "$PIZFIX/bin/sed" -i '2s/two/TWO/' "$td/in.txt"
+  grep -Fxq 'TWO' "$td/in.txt"
+  rm -rf "$td"
+}

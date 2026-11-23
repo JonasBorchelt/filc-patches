@@ -1,0 +1,46 @@
+NAME="bash"
+VERSION="5.3"
+LICENSE="GPL-3.0-or-later"
+UPSTREAM_URL="https://ftpmirror.gnu.org/gnu/bash/bash-5.3.tar.gz"
+UPSTREAM_SHA256="0d5cd86965f869a26cf64f4b71be7b96f90a3ba8b3d74e27e8e9d9d5550f31ba"
+UPSTREAM_SHA256_SOURCE="pgp:https://ftpmirror.gnu.org/gnu/bash/bash-5.3.tar.gz.sig key:ports/pgp-keys/gnu-ramey-release-key.asc fpr:7C0135FB088AAF6C66C650B9BB5869F064EA74AB"
+UPSTREAM_SIG_URL="https://ftpmirror.gnu.org/gnu/bash/bash-5.3.tar.gz.sig"
+UPSTREAM_PGP_KEY="ports/pgp-keys/gnu-ramey-release-key.asc"
+UPSTREAM_PGP_FPR="7C0135FB088AAF6C66C650B9BB5869F064EA74AB"
+EXTRACT_DIR="bash-5.3"
+TIER=4
+DEPS="ncurses"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--without-bash-malloc"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P2-Package"
+POLICY_RATIONALE="Combines --without-bash-malloc (P3, disables custom allocator) with a 1-line patch (+1/-1 in unwind_prot.c) changing SAVED_VAR.desired_setting from char[1] to void*[1] so saved pointers retain Fil-C alignment and capability metadata."
+FILC_ORIGIN_REF="15d13b236893:projects/bash-5.3"
+
+port_configure() {
+  CC="$CC -w" CXX="$CXX -w" \
+    CPPFLAGS="-I$PIZFIX/include -I$PIZFIX/include/ncursesw" \
+    LDFLAGS="-L$PIZFIX/lib" \
+    ./configure --prefix="$PIZFIX" --without-bash-malloc
+}
+
+port_test() {
+  "$PIZFIX/bin/bash" --version | grep -q 'GNU bash, version 5\.3'
+  "$PIZFIX/bin/bash" -c '
+    set -euo pipefail
+    outer="kept"
+    f() {
+      local outer="inner"
+      local -a arr=(10 20 12)
+      local sum=0 x
+      for x in "${arr[@]}"; do sum=$((sum + x)); done
+      echo "${outer}:${sum}"
+    }
+    res="$(f)"
+    test "$res" = "inner:42"
+    test "$outer" = "kept"
+    echo "BASH_FILC_OK"
+  ' | grep -Fxq 'BASH_FILC_OK'
+}

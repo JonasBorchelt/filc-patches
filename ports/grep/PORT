@@ -1,0 +1,37 @@
+NAME="grep"
+VERSION="3.12"
+LICENSE="GPL-3.0-or-later"
+UPSTREAM_URL="https://ftpmirror.gnu.org/gnu/grep/grep-3.12.tar.xz"
+UPSTREAM_SHA256="2649b27c0e90e632eadcd757be06c6e9a4f48d941de51e7c0f83ff76408a07b9"
+UPSTREAM_SHA256_SOURCE="pgp:https://ftpmirror.gnu.org/gnu/grep/grep-3.12.tar.xz.sig key:ports/pgp-keys/gnu-meyering-release-key.asc fpr:155D3FC500C834486D1EEA677FD9FCCB000BEEEE"
+UPSTREAM_SIG_URL="https://ftpmirror.gnu.org/gnu/grep/grep-3.12.tar.xz.sig"
+UPSTREAM_PGP_KEY="ports/pgp-keys/gnu-meyering-release-key.asc"
+UPSTREAM_PGP_FPR="155D3FC500C834486D1EEA677FD9FCCB000BEEEE"
+EXTRACT_DIR="grep-3.12"
+TIER=4
+DEPS="pcre2 pkgconf"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS=""
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P2-Package"
+POLICY_RATIONALE="Applies 3 minimal Fil-C files (lib/obstack.c, lib/obstack.in.h, lib/sigsegv.c) for capability-preserving zmkptr() obstack alignment, single-object-per-chunk allocation, and disabling raw sigsegv stack-overflow recovery under __FILC__."
+FILC_ORIGIN_REF="496072a5b32f:projects/grep-3.12"
+
+port_configure() {
+  CPPFLAGS="-I$PIZFIX/include" \
+    LDFLAGS="-L$PIZFIX/lib" \
+    PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" \
+    ./configure --prefix="$PIZFIX"
+}
+
+port_test() {
+  "$PIZFIX/bin/grep" --version | grep -q 'GNU grep.*3\.12'
+  printf 'foo bar\nthingy blah\n' | "$PIZFIX/bin/grep" foo | grep -Fxq 'foo bar'
+  printf 'alpha 42\nbeta\n' | "$PIZFIX/bin/grep" -E 'alpha [0-9]+' | grep -Fxq 'alpha 42'
+  printf 'foobar\nfoobaz\n' | "$PIZFIX/bin/grep" -P 'foo(?=bar)' | grep -Fxq 'foobar'
+  if printf 'hello\n' | "$PIZFIX/bin/grep" -q 'missing'; then
+    return 1
+  fi
+}

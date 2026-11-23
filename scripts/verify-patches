@@ -117,7 +117,8 @@ def ensure_tarball(meta: dict, cache_dir: str, cached_only: bool):
 def verify_exact_hunks(src_dir: str, pfile: str) -> None:
     """Verify every unified-diff hunk matches its exact line numbers (0 fuzz, 0 offset)."""
     pname = os.path.basename(pfile)
-    lines = open(pfile, "r", encoding="utf-8", errors="replace").read().splitlines(keepends=True)
+    with open(pfile, "r", encoding="utf-8", errors="replace", newline="\n") as pf:
+        lines = pf.readlines()
     i = 0
     cur_file = None
     cur_lines = None
@@ -135,7 +136,8 @@ def verify_exact_hunks(src_dir: str, pfile: str) -> None:
                 full = os.path.join(src_dir, path)
                 if not os.path.isfile(full):
                     raise RuntimeError(f"{pname}: target file missing: {path}")
-                cur_lines = open(full, "r", encoding="utf-8", errors="replace").read().splitlines()
+                with open(full, "r", encoding="utf-8", errors="replace", newline="\n") as tf:
+                    cur_lines = [l.rstrip("\r\n") for l in tf.readlines()]
             i += 1
             continue
         if ln.startswith("@@ "):

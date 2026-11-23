@@ -1,0 +1,17 @@
+Subject: Align SAVED_VAR.desired_setting as void* for Fil-C pointer capabilities
+Policy-Class: P2-Package
+Rationale: Bash unwind_prot stores saved pointer variables inside SAVED_VAR.desired_setting; using void*[1] instead of char[1] preserves Fil-C pointer alignment and capability metadata.
+Upstream-Status: Upstreamable
+Fil-C-Origin-Commits: 15d13b236893
+
+--- a/unwind_prot.c
++++ b/unwind_prot.c
+@@ -48,7 +48,7 @@
+ typedef struct {
+   char *variable;
+   int size;
+-  char desired_setting[1]; /* actual size is `size' */
++  void *desired_setting[1]; /* actual size is `size' */
+ } SAVED_VAR;
+ 
+ /* If HEAD.CLEANUP is null, then ARG.V contains a tag to throw back to.

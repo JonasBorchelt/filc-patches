@@ -12,8 +12,8 @@ CONFIGURE_ARGS=""
 MAKE_ARGS=""
 INSTALL_ARGS=""
 TEST_CMD=""
-POLICY_CLASS="P0-Clean"
-POLICY_RATIONALE="Builds unmodified upstream Lua 5.4.7 using upstream's built-in linux-noreadline target with zero source patches."
+POLICY_CLASS="P3-BuildOpt"
+POLICY_RATIONALE="Builds unmodified upstream Lua 5.4.7 (0 source patches) with upstream linux-noreadline and MYCFLAGS=-DLUA_USE_JUMPTABLE=0 to avoid a P1 FilPizlonatorPass crash on computed-goto indirectbr in lvm.c at -O2."
 FILC_ORIGIN_REF="5c1a31fd:projects/lua-5.4.7"
 
 port_configure() {
@@ -21,7 +21,11 @@ port_configure() {
 }
 
 port_build() {
-  make -j"$JOBS" -C src linux-noreadline CC="$CC -std=gnu99" AR="$AR rcu" RANLIB="$RANLIB"
+  make -j"$JOBS" -C src linux-noreadline \
+    CC="$CC -std=gnu99" \
+    MYCFLAGS="-DLUA_USE_JUMPTABLE=0" \
+    AR="$AR rcu" \
+    RANLIB="$RANLIB"
 }
 
 port_install() {

@@ -29,13 +29,13 @@ port_test() {
 #include <attr/libattr.h>
 #include <stdio.h>
 int main(void) {
-    const char *q = attr_quote("hello world");
-    if (!q) return 1;
-    puts(q);
-    return 0;
+    int a1 = attr_copy_action("user.filc_test", NULL);
+    int a2 = attr_copy_action("system.posix_acl_access", NULL);
+    printf("actions=%d,%d\n", a1, a2);
+    return (a1 == 0 && a2 == ATTR_ACTION_PERMISSIONS) ? 0 : 1;
 }
 EOF
   "$CC" -O2 -I"$PIZFIX/include" "$td/t.c" -L"$PIZFIX/lib" -lattr -o "$td/t"
-  "$td/t" | grep -q 'hello'
+  "$td/t" | grep -Fxq 'actions=0,2'
   rm -rf "$td"
 }

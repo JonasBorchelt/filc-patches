@@ -158,6 +158,27 @@ dump_patch_rejects() {
   done < <(find "$SRC_DIR" -maxdepth 4 -name '*.rej' -type f 2>/dev/null)
 }
 
+save_clang_crash_reproducers() {
+  local dest_base="${FILC_REPORT_ARCHIVE_DIR:-$WORK_ROOT}/reproducers"
+  local found=0
+  local shf
+  for shf in "${TMPDIR:-/tmp}"/*-*.sh; do
+    [[ -f "$shf" ]] || continue
+    grep -q 'Crash reproducer for ' "$shf" 2>/dev/null || continue
+    local stem="${shf%.sh}"
+    local dest="$dest_base/crash-$PORT_NAME"
+    mkdir -p "$dest"
+    cp -f "$shf" "$dest/" 2>/dev/null || true
+    for ext in c cc cpp cxx i ii m mm; do
+      [[ -f "${stem}.${ext}" ]] && cp -f "${stem}.${ext}" "$dest/" 2>/dev/null || true
+    done
+    found=1
+  done
+  if [[ "$found" -eq 1 ]]; then
+    echo "--- CLANG CRASH REPRODUCER SAVED: $dest_base/crash-$PORT_NAME ---" >&2
+  fi
+}
+
 classify_failure_kind() {
   local stage="$1"
   local rc="$2"
@@ -187,6 +208,8 @@ on_exit() {
       dump_configure_logs || true
     elif [[ "$CURRENT_STAGE" == "patch" ]]; then
       dump_patch_rejects || true
+    elif [[ "$CURRENT_STAGE" == "build" ]]; then
+      save_clang_crash_reproducers || true
     fi
     local dur=$(( $(date +%s) - T_START ))
     echo "FILC_PORT $PORT_NAME failed:$fkind policy=$POLICY_CLASS duration=$dur stage=$CURRENT_STAGE rc=$rc" >&2

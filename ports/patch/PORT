@@ -1,0 +1,39 @@
+NAME="patch"
+VERSION="2.8.1"
+LICENSE="GPL-3.0-or-later"
+UPSTREAM_URL="https://ftp.gnu.org/gnu/patch/patch-2.8.1.tar.xz"
+UPSTREAM_SHA256="3240c7959c5347c8ed347e3c4201c0337bf4240d5cf09d68889e58eeaba30e17"
+UPSTREAM_SHA256_SOURCE="pgp:https://ftp.gnu.org/gnu/patch/patch-2.8.1.tar.xz.sig key:ports/pgp-keys/gnu-gruenbacher-release-key.asc fpr:259B3792B3D6D319212CC4DCD5BF9FEB0313653A"
+UPSTREAM_SIG_URL="https://ftp.gnu.org/gnu/patch/patch-2.8.1.tar.xz.sig"
+UPSTREAM_PGP_KEY="ports/pgp-keys/gnu-gruenbacher-release-key.asc"
+UPSTREAM_PGP_FPR="259B3792B3D6D319212CC4DCD5BF9FEB0313653A"
+EXTRACT_DIR="patch-2.8.1"
+TIER=4
+DEPS=""
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS=""
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P0-Clean"
+POLICY_RATIONALE="Builds unmodified upstream GNU patch 2.8.1."
+FILC_ORIGIN_REF="cede3de02b42:projects/patch.projeny"
+
+port_test() {
+  "$PIZFIX/bin/patch" --version | grep -q 'GNU patch 2\.8\.1'
+  local td
+  td="$(mktemp -d)"
+  printf 'alpha\nbeta\ngamma\n' > "$td/f.txt"
+  cat > "$td/f.patch" <<'EOF'
+--- a/f.txt
++++ b/f.txt
+@@ -1,3 +1,3 @@
+ alpha
+-beta
++beta-patched
+ gamma
+EOF
+  "$PIZFIX/bin/patch" -d "$td" -p1 --batch --forward < "$td/f.patch"
+  grep -qx 'beta-patched' "$td/f.txt"
+  rm -rf "$td"
+}

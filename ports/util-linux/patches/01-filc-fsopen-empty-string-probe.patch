@@ -1,0 +1,19 @@
+Subject: Probe fsopen() with an empty string instead of NULL in libmount
+Policy-Class: P2-Package
+Rationale: Passing NULL as the filesystem name to fsopen() violates Fil-C pointer safety; an empty string yields EINVAL when supported and ENOSYS when unsupported.
+Upstream-Status: Pending
+Fil-C-Origin-Commits: cede3de0
+
+diff --git a/libmount/src/hook_mount.c b/libmount/src/hook_mount.c
+--- a/libmount/src/hook_mount.c
++++ b/libmount/src/hook_mount.c
+@@ -580,7 +580,8 @@
+ 	int dummy, rc = 1;
+ 
+ 	errno = 0;
+-	dummy = fsopen(NULL, FSOPEN_CLOEXEC);
++	/* Probe with an empty string instead of NULL for capability-safe C. */
++	dummy = fsopen("", FSOPEN_CLOEXEC);
+ 
+ 	if (errno == ENOSYS)
+ 		rc = 0;

@@ -1,0 +1,29 @@
+NAME="dash"
+VERSION="0.5.13.5"
+LICENSE="BSD-3-Clause"
+UPSTREAM_URL="http://gondor.apana.org.au/~herbert/dash/files/dash-0.5.13.5.tar.gz"
+UPSTREAM_SHA256="40090101a2a491f13e901d3d48e90414f26634628b9bfff35ff540363c227a7d"
+UPSTREAM_SHA256_SOURCE="upstream-sha512-only:http://gondor.apana.org.au/~herbert/dash/files/dash-0.5.13.5.tar.gz.sha512sum"
+EXTRACT_DIR="dash-0.5.13.5"
+TIER=4
+DEPS=""
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS=""
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P2-Package"
+POLICY_RATIONALE="Single-line patch in src/jobs.c replaces vfork() with capability-safe fork() under Fil-C."
+FILC_ORIGIN_REF="cede3de02b42:projects/dash.projeny"
+
+port_test() {
+  "$PIZFIX/bin/dash" -c '
+    set -eu
+    f() { echo "hi:$1"; }
+    out="$(f filc | tr a-z A-Z)"
+    [ "$out" = "HI:FILC" ]
+    x=$((21 * 2))
+    [ "$x" -eq 42 ]
+    echo "DASH_FILC_OK"
+  ' | grep -Fxq 'DASH_FILC_OK'
+}

@@ -1,0 +1,34 @@
+NAME="tmux"
+VERSION="3.8"
+LICENSE="ISC"
+UPSTREAM_URL="https://github.com/tmux/tmux/releases/download/3.8/tmux-3.8.tar.gz"
+UPSTREAM_SHA256="e79c699c7e949dccd0a4a125e17b8d1261e311b16979dbc8eb34542f3966d82e"
+UPSTREAM_SHA256_SOURCE="github-release-digest:https://api.github.com/repos/tmux/tmux/releases/tags/3.8"
+EXTRACT_DIR="tmux-3.8"
+TIER=4
+DEPS="libevent ncurses pkgconf"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS=""
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P0-Clean"
+POLICY_RATIONALE="Builds unmodified upstream tmux 3.8 against Fil-C libevent and ncurses."
+FILC_ORIGIN_REF="cede3de02b42:projects/tmux.projeny"
+
+port_configure() {
+  CPPFLAGS="-I$PIZFIX/include -I$PIZFIX/include/ncurses" \
+    LDFLAGS="-L$PIZFIX/lib" \
+    PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" \
+    ./configure --prefix="$PIZFIX"
+}
+
+port_test() {
+  "$PIZFIX/bin/tmux" -V | grep -q 'tmux 3\.8'
+  local td
+  td="$(mktemp -d)"
+  "$PIZFIX/bin/tmux" -S "$td/sock" new-session -d -s filc-smoke 'sleep 10'
+  "$PIZFIX/bin/tmux" -S "$td/sock" list-sessions | grep -q '^filc-smoke:'
+  "$PIZFIX/bin/tmux" -S "$td/sock" kill-server
+  rm -rf "$td"
+}

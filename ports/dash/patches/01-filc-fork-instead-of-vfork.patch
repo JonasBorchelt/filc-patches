@@ -1,0 +1,18 @@
+Subject: Use fork() instead of vfork() in dash job control under Fil-C
+Policy-Class: P2-Package
+Rationale: Fil-C requires capability-safe process creation via fork() rather than shared-stack vfork().
+Upstream-Status: Fil-C-Specific
+Fil-C-Origin-Commits: cede3de0
+
+diff --git a/src/jobs.c b/src/jobs.c
+--- a/src/jobs.c
++++ b/src/jobs.c
+@@ -999,7 +999,7 @@
+ 		mypid = getpid();
+ 	vforked = mypid;
+ 
+-	pid = vfork();
++	pid = fork();
+ 
+ 	if (!pid) {
+ 		forkchild(jp, n, FORK_FG);

@@ -1,0 +1,20 @@
+Subject: Include <signal.h> before gzip.h to avoid head macro clash
+Policy-Class: P2-Package
+Rationale: gzip.h defines a macro named head that collides with struct members in Linux kernel sigcontext headers pulled in by <signal.h>.
+Upstream-Status: Pending
+Fil-C-Origin-Commits: cede3de0
+
+diff --git a/gzip.c b/gzip.c
+--- a/gzip.c
++++ b/gzip.c
+@@ -57,6 +57,10 @@
+ #include <config.h>
+ 
+ #include "tailor.h"
++
++/* Include <signal.h> before gzip.h so the head macro does not clash
++   with kernel sigcontext struct fields. */
++#include <signal.h>
+ 
+ #include "gzip.h"
+ #include "lzw.h"

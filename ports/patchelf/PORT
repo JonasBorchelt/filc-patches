@@ -1,0 +1,28 @@
+NAME="patchelf"
+VERSION="0.19.3"
+LICENSE="GPL-3.0-or-later"
+UPSTREAM_URL="https://github.com/NixOS/patchelf/releases/download/0.19.3/patchelf-0.19.3.tar.gz"
+UPSTREAM_SHA256="fac76a3c0b730e8d53ea1d10cd6015322d78c9900af91736f2cca51d5837b612"
+UPSTREAM_SHA256_SOURCE="github-release-digest:https://api.github.com/repos/NixOS/patchelf/releases/tags/0.19.3"
+EXTRACT_DIR="patchelf-0.19.3"
+TIER=4
+DEPS=""
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS=""
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P0-Clean"
+POLICY_RATIONALE="Builds unmodified upstream patchelf 0.19.3 (upstream absorbed the capability-safe pointer derivation fix)."
+FILC_ORIGIN_REF="cede3de02b42:projects/patchelf.projeny"
+
+port_test() {
+  "$PIZFIX/bin/patchelf" --version | grep -q 'patchelf 0\.19\.3'
+  local td
+  td="$(mktemp -d)"
+  cp "$PIZFIX/bin/patchelf" "$td/sample"
+  "$PIZFIX/bin/patchelf" --print-interpreter "$td/sample" | grep -q 'ld-fil1'
+  "$PIZFIX/bin/patchelf" --set-rpath '$ORIGIN' "$td/sample"
+  "$PIZFIX/bin/patchelf" --print-rpath "$td/sample" | grep -Fxq '$ORIGIN'
+  rm -rf "$td"
+}

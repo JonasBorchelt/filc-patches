@@ -1,0 +1,58 @@
+NAME="lua"
+VERSION="5.4.7"
+LICENSE="MIT"
+UPSTREAM_URL="https://www.lua.org/ftp/lua-5.4.7.tar.gz"
+UPSTREAM_SHA256="9fbf5e28ef86c69858f6d3d34eccc32e911c1a28b4120ff3e84aaa70cfbf1e30"
+UPSTREAM_SHA256_SOURCE="sha256-html:https://www.lua.org/ftp/"
+EXTRACT_DIR="lua-5.4.7"
+TIER=5
+DEPS=""
+BUILD_SYSTEM="custom"
+CONFIGURE_ARGS=""
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P0-Clean"
+POLICY_RATIONALE="Builds unmodified upstream Lua 5.4.7 using upstream's built-in linux-noreadline target with zero source patches."
+FILC_ORIGIN_REF="5c1a31fd:projects/lua-5.4.7"
+
+port_configure() {
+  :
+}
+
+port_build() {
+  make -j"$JOBS" -C src linux-noreadline CC="$CC -std=gnu99" AR="$AR rcu" RANLIB="$RANLIB"
+}
+
+port_install() {
+  make install INSTALL_TOP="$PIZFIX"
+}
+
+port_test() {
+  "$PIZFIX/bin/lua" -v | grep -q 'Lua 5\.4\.7'
+  local td
+  td="$(mktemp -d)"
+  cat > "$td/check.lua" <<'EOF'
+local co = coroutine.create(function(n)
+  local s = 0
+  for i = 1, n do s = s + i; coroutine.yield(s) end
+  return s
+end)
+local last = 0
+for _ = 1, 10 do
+  local ok, v = coroutine.resume(co, 10)
+  assert(ok)
+  last = v
+end
+assert(last == 55, "sum mismatch")
+collectgarbage("collect")
+local t = {}
+for i = 1, 2000 do t[i] = string.format("k%04d", i) end
+assert(#t == 2000 and t[2000] == "k2000")
+print("LUA_FILC_OK")
+EOF
+  "$PIZFIX/bin/lua" "$td/check.lua" | grep -Fxq 'LUA_FILC_OK'
+  "$PIZFIX/bin/luac" -o "$td/check.luac" "$td/check.lua"
+  "$PIZFIX/bin/lua" "$td/check.luac" | grep -Fxq 'LUA_FILC_OK'
+  rm -rf "$td"
+}

@@ -1,0 +1,41 @@
+NAME="attr"
+VERSION="2.6.0"
+LICENSE="LGPL-2.1-or-later"
+UPSTREAM_URL="https://download.savannah.nongnu.org/releases/attr/attr-2.6.0.tar.gz"
+UPSTREAM_SHA256="d42fa374513180bb48cb11a46696f488240e5124ff1e6ad88b0abff706985612"
+UPSTREAM_SHA256_SOURCE="pgp:https://download.savannah.nongnu.org/releases/attr/attr-2.6.0.tar.gz.sig key:ports/pgp-keys/gnu-gruenbacher-release-key.asc fpr:259B3792B3D6D319212CC4DCD5BF9FEB0313653A"
+UPSTREAM_SIG_URL="https://download.savannah.nongnu.org/releases/attr/attr-2.6.0.tar.gz.sig"
+UPSTREAM_PGP_KEY="ports/pgp-keys/gnu-gruenbacher-release-key.asc"
+UPSTREAM_PGP_FPR="259B3792B3D6D319212CC4DCD5BF9FEB0313653A"
+EXTRACT_DIR="attr-2.6.0"
+TIER=1
+DEPS="pkgconf"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--disable-static"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P0-Clean"
+POLICY_RATIONALE="Builds unmodified upstream attr 2.6.0 (0 patches): P1 llvm/06b eliminates Fil-C's -Wl,--version-script Makefile.in workaround."
+FILC_ORIGIN_REF="cede3de02b42:projects/attr.projeny"
+
+port_test() {
+  "$PIZFIX/bin/getfattr" --version | grep -q 'getfattr 2\.6\.0'
+  "$PIZFIX/bin/setfattr" --version | grep -q 'setfattr 2\.6\.0'
+  "$PIZFIX/bin/pkg-config" --exists libattr
+  local td
+  td="$(mktemp -d)"
+  cat > "$td/t.c" <<'EOF'
+#include <attr/libattr.h>
+#include <stdio.h>
+int main(void) {
+    const char *q = attr_quote("hello world");
+    if (!q) return 1;
+    puts(q);
+    return 0;
+}
+EOF
+  "$CC" -O2 -I"$PIZFIX/include" "$td/t.c" -L"$PIZFIX/lib" -lattr -o "$td/t"
+  "$td/t" | grep -q 'hello'
+  rm -rf "$td"
+}

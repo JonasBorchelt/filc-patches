@@ -1,0 +1,24 @@
+NAME="gmp"
+VERSION="6.3.0"
+LICENSE="LGPL-3.0-or-later"
+UPSTREAM_URL="https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz"
+UPSTREAM_SHA256="a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898"
+UPSTREAM_SHA256_SOURCE="pgp:https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz.sig key:ports/pgp-keys/gmp-moeller-release-key.asc fpr:343C2FF0FBEE5EC2EDBEF399F3599FF828C67298"
+UPSTREAM_SIG_URL="https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz.sig"
+UPSTREAM_PGP_KEY="ports/pgp-keys/gmp-moeller-release-key.asc"
+UPSTREAM_PGP_FPR="343C2FF0FBEE5EC2EDBEF399F3599FF828C67298"
+EXTRACT_DIR="gmp-6.3.0"
+TIER=1
+DEPS=""
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--enable-cxx --disable-static --disable-assembly"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P2-Package"
+POLICY_RATIONALE="Uses --disable-assembly plus a 4-line configure patch to disable x86_64/x32 cyclecounter assembly objects still selected under --disable-assembly."
+FILC_ORIGIN_REF="1e8b2b9d:projects/gmp-6.3.0/configure"
+
+port_test() {
+  make -j"$JOBS" check
+}

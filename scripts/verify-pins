@@ -38,9 +38,10 @@ import tempfile
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 FPR_RE = re.compile(r"^[0-9A-F]{40}$")
-DIRECT_SCHEMES = ("sha256:", "pgp:")
+DIRECT_SCHEMES = ("sha256:", "sha256-html:", "pgp:")
 VERIFIABLE_SCHEMES = (
     "sha256:",
+    "sha256-html:",
     "pgp:",
     "github-release-digest:",
     "upstream-sha512-only:",
@@ -425,12 +426,26 @@ def verify_port_online(name: str, meta: dict, repo_root: str, cache_dir: str, st
             )
         return f"OK [github-release-digest] {name} {meta['VERSION']} ({expected[:12]}...)"
 
+    if src.startswith("sha256-html:"):
+        url = src[len("sha256-html:") :]
+        txt = curl_bytes(url).decode("utf-8", errors="replace")
+        m_row = re.search(rf"{re.escape(filename)}.*?(?:</tr|</tr>|\n\n)", txt, re.S | re.I)
+        if not m_row:
+            raise RuntimeError(f"could not find row for {filename!r} in {url}")
+        hashes = re.findall(r"\b([0-9a-fA-F]{64})\b", m_row.group(0))
+        if not hashes:
+            raise RuntimeError(f"could not find 64-hex SHA-256 for {filename!r} in {url}")
+        got = hashes[0].lower()
+        if got != expected:
+            raise RuntimeError(f"upstream HTML checksum mismatch from {url}: PORT={expected}, upstream={got}")
+        return f"OK [sha256-html] {name} {meta['VERSION']} ({expected[:12]}...)"
+
     if src.startswith("upstream-sha512-only:"):
         url = src[len("upstream-sha512-only:") :]
         txt = curl_bytes(url).decode("utf-8", errors="replace")
         upstream_sha512 = None
         for line in txt.splitlines():
-            m = re.match(r"^([0-9a-fA-F]{128})\s+\*?(.+)$", line.strip())
+            m = re.match(r"^([0-9a-fA-F]{128})\s+(?:\d+\s+)?\*?(.+)$", line.strip())
             if m and os.path.basename(m.group(2).strip()) == filename:
                 upstream_sha512 = m.group(1).lower()
                 break

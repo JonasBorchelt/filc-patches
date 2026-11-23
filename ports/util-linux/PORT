@@ -1,0 +1,34 @@
+NAME="util-linux"
+VERSION="2.42.4"
+LICENSE="GPL-2.0-or-later"
+UPSTREAM_URL="https://www.kernel.org/pub/linux/utils/util-linux/v2.42/util-linux-2.42.4.tar.xz"
+UPSTREAM_SHA256="fbd62a100ab7bb8746ba0661255c3c48185b1e9021507c624da01fbc696330ec"
+UPSTREAM_SHA256_SOURCE="sha256:https://www.kernel.org/pub/linux/utils/util-linux/v2.42/sha256sums.asc"
+EXTRACT_DIR="util-linux-2.42.4"
+TIER=4
+DEPS="ncurses zlib pkgconf"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--disable-chfn-chsh --disable-login --disable-nologin --disable-su --disable-setpriv --disable-runuser --disable-pylibmount --disable-liblastlog2 --disable-static --without-python --without-systemd --without-systemdsystemunitdir --disable-makeinstall-chown --disable-makeinstall-setuid --disable-asciidoc --disable-poman"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P2-Package"
+POLICY_RATIONALE="Audited down from Fil-C util-linux.projeny (3 files, +19/-11) to 1 file (+2/-1): P1 llvm/06b eliminates all -Wl,--version-script hunks in Makefile.in/configure, leaving only the capability-safe fsopen(\"\", ...) probe in libmount/src/hook_mount.c."
+FILC_ORIGIN_REF="cede3de02b42:projects/util-linux.projeny"
+
+port_configure() {
+  CPPFLAGS="-I$PIZFIX/include -I$PIZFIX/include/ncurses" \
+    LDFLAGS="-L$PIZFIX/lib" \
+    PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" \
+    ./configure --prefix="$PIZFIX" $CONFIGURE_ARGS
+}
+
+port_test() {
+  "$PIZFIX/bin/uuidgen" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+  printf 'filc\n' | "$PIZFIX/bin/rev" | grep -Fxq 'clif'
+  local td
+  td="$(mktemp -d)"
+  "$PIZFIX/bin/flock" "$td/lock" "$PIZFIX/bin/rev" <<< 'ok' | grep -Fxq 'ko'
+  "$PIZFIX/sbin/blkid" -V | grep -q '2\.42\.4'
+  rm -rf "$td"
+}

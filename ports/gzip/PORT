@@ -1,0 +1,32 @@
+NAME="gzip"
+VERSION="1.15"
+LICENSE="GPL-3.0-or-later"
+UPSTREAM_URL="https://ftp.gnu.org/gnu/gzip/gzip-1.15.tar.gz"
+UPSTREAM_SHA256="545886cf57fa88a65e967fbf705903d7fcb2567c82c7342493e82e8d7b1a210b"
+UPSTREAM_SHA256_SOURCE="pgp:https://ftp.gnu.org/gnu/gzip/gzip-1.15.tar.gz.sig key:ports/pgp-keys/gnu-meyering-release-key.asc fpr:155D3FC500C834486D1EEA677FD9FCCB000BEEEE"
+UPSTREAM_SIG_URL="https://ftp.gnu.org/gnu/gzip/gzip-1.15.tar.gz.sig"
+UPSTREAM_PGP_KEY="ports/pgp-keys/gnu-meyering-release-key.asc"
+UPSTREAM_PGP_FPR="155D3FC500C834486D1EEA677FD9FCCB000BEEEE"
+EXTRACT_DIR="gzip-1.15"
+TIER=4
+DEPS=""
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS=""
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P2-Package"
+POLICY_RATIONALE="Single-hunk patch includes <signal.h> before gzip.h to avoid head macro collision with kernel sigcontext headers."
+FILC_ORIGIN_REF="cede3de02b42:projects/gzip.projeny"
+
+port_test() {
+  "$PIZFIX/bin/gzip" --version | grep -q 'gzip 1\.15'
+  local td
+  td="$(mktemp -d)"
+  seq 1 5000 > "$td/in.txt"
+  "$PIZFIX/bin/gzip" -9 -c "$td/in.txt" > "$td/in.txt.gz"
+  "$PIZFIX/bin/gzip" -t "$td/in.txt.gz"
+  "$PIZFIX/bin/gzip" -d -c "$td/in.txt.gz" > "$td/out.txt"
+  cmp -s "$td/in.txt" "$td/out.txt"
+  rm -rf "$td"
+}

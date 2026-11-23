@@ -13,8 +13,22 @@ ORIG_FILC_PORTS="${FILC_PORTS:-}"
 unset FILC_PORTS
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
+trap 'rc=$?; echo "FAIL: test-ports aborted at line ${LINENO} (rc=${rc}): ${BASH_COMMAND}" >&2' ERR
 export FILC_PORTS_CACHE_DIR="$TMP_DIR/cache"
 mkdir -p "$FILC_PORTS_CACHE_DIR"
+
+assert_grep() {
+  local mode="$1" pattern="$2" file="$3" desc="$4"
+  if ! grep "$mode" -- "$pattern" "$file"; then
+    echo "FAIL: ${desc}: expected pattern '${pattern}' not found in ${file}" >&2
+    if [[ -f "$file" ]]; then
+      echo "--- ${file} (last 40 lines) ---" >&2
+      tail -n 40 "$file" >&2 || true
+      echo "--- end ${file} ---" >&2
+    fi
+    exit 1
+  fi
+}
 
 echo "=== 1. Real ports/ DAG & recipe dry-run validation ==="
 "$REPO_ROOT/scripts/build-ports" --wave 1 --dry-run
@@ -68,8 +82,9 @@ EOF
 # Verify persistent metadata cache reuse after source file is removed
 rm -f "$TMP_DIR/good.sha256"
 CACHE_OUT="$("$REPO_ROOT/scripts/verify-pins" --ports-dir "$PIN_TEST_DIR" --cache-dir "$TMP_DIR/pin-cache" goodpin)"
-printf '%s\n' "$CACHE_OUT"
-printf '%s\n' "$CACHE_OUT" | grep -Fq "cached, verified"
+printf '%s\n' "$CACHE_OUT" > "$TMP_DIR/pin-cache.out"
+cat "$TMP_DIR/pin-cache.out"
+assert_grep -Fq "cached, verified" "$TMP_DIR/pin-cache.out" "verify-pins persistent cache reuse"
 # Restore source for badpin mismatch test and test rolling-index refresh + FILC_PORTS scoping
 printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  good-1.0.tar.gz\n' > "$TMP_DIR/good.sha256"
 if "$REPO_ROOT/scripts/verify-pins" --ports-dir "$PIN_TEST_DIR" --cache-dir "$TMP_DIR/pin-cache" badpin 2>/dev/null; then
@@ -488,32 +503,38 @@ port_install()   { :; }
 port_test()      { :; }
 EOF
 
-set +e
-PATH="$FAKE_BIN:$PATH" FILC_TOOLCHAIN_ROOT="$FN_TC" \
-  "$REPO_ROOT/scripts/build-ports" --ports-dir "$FN_DIR" "$FN_WORK" >"$TMP_DIR/fn.out" 2>"$TMP_DIR/fn.err"
-FN_RC=$?
-set -e
-if [[ $FN_RC -eq 0 ]]; then
-  echo "FAIL: expected non-zero exit when fn-pkg-fail/fn-cfg-fail fail" >&2
-  exit 1
-fi
-grep -q "MOCK_CONFIG_LOG_ERR: libfoo not found" "$TMP_DIR/fn.err"
-grep -q "STAGE_CMD_FAILED port=fn-pkg-fail stage=test fn=port_test" "$TMP_DIR/fn.err"
-grep -q "+ \[port_test:" "$TMP_DIR/fn.err"
+for PAR_MODE in 1 4; do
+  FN_WORK_MODE="${FN_WORK}-p${PAR_MODE}"
+  FN_OUT="$TMP_DIR/fn-p${PAR_MODE}.out"
+  FN_ERR="$TMP_DIR/fn-p${PAR_MODE}.err"
+  set +e
+  PATH="$FAKE_BIN:$PATH" FILC_TOOLCHAIN_ROOT="$FN_TC" \
+    "$REPO_ROOT/scripts/build-ports" --parallel "$PAR_MODE" --ports-dir "$FN_DIR" "$FN_WORK_MODE" >"$FN_OUT" 2>"$FN_ERR"
+  FN_RC=$?
+  set -e
+  if [[ $FN_RC -eq 0 ]]; then
+    echo "FAIL (parallel=${PAR_MODE}): expected non-zero exit when fn-pkg-fail/fn-cfg-fail fail" >&2
+    exit 1
+  fi
+  assert_grep -q "MOCK_CONFIG_LOG_ERR: libfoo not found" "$FN_ERR" "section 6 (parallel=${PAR_MODE}) config.log dump on stderr"
+  assert_grep -q "STAGE_CMD_FAILED port=fn-pkg-fail stage=test fn=port_test" "$FN_ERR" "section 6 (parallel=${PAR_MODE}) STAGE_CMD_FAILED on stderr"
+  assert_grep -q "+ \[port_test:" "$FN_ERR" "section 6 (parallel=${PAR_MODE}) port_test trace on stderr"
 
-python3 - "$FN_WORK/ports-report.json" "$FN_WORK/ports-report.txt" <<'PY'
+  python3 - "$FN_WORK_MODE/ports-report.json" "$FN_WORK_MODE/ports-report.txt" "$PAR_MODE" <<'PY'
 import json, sys
 rep = json.load(open(sys.argv[1]))
 txt = open(sys.argv[2]).read()
+mode = sys.argv[3]
 by_name = {p["name"]: p for p in rep["ports"]}
-assert rep["tested"] == 1 and rep["failed"] == 2 and rep["failed_package"] == 2 and rep["failed_runner"] == 0, rep
-assert by_name["fn-ok"]["status"] == "tested", by_name["fn-ok"]
-assert by_name["fn-pkg-fail"]["status"] == "failed" and by_name["fn-pkg-fail"]["failed_kind"] == "package" and by_name["fn-pkg-fail"]["failed_stage"] == "test", by_name["fn-pkg-fail"]
-assert by_name["fn-cfg-fail"]["status"] == "failed" and by_name["fn-cfg-fail"]["failed_kind"] == "package" and by_name["fn-cfg-fail"]["failed_stage"] == "configure", by_name["fn-cfg-fail"]
-assert "PORTS_FAILED=2 (runner=0, package=2)" in txt, txt
-assert "failed:package(test)" in txt and "failed:package(configure)" in txt, txt
-print("CUSTOM RECIPE FUNCTIONS UNDER TIMEOUT, CONFIG.LOG DUMP, TEST TRACE & FAILED_KIND CHECKS OK")
+assert rep["tested"] == 1 and rep["failed"] == 2 and rep["failed_package"] == 2 and rep["failed_runner"] == 0, (mode, rep)
+assert by_name["fn-ok"]["status"] == "tested", (mode, by_name["fn-ok"])
+assert by_name["fn-pkg-fail"]["status"] == "failed" and by_name["fn-pkg-fail"]["failed_kind"] == "package" and by_name["fn-pkg-fail"]["failed_stage"] == "test", (mode, by_name["fn-pkg-fail"])
+assert by_name["fn-cfg-fail"]["status"] == "failed" and by_name["fn-cfg-fail"]["failed_kind"] == "package" and by_name["fn-cfg-fail"]["failed_stage"] == "configure", (mode, by_name["fn-cfg-fail"])
+assert "PORTS_FAILED=2 (runner=0, package=2)" in txt, (mode, txt)
+assert "failed:package(test)" in txt and "failed:package(configure)" in txt, (mode, txt)
+print(f"CUSTOM RECIPE FUNCTIONS UNDER TIMEOUT, CONFIG.LOG DUMP, TEST TRACE & FAILED_KIND CHECKS OK (parallel={mode})")
 PY
+done
 
 echo "=== 7. --ports and FILC_PORTS subset selection test (openssh -> 8 ports) ==="
 SUB_WORK_CLI="$TMP_DIR/sub-work-cli"

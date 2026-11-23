@@ -407,11 +407,12 @@ def run_parallel_dag(ports, selected, order, opts, work_root, state_dir, paralle
     end
 
     if rec["status"] == "failed"
-      $stdout.puts("=== FAILED PORT LOG: #{name} (last 120 lines; full log: #{log_file}) ===")
+      $stderr.puts("=== FAILED PORT LOG: #{name} (last 120 lines; full log: #{log_file}) ===")
       tail = log_lines.length > 120 ? log_lines[-120..] : log_lines
-      tail.each { |l| $stdout.write(l) }
-      $stdout.puts("") if !tail.empty? && !tail.last.end_with?("\n")
-      $stdout.puts("=== END FAILED PORT LOG: #{name} ===")
+      tail.each { |l| $stderr.write(l) }
+      $stderr.puts("") if !tail.empty? && !tail.last.end_with?("\n")
+      $stderr.puts("=== END FAILED PORT LOG: #{name} ===")
+      $stderr.flush
     end
 
     build_sec_lines.each { |l| $stdout.write(l) }

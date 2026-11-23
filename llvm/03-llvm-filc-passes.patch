@@ -134,6 +134,7 @@ Rebase-Notes (llvmorg-21.1.8 -> llvmorg-22.1.8):
 Rebase-Notes (llvmorg-22.1.8 -> llvmorg-23.1.6):
   - RegisterFilPasses.{h,cpp}: adapted to LLVM 23 enum class OptimizationLevel (#include OptimizationLevel.h, getInlineParamsFromOptLevel(static_cast<unsigned>(Level))).
   - FilPizlonator.cpp: concatenated Module::getModuleInlineAsm() GlobalAsmFragment list into std::string for MATokenizer.
+  - FilPizlonator.cpp: updated lowerIndirectBrForFunction and lowerIndirectBr to use BlockAddress::lookup(&BB) because LLVM 23 BlockAddress has 0 operands and no longer appears in BB.uses() or F.users().
 
 ---
 diff --git a/llvm/include/llvm/Passes/RegisterFilPasses.h b/llvm/include/llvm/Passes/RegisterFilPasses.h
@@ -754,7 +755,7 @@ new file mode 100644
 index 000000000..742829f22
 --- /dev/null
 +++ b/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp
-@@ -0,0 +1,17705 @@
+@@ -0,0 +1,17693 @@
 +//===- FilPizlonator.cpp - apply GIMSO semantics to LLVM IR ---------------===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -15313,23 +15314,11 @@ index 000000000..742829f22
 +      if (!IndirectBrSuccs.count(&BB))
 +        continue;
 +
-+      auto IsBlockAddressUse = [&](const Use &U) {
-+        return isa<BlockAddress>(U.getUser());
-+      };
-+      auto BlockAddressUseIt = llvm::find_if(BB.uses(), IsBlockAddressUse);
-+      if (BlockAddressUseIt == BB.use_end())
-+        continue;
-+
-+      assert(std::find_if(std::next(BlockAddressUseIt), BB.use_end(),
-+                          IsBlockAddressUse) == BB.use_end() &&
-+             "There should only ever be a single blockaddress use because it is "
-+             "a constant and should be uniqued.");
-+
-+      auto *BA = cast<BlockAddress>(BlockAddressUseIt->getUser());
++      auto *BA = BlockAddress::lookup(&BB);
 +
 +      // Skip if the constant was formed but ended up not being used (due to DCE
 +      // or whatever).
-+      if (!BA->isConstantUsed())
++      if (!BA || !BA->isConstantUsed())
 +        continue;
 +
 +      // Compute the index we want to use for this basic block. We can't use zero
@@ -15411,8 +15400,8 @@ index 000000000..742829f22
 +    std::vector<BlockAddress*> ToDelete;
 +    for (Function& F : M.functions()) {
 +      lowerIndirectBrForFunction(F);
-+      for (Value* User : F.users()) {
-+        if (BlockAddress* BA = dyn_cast<BlockAddress>(User))
++      for (BasicBlock& BB : F) {
++        if (BlockAddress* BA = BlockAddress::lookup(&BB))
 +          ToDelete.push_back(BA);
 +      }
 +    }

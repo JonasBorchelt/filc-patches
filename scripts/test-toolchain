@@ -161,6 +161,34 @@ int main(void) {
 }
 EOF
 
+cat > "$TEST_DIR/indirectbr_test.c" <<'EOF'
+#include <stdio.h>
+
+__attribute__((noinline))
+static int run_vm(const unsigned char *code, int x) {
+    static const void *const disptab[3] = { &&op_add, &&op_sub, &&op_ret };
+    const unsigned char *pc = code;
+    goto *disptab[*pc++];
+op_add:
+    x += 3;
+    goto *disptab[*pc++];
+op_sub:
+    x -= 1;
+    goto *disptab[*pc++];
+op_ret:
+    return x;
+}
+
+int main(void) {
+    static const unsigned char prog1[] = { 0, 0, 1, 0, 2 };
+    static const unsigned char prog2[] = { 1, 1, 0, 1, 2 };
+    int r1 = run_vm(prog1, 10);
+    int r2 = run_vm(prog2, 20);
+    printf("INDIRECTBR_OK: %d %d\n", r1, r2);
+    return (r1 == 18 && r2 == 20) ? 0 : 1;
+}
+EOF
+
 # ---------------------------------------------------------------------------
 # Compile & link all test binaries
 # ---------------------------------------------------------------------------
@@ -184,6 +212,8 @@ echo "FILC_PHASE tests running"
 "$CLANG" -O2 -Wa,--noexecstack -Wa,--noexecstack,--compress-debug-sections=zlib \
   "$TEST_DIR/hello_world.c" -o "$TEST_DIR/hello_wa"
 printf '/* empty asm for -Wa driver check */\n' > "$TEST_DIR/wa_test.S"
+"$CLANG" -O0 -Wall -Wextra -Werror "$TEST_DIR/indirectbr_test.c" -o "$TEST_DIR/indirectbr_o0"
+"$CLANG" -O2 -Wall -Wextra -Werror "$TEST_DIR/indirectbr_test.c" -o "$TEST_DIR/indirectbr_o2"
 
 # ---------------------------------------------------------------------------
 # Execute tests and verify expectations
@@ -346,6 +376,20 @@ else
   FAILURES=$((FAILURES + 1))
 fi
 
+echo "=== Running (f) Computed-Goto (indirectbr / BlockAddress) Regression ==="
+run_and_capture indirectbr_o0 "$TEST_DIR/indirectbr_o0"
+run_and_capture indirectbr_o2 "$TEST_DIR/indirectbr_o2"
+RC_IBR_O0="$(cat "$TEST_DIR/indirectbr_o0.rc")"
+RC_IBR_O2="$(cat "$TEST_DIR/indirectbr_o2.rc")"
+if [[ "$RC_IBR_O0" -eq 0 && "$RC_IBR_O2" -eq 0 ]] \
+  && grep -Fxq "INDIRECTBR_OK: 18 20" "$TEST_DIR/indirectbr_o0.stdout" \
+  && grep -Fxq "INDIRECTBR_OK: 18 20" "$TEST_DIR/indirectbr_o2.stdout"; then
+  STATUS_INDIRECTBR="PASS"
+else
+  STATUS_INDIRECTBR="FAIL"
+  FAILURES=$((FAILURES + 1))
+fi
+
 OVERALL_STATUS="PASS"
 if (( FAILURES > 0 )); then
   OVERALL_STATUS="FAIL"
@@ -438,6 +482,13 @@ ARCH="$(uname -m)"
   echo ""
   echo "--- TEST (e) SAFE -Wa ASSEMBLER FLAGS [$STATUS_WAFLAGS] ---"
   echo "EXIT_CODE_WA_C: $RC_WA_C  WA_OK: $WA_OK"
+  echo ""
+  echo "--- TEST (f) COMPUTED-GOTO INDIRECTBR [$STATUS_INDIRECTBR] ---"
+  echo "EXIT_CODE_O0: $RC_IBR_O0  EXIT_CODE_O2: $RC_IBR_O2"
+  echo "STDOUT_O0:"
+  sed 's/^/  | /' "$TEST_DIR/indirectbr_o0.stdout"
+  echo "STDOUT_O2:"
+  sed 's/^/  | /' "$TEST_DIR/indirectbr_o2.stdout"
   echo "================================================================================"
 } > "$REPORT_FILE"
 

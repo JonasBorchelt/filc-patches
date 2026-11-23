@@ -1,0 +1,83 @@
+Subject: Add ODR-safe FILC_ENABLE_PASS_ASSERTIONS option for Fil-C LLVM passes
+Upstream-Base: llvmorg-23.1.6 (5b10d2d74929eae78912771222c9855af97496f4)
+Fil-C-Head: cede3de02b42b58a14acc9ce39c9894ab952a915 (branch deluge)
+
+Adds the CMake option FILC_ENABLE_PASS_ASSERTIONS (default OFF) which defines
+FILC_PASS_ASSERTIONS=1 only for FilPizlonator.cpp and KillUB.cpp. After all
+LLVM/system headers are included, assert() in those two translation units
+redirects to FILC_ASSERT() using llvm::report_fatal_error(), keeping all 515
+internal Fil-C pass invariants active in Release builds without undefining
+NDEBUG or risking ODR mismatches against LLVM headers.
+
+---
+diff --git a/llvm/lib/Transforms/Instrumentation/CMakeLists.txt b/llvm/lib/Transforms/Instrumentation/CMakeLists.txt
+index 0a4155bd2..6be9e10e6 100644
+--- a/llvm/lib/Transforms/Instrumentation/CMakeLists.txt
++++ b/llvm/lib/Transforms/Instrumentation/CMakeLists.txt
+@@ -47,3 +47,14 @@ add_llvm_component_library(LLVMInstrumentation
+   TransformUtils
+   ProfileData
+   )
++
++option(FILC_ENABLE_PASS_ASSERTIONS
++  "Keep internal assertions active in Fil-C instrumentation passes even when LLVM_ENABLE_ASSERTIONS=OFF"
++  OFF)
++if(FILC_ENABLE_PASS_ASSERTIONS)
++  set_source_files_properties(
++    FilPizlonator.cpp
++    KillUB.cpp
++    PROPERTIES COMPILE_DEFINITIONS "FILC_PASS_ASSERTIONS=1"
++  )
++endif()
+diff --git a/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp b/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp
+index 12e4fa157..6302a5129 100644
+--- a/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp
++++ b/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp
+@@ -36,6 +36,21 @@
+ #include <cctype>
+ #include <climits>
+ #include <cstdlib>
++#include <llvm/Support/Compiler.h>
++#include <llvm/Support/ErrorHandling.h>
++#ifdef FILC_PASS_ASSERTIONS
++#define FILC_ASSERT_STR_IMPL(x) #x
++#define FILC_ASSERT_STR(x) FILC_ASSERT_STR_IMPL(x)
++#define FILC_ASSERT(expr)                                                      \
++  do {                                                                         \
++    if (LLVM_UNLIKELY(!(expr)))                                                \
++      ::llvm::report_fatal_error(                                              \
++          "Fil-C pass assertion failed: " #expr " (" __FILE__ ":"              \
++          FILC_ASSERT_STR(__LINE__) ")");                                      \
++  } while (0)
++#undef assert
++#define assert(expr) FILC_ASSERT(expr)
++#endif
+ 
+ using namespace llvm;
+ 
+diff --git a/llvm/lib/Transforms/Instrumentation/KillUB.cpp b/llvm/lib/Transforms/Instrumentation/KillUB.cpp
+index 2a0f489e6..555e5c471 100644
+--- a/llvm/lib/Transforms/Instrumentation/KillUB.cpp
++++ b/llvm/lib/Transforms/Instrumentation/KillUB.cpp
+@@ -19,6 +19,21 @@
+ #include <llvm/IR/Operator.h>
+ #include <llvm/IR/Instructions.h>
+ #include <vector>
++#include <llvm/Support/Compiler.h>
++#include <llvm/Support/ErrorHandling.h>
++#ifdef FILC_PASS_ASSERTIONS
++#define FILC_ASSERT_STR_IMPL(x) #x
++#define FILC_ASSERT_STR(x) FILC_ASSERT_STR_IMPL(x)
++#define FILC_ASSERT(expr)                                                      \
++  do {                                                                         \
++    if (LLVM_UNLIKELY(!(expr)))                                                \
++      ::llvm::report_fatal_error(                                              \
++          "Fil-C pass assertion failed: " #expr " (" __FILE__ ":"              \
++          FILC_ASSERT_STR(__LINE__) ")");                                      \
++  } while (0)
++#undef assert
++#define assert(expr) FILC_ASSERT(expr)
++#endif
+ 
+ using namespace llvm;
+ 

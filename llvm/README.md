@@ -16,6 +16,7 @@ Applied by default via `scripts/apply`:
 7. `06b-clang-driver-wl-version-script.patch`: Rewrites `-Wl,--version-script=` and `-Wl,--version-script,` through `PizlonateVersionScript()` in the Linux Clang driver.
 8. `06c-clang-driver-sarcasm-safe-wa-flags.patch`: Accepts safe no-op assembler metadata flags (`-Wa,--noexecstack`, `-Wa,--generate-missing-build-notes={yes,no}`, `-Wa,-mrelax-relocations={yes,no}`, `-Wa,--compress-debug-sections[=...]`) in `SarcasmAs` while still rejecting unsafe flags.
 9. `07-filc-hardened-compile-diagnostics.patch`: Rejects `__builtin_setjmp`/`__builtin_longjmp` cleanly in Clang Sema and replaces all user-input-reachable `llvm_unreachable`/`assert` sites in `FilPizlonator`, `CGRecordLayoutBuilder`, and `Gnu.cpp` with `report_fatal_error(..., /*GenCrashDiag=*/false)` so Release builds (`LLVM_ENABLE_ASSERTIONS=OFF`) never turn unsupported constructs into compiler UB.
+10. `08-filc-pass-assertions-option.patch`: Adds CMake option `FILC_ENABLE_PASS_ASSERTIONS` that activates ODR-safe `FILC_ASSERT` checks for all 515 internal `assert(...)` invariants in `FilPizlonator.cpp` and `KillUB.cpp` without undefining `NDEBUG` across LLVM headers.
 
 ## Optional (`llvm/series.optional`)
 

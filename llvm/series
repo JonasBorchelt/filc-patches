@@ -8,3 +8,4 @@
 06b-clang-driver-wl-version-script.patch
 06c-clang-driver-sarcasm-safe-wa-flags.patch
 07-filc-hardened-compile-diagnostics.patch
+08-filc-pass-assertions-option.patch

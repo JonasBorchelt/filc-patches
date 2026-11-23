@@ -274,9 +274,9 @@ echo "VERIFY-PATCHES UNIT TESTS OK"
 
 PATCH_CACHE_DIR="${ORIG_CACHE_DIR:-$REPO_ROOT/.work/ports/ports-cache}"
 PATCH_PORTS_FILTER="${FILC_TEST_VERIFY_PATCHES_PORTS:-$ORIG_FILC_PORTS}"
-if [[ -n "$PATCH_PORTS_FILTER" && "${FILC_TEST_OFFLINE:-0}" == "1" ]]; then
+if [[ -n "${PATCH_PORTS_FILTER//[[:space:],]/}" && "${FILC_TEST_OFFLINE:-0}" == "1" ]]; then
   "$REPO_ROOT/scripts/verify-patches" --cached-only --with-deps --cache-dir "$PATCH_CACHE_DIR" --ports "$PATCH_PORTS_FILTER"
-elif [[ -n "$PATCH_PORTS_FILTER" ]]; then
+elif [[ -n "${PATCH_PORTS_FILTER//[[:space:],]/}" ]]; then
   "$REPO_ROOT/scripts/verify-patches" --with-deps --cache-dir "$PATCH_CACHE_DIR" --ports "$PATCH_PORTS_FILTER"
 elif [[ "${FILC_TEST_OFFLINE:-0}" == "1" ]]; then
   "$REPO_ROOT/scripts/verify-patches" --cached-only --cache-dir "$PATCH_CACHE_DIR" --all
@@ -561,6 +561,75 @@ for jpath, tpath in ((sys.argv[1], sys.argv[2]), (sys.argv[3], sys.argv[4])):
     assert names == expected, (names, expected)
     assert "PORTS_TOTAL=8" in txt and "PORTS_TESTED=8" in txt, txt
 print("SUBSET SELECTION (--ports openssh AND FILC_PORTS=openssh -> 8 PORTS) OK")
+PY
+
+echo "=== 8. Uniform FILC_PORTS / --ports separator & deduplication tests ==="
+UNI_PORTS="$TMP_DIR/uni-ports"
+mkdir -p "$UNI_PORTS/a" "$UNI_PORTS/b"
+printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  a-1.0.tar.gz\n' > "$TMP_DIR/uni-a.sha256"
+printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  b-1.0.tar.gz\n' > "$TMP_DIR/uni-b.sha256"
+cat > "$UNI_PORTS/a/PORT" <<EOF
+NAME="a"
+VERSION="1.0"
+LICENSE="MIT"
+UPSTREAM_URL="https://example.invalid/a-1.0.tar.gz"
+UPSTREAM_SHA256="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+UPSTREAM_SHA256_SOURCE="sha256:file://$TMP_DIR/uni-a.sha256"
+EXTRACT_DIR="a-1.0"
+TIER=0
+DEPS=""
+BUILD_SYSTEM="make"
+POLICY_CLASS="P0-Clean"
+EOF
+cat > "$UNI_PORTS/b/PORT" <<EOF
+NAME="b"
+VERSION="1.0"
+LICENSE="MIT"
+UPSTREAM_URL="https://example.invalid/b-1.0.tar.gz"
+UPSTREAM_SHA256="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+UPSTREAM_SHA256_SOURCE="sha256:file://$TMP_DIR/uni-b.sha256"
+EXTRACT_DIR="b-1.0"
+TIER=0
+DEPS=""
+BUILD_SYSTEM="make"
+POLICY_CLASS="P0-Clean"
+EOF
+
+UNI_IDX=0
+for SPEC in "a b" "a,b" "a, b" "a, b a"; do
+  UNI_IDX=$((UNI_IDX + 1))
+  U_WORK="$TMP_DIR/uni-work-${UNI_IDX}"
+  U_ENV_WORK="$TMP_DIR/uni-env-work-${UNI_IDX}"
+  "$REPO_ROOT/scripts/build-ports" --ports-dir "$UNI_PORTS" --builder "$FAKE_BUILDER" --ports "$SPEC" "$U_WORK" > "$TMP_DIR/uni-bp-${UNI_IDX}.out"
+  FILC_PORTS="$SPEC" "$REPO_ROOT/scripts/build-ports" --ports-dir "$UNI_PORTS" --builder "$FAKE_BUILDER" "$U_ENV_WORK" > "$TMP_DIR/uni-bpenv-${UNI_IDX}.out"
+  assert_grep -Fq "FILC_PORTS_FILTER=a,b selected=2 (a,b)" "$TMP_DIR/uni-bp-${UNI_IDX}.out" "build-ports --ports '${SPEC}'"
+  assert_grep -Fq "FILC_PORTS_FILTER=a,b selected=2 (a,b)" "$TMP_DIR/uni-bpenv-${UNI_IDX}.out" "build-ports FILC_PORTS='${SPEC}'"
+
+  FILC_PORTS="$SPEC" "$REPO_ROOT/scripts/verify-pins" --ports-dir "$UNI_PORTS" --check-metadata-only --respect-filc-ports > "$TMP_DIR/uni-vppy-${UNI_IDX}.out"
+  FILC_PORTS="$SPEC" "$REPO_ROOT/scripts/verify-pins.rb" --ports-dir "$UNI_PORTS" --check-metadata-only --respect-filc-ports > "$TMP_DIR/uni-vprb-${UNI_IDX}.out"
+  assert_grep -Fq "verify-pins: FILC_PORTS=a,b -> closure=2, selected=2" "$TMP_DIR/uni-vppy-${UNI_IDX}.out" "verify-pins (py) FILC_PORTS='${SPEC}'"
+  assert_grep -Fq "verify-pins: FILC_PORTS=a,b -> closure=2, selected=2" "$TMP_DIR/uni-vprb-${UNI_IDX}.out" "verify-pins.rb FILC_PORTS='${SPEC}'"
+  diff -u "$TMP_DIR/uni-vppy-${UNI_IDX}.out" "$TMP_DIR/uni-vprb-${UNI_IDX}.out"
+
+  "$REPO_ROOT/scripts/verify-patches" --ports-dir "$UNI_PORTS" --with-deps --ports "$SPEC" > "$TMP_DIR/uni-vpat-${UNI_IDX}.out"
+  assert_grep -Fq "VERIFY_PATCHES: PASS (0 patched ports in selection)" "$TMP_DIR/uni-vpat-${UNI_IDX}.out" "verify-patches --ports '${SPEC}'"
+done
+
+UNI_RL_LOG="$TMP_DIR/uni-report-live.log"
+cat > "$UNI_RL_LOG" <<'EOF'
+FILC_PORTS_FILTER=a, b selected=2 (a, b a)
+FILC_PORTS_TOTAL 2
+FILC_PORT a tested policy=P0-Clean duration=1 patches=0
+FILC_PORT b tested policy=P0-Clean duration=1 patches=0
+EOF
+python3 "$REPO_ROOT/scripts/report-live" --workflow ports --phase progress --step build-and-test-ports --log "$UNI_RL_LOG" --dry-run --strict > "$TMP_DIR/uni-rl-py.json"
+ruby "$REPO_ROOT/scripts/report-live.rb" --workflow ports --phase progress --step build-and-test-ports --log "$UNI_RL_LOG" --dry-run --strict > "$TMP_DIR/uni-rl-rb.json"
+python3 - "$TMP_DIR/uni-rl-py.json" "$TMP_DIR/uni-rl-rb.json" <<'PY'
+import json, sys
+for path in sys.argv[1:]:
+    doc = json.load(open(path))
+    assert doc["progress"]["planned"] == ["a", "b"], (path, doc["progress"])
+print("UNIFORM FILC_PORTS PARSING TESTS OK")
 PY
 
 echo "ALL PORTS TESTS PASSED"

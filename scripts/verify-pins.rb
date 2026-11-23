@@ -700,6 +700,10 @@ def expand_with_deps(all_ports, initial_names)
   selected.keys.sort
 end
 
+def parse_port_list(raw)
+  raw.to_s.split(/[\s,]+/).reject(&:empty?).uniq
+end
+
 def main(argv)
   repo_root = File.expand_path("..", __dir__)
   options = {
@@ -753,18 +757,20 @@ def main(argv)
   end
 
   filc_ports_env = options[:respect_filc_ports] ? ENV.fetch("FILC_PORTS", "").strip : ""
+  filc_ports_list = filc_ports_env.empty? ? [] : parse_port_list(filc_ports_env)
+  pos_ports = positional.flat_map { |raw| parse_port_list(raw) }.uniq
 
   selected =
-    if !positional.empty?
-      positional.each do |p|
+    if !pos_ports.empty?
+      pos_ports.each do |p|
         unless all_ports.key?(p)
           warn "error: unknown port: #{p}"
           return 1
         end
       end
-      options[:with_deps] ? expand_with_deps(all_ports, positional) : positional.dup
-    elsif !filc_ports_env.empty?
-      wanted = filc_ports_env.split(",").map(&:strip).reject(&:empty?)
+      options[:with_deps] ? expand_with_deps(all_ports, pos_ports) : pos_ports.dup
+    elsif !filc_ports_list.empty?
+      wanted = filc_ports_list
       begin
         closure = expand_with_deps(all_ports, wanted)
       rescue ArgumentError => e
@@ -779,7 +785,7 @@ def main(argv)
             else
               closure
             end
-      $stdout.puts("verify-pins: FILC_PORTS=#{filc_ports_env} -> closure=#{closure.length}, selected=#{sel.length}")
+      $stdout.puts("verify-pins: FILC_PORTS=#{wanted.join(',')} -> closure=#{closure.length}, selected=#{sel.length}")
       $stdout.flush
       sel
     elsif options[:verifiable_direct]

@@ -643,6 +643,10 @@ def detect_changed_ports(repo_root: str, base_ref: str) -> list:
     return sorted(changed)
 
 
+def parse_port_list(raw: str) -> list:
+    return list(dict.fromkeys(p for p in re.split(r"[\s,]+", raw or "") if p))
+
+
 def expand_with_deps(all_ports: dict, initial_names: list) -> list:
     selected = set()
     stack = list(initial_names)
@@ -692,15 +696,17 @@ def main() -> int:
         return 1
 
     filc_ports_env = os.environ.get("FILC_PORTS", "").strip() if args.respect_filc_ports else ""
+    filc_ports_list = parse_port_list(filc_ports_env) if filc_ports_env else []
+    pos_ports = list(dict.fromkeys(p for raw in (args.ports or []) for p in parse_port_list(raw)))
 
-    if args.ports:
-        for p in args.ports:
+    if pos_ports:
+        for p in pos_ports:
             if p not in all_ports:
                 print(f"error: unknown port: {p}", file=sys.stderr)
                 return 1
-        selected = expand_with_deps(all_ports, args.ports) if args.with_deps else list(args.ports)
-    elif filc_ports_env:
-        wanted = [p.strip() for p in filc_ports_env.split(",") if p.strip()]
+        selected = expand_with_deps(all_ports, pos_ports) if args.with_deps else list(pos_ports)
+    elif filc_ports_list:
+        wanted = filc_ports_list
         try:
             closure = expand_with_deps(all_ports, wanted)
         except ValueError as exc:
@@ -715,7 +721,7 @@ def main() -> int:
         else:
             selected = closure
         print(
-            f"verify-pins: FILC_PORTS={filc_ports_env} -> closure={len(closure)}, selected={len(selected)}",
+            f"verify-pins: FILC_PORTS={','.join(wanted)} -> closure={len(closure)}, selected={len(selected)}",
             flush=True,
         )
     elif args.verifiable_direct:

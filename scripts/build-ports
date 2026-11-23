@@ -480,6 +480,10 @@ def run_parallel_dag(ports, selected, order, opts, work_root, state_dir, paralle
   results
 end
 
+def parse_port_list(raw)
+  raw.to_s.split(/[\s,]+/).reject(&:empty?).uniq
+end
+
 def main(argv)
   repo_root = File.expand_path("..", __dir__)
   opts = {
@@ -504,7 +508,7 @@ def main(argv)
       opts[:wave] = v
     end
     o.on("--tiers LIST", "Comma-separated tier numbers (e.g. 0,1)") { |v| opts[:tiers] = v }
-    o.on("--ports LIST", "Comma-separated port names (falls back to FILC_PORTS env var when unset)") { |v| opts[:ports] = v }
+    o.on("--ports LIST", "Comma- or whitespace-separated port names (falls back to FILC_PORTS env var when unset)") { |v| opts[:ports] = v }
     o.on("-j", "--parallel N", Integer, "Max concurrent port builds in DAG (default: FILC_PORTS_PARALLEL or 1)") do |v|
       raise OptionParser::InvalidArgument, "parallel must be >= 1" if v < 1
 
@@ -532,8 +536,9 @@ def main(argv)
     ports_spec = ENV.fetch("FILC_PORTS", "").strip
   end
 
-  wanted = if !ports_spec.empty?
-             ports_spec.split(",").map(&:strip).reject(&:empty?)
+  wanted_ports = parse_port_list(ports_spec)
+  wanted = if !wanted_ports.empty?
+             wanted_ports
            elsif !opts[:tiers].empty?
              tier_set = Set.new(opts[:tiers].split(",").map(&:strip).reject(&:empty?).map { |t| Integer(t, 10) })
              ports.select { |_n, m| tier_set.include?(m["tier"]) }.keys
@@ -575,8 +580,8 @@ def main(argv)
   parallel = opts[:parallel] || parse_positive_int(ENV["FILC_PORTS_PARALLEL"], 1, "FILC_PORTS_PARALLEL")
   t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
-  unless ports_spec.empty?
-    $stdout.puts("FILC_PORTS_FILTER=#{ports_spec} selected=#{order.length} (#{order.join(',')})")
+  unless wanted_ports.empty?
+    $stdout.puts("FILC_PORTS_FILTER=#{wanted_ports.join(',')} selected=#{order.length} (#{order.join(',')})")
     $stdout.flush
   end
   $stdout.puts("FILC_PORTS_TOTAL #{order.length}")

@@ -249,6 +249,10 @@ def expand_deps(all_ports, names)
   selected.to_a.sort
 end
 
+def parse_port_list(raw)
+  raw.to_s.split(/[\s,]+/).reject(&:empty?).uniq
+end
+
 def main(argv)
   repo_root = File.expand_path("..", __dir__)
   opts = {
@@ -263,7 +267,7 @@ def main(argv)
   parser = OptionParser.new do |o|
     o.banner = "Usage: verify-patches [--all | --ports a,b [--with-deps] | <port>...] [options]"
     o.on("--all", "Check all patched ports") { opts[:all] = true }
-    o.on("--ports LIST", "Comma-separated list of port names") { |v| opts[:ports] = v }
+    o.on("--ports LIST", "Comma- or whitespace-separated list of port names") { |v| opts[:ports] = v }
     o.on("--with-deps", "Include transitive dependencies of selected ports") { opts[:with_deps] = true }
     o.on("--cached-only", "Only verify ports whose tarball is already in cache") { opts[:cached_only] = true }
     o.on("--ports-dir DIR", "Ports directory") { |v| opts[:ports_dir] = v }
@@ -283,13 +287,9 @@ def main(argv)
     all_ports[entry] = parse_port_file(pfile) if File.file?(pfile)
   end
 
-  wanted = remaining.dup
-  unless opts[:ports].empty?
-    opts[:ports].split(",").each do |p|
-      s = p.strip
-      wanted << s unless s.empty?
-    end
-  end
+  wanted = remaining.flat_map { |raw| parse_port_list(raw) }
+  wanted.concat(parse_port_list(opts[:ports])) unless opts[:ports].empty?
+  wanted.uniq!
 
   selected = if !wanted.empty?
                if opts[:with_deps]

@@ -1,0 +1,78 @@
+NAME="perl"
+VERSION="5.40.5"
+LICENSE="Artistic-1.0-Perl OR GPL-1.0-or-later"
+UPSTREAM_URL="https://www.cpan.org/src/5.0/perl-5.40.5.tar.xz"
+UPSTREAM_SHA256="1fe6f825b487d26c35aa51a35f52fe494d4cfc77b8051f8b1ee3391bf0289bc6"
+UPSTREAM_SHA256_SOURCE="sha256:https://www.cpan.org/src/5.0/perl-5.40.5.tar.xz.sha256.txt"
+EXTRACT_DIR="perl-5.40.5"
+TIER=5
+DEPS=""
+BUILD_SYSTEM="custom"
+CONFIGURE_ARGS=""
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P4-Audit"
+POLICY_RATIONALE="Adopted from pinned Fil-C (cede3de02b42:projects/perl-5.40.0 + build_perl.sh), refreshed cleanly to latest 5.40.x security release 5.40.5 (0 fuzz, 0 offset), and decomposed into 3 thematic patches (20 files, +153/-84): (01) core zptrtable/rxres/repeatcpy, (02) XS typemaps and core extensions ptrtable routing, (03) doio.c DIR ptrtable and mg.c prctl pointer preservation. Configures with -Uusenm (compile-probe libc checks instead of nm/ar scanning of libc.so) and drops Fil-C ad-hoc fil-tests/ scripts in favor of the upstream Perl test suite (make test_harness) plus core module smoke checks."
+FILC_ORIGIN_REF="cede3de02b42:projects/perl-5.40.0"
+
+port_configure() {
+  local arch ar_bin nm_bin
+  arch="$(uname -m)"
+  ar_bin="$(command -v "$AR" || echo "$AR")"
+  nm_bin="$(command -v "$NM" || echo "$NM")"
+  sh ./Configure -des \
+    -Dcc="$CC" \
+    -Dar="$ar_bin" \
+    -Dnm="$nm_bin" \
+    -Uusenm \
+    -Doptimize="-O2 -g -fno-strict-aliasing -D_GNU_SOURCE" \
+    -Dprefix="$PIZFIX" \
+    -Dinstallprefix="$PIZFIX" \
+    -Dbin="$PIZFIX/bin" \
+    -Dprivlib="$PIZFIX/lib/perl5/5.40.5" \
+    -Darchlib="$PIZFIX/lib/perl5/5.40.5/${arch}-linux" \
+    -Dsiteprefix="$PIZFIX" \
+    -Dsitelib="$PIZFIX/lib/perl5/site_perl/5.40.5" \
+    -Dsitearch="$PIZFIX/lib/perl5/site_perl/5.40.5/${arch}-linux" \
+    -Dman1dir="$PIZFIX/share/man/man1" \
+    -Dman3dir="$PIZFIX/share/man/man3" \
+    -Dscriptdir="$PIZFIX/bin" \
+    -Dsitebin="$PIZFIX/bin" \
+    -Dsitescript="$PIZFIX/bin" \
+    -Dlibpth=' ' \
+    -Dglibpth=' ' \
+    -Dloclibpth=' ' \
+    -Dplibpth=' ' \
+    -Dlocincpth=' ' \
+    -Dusethreads \
+    -Dmyuname="linux" \
+    -Dcf_by="filc-ports" \
+    -Dcf_email="ports@example.invalid"
+}
+
+port_build() {
+  make -j"$JOBS"
+}
+
+port_install() {
+  make -j"$JOBS" install
+}
+
+port_test() {
+  local ver
+  ver="$("$PIZFIX/bin/perl" -e 'print "$^V\n"')"
+  echo "perl version: $ver"
+  test "$ver" = "v5.40.5"
+  "$PIZFIX/bin/perl" -Mthreads -Mthreads::shared -MStorable -MEncode -MCompress::Raw::Zlib -e '
+    my $t = threads->create(sub { return 21 * 2; });
+    die "threads" unless $t->join() == 42;
+    my $frozen = Storable::freeze({ k => [1, 2, 3] });
+    my $thawed = Storable::thaw($frozen);
+    die "storable" unless $thawed->{k}[2] == 3;
+    my $u = Encode::decode("UTF-8", "h\xc3\xa4llo");
+    die "encode" unless length($u) == 5;
+    print "PERL_FILC_SMOKE_OK\n";
+  ' | grep -Fxq 'PERL_FILC_SMOKE_OK'
+  TEST_JOBS="$JOBS" make test_harness
+}

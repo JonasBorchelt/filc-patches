@@ -1,0 +1,245 @@
+Subject: Use Fil-C zptrtable and pointer-typed rxres slots in Perl 5.40 core
+Policy-Class: P4-Audit
+Rationale: Adopted and decomposed from pinned Fil-C (cede3de02b42:projects/perl-5.40.0). Perl's core encodes raw C pointers (XS/builtin/regex-engine/SvIV pointers) into IV integers via PTR2IV/INT2PTR and stores pointers inside UV arrays in pp_ctl.c (rxres_save/restore/free). Under Fil-C InvisiCaps, pointer-to-integer-to-pointer round-trips strip capabilities; this patch adds Perl_xsub_ptrtable / builtin_ptrtable using zptrtable_encode/zptrtable_decode, preserves pointer types in rxres slots, and uses memcpy in Perl_repeatcpy.
+Upstream-Status: Fil-C-Specific
+Fil-C-Origin-Commits: b14fce6d8d8a
+
+--- a/perl.h
++++ b/perl.h
+@@ -1141,6 +1141,8 @@
+ #ifdef NEED_XLOCALE_H
+ #   include <xlocale.h>
+ #endif
++
++#include <stdfil.h>
+ 
+ /* Even if not using locales, this header should be #included so as to #define
+  * some symbols which avoid #ifdefs to get things to compile.  But make sure
+@@ -9207,6 +9209,8 @@
+ #  define PERL_STACK_REALIGN
+ #endif
+ 
++extern zptrtable* Perl_xsub_ptrtable;
++
+ /*
+ 
+    (KEEP THIS LAST IN perl.h!)
+--- a/perl.c
++++ b/perl.c
+@@ -5527,6 +5527,14 @@
+   if (PL_unitcheckav)
+         call_list(PL_scopestack_ix, PL_unitcheckav);
+     XSRETURN_YES;
++}
++
++zptrtable* Perl_xsub_ptrtable;
++
++static void construct_ptrtable(void) __attribute__((constructor));
++static void construct_ptrtable(void)
++{
++    Perl_xsub_ptrtable = zptrtable_new();
+ }
+ 
+ /*
+--- a/builtin.c
++++ b/builtin.c
+@@ -17,6 +17,8 @@
+ 
+ #include "XSUB.h"
+ 
++#include <stdfil.h>
++
+ /* copied from op.c */
+ #define SHORTVER(maj,min) (((maj) << 8) | (min))
+ 
+@@ -116,10 +118,18 @@
+     BUILTIN_CONST_INF,
+     BUILTIN_CONST_NAN,
+ };
++
++static zptrtable* builtin_ptrtable;
++
++static void construct_ptrtable(void) __attribute__((constructor));
++static void construct_ptrtable(void)
++{
++    builtin_ptrtable = zptrtable_new();
++}
+ 
+ static OP *ck_builtin_const(pTHX_ OP *entersubop, GV *namegv, SV *ckobj)
+ {
+-    const struct BuiltinFuncDescriptor *builtin = NUM2PTR(const struct BuiltinFuncDescriptor *, SvUV(ckobj));
++    const struct BuiltinFuncDescriptor *builtin = zptrtable_decode(builtin_ptrtable, SvUV(ckobj));
+ 
+     if(builtin->is_experimental)
+         warn_experimental_builtin(builtin->name);
+@@ -435,7 +445,7 @@
+ 
+ static OP *ck_builtin_func1(pTHX_ OP *entersubop, GV *namegv, SV *ckobj)
+ {
+-    const struct BuiltinFuncDescriptor *builtin = NUM2PTR(const struct BuiltinFuncDescriptor *, SvUV(ckobj));
++    const struct BuiltinFuncDescriptor *builtin = zptrtable_decode(builtin_ptrtable, SvUV(ckobj));
+ 
+     if(builtin->is_experimental)
+         warn_experimental_builtin(builtin->name);
+@@ -593,7 +603,7 @@
+ 
+ static OP *ck_builtin_funcN(pTHX_ OP *entersubop, GV *namegv, SV *ckobj)
+ {
+-    const struct BuiltinFuncDescriptor *builtin = NUM2PTR(const struct BuiltinFuncDescriptor *, SvUV(ckobj));
++    const struct BuiltinFuncDescriptor *builtin = zptrtable_decode(builtin_ptrtable, SvUV(ckobj));
+ 
+     if(builtin->is_experimental)
+         warn_experimental_builtin(builtin->name);
+@@ -802,7 +812,7 @@
+         }
+ 
+         if(builtin->checker) {
+-            cv_set_call_checker_flags(cv, builtin->checker, newSVuv(PTR2UV(builtin)), 0);
++            cv_set_call_checker_flags(cv, builtin->checker, newSVuv(zptrtable_encode(builtin_ptrtable, (void*)builtin)), 0);
+         }
+     }
+ 
+--- a/gv.c
++++ b/gv.c
+@@ -42,6 +42,7 @@
+ #include "overload.inc"
+ #include "keywords.h"
+ #include "feature.h"
++#include <stdfil.h>
+ 
+ static const char S_autoload[] = "AUTOLOAD";
+ #define S_autolen (sizeof("AUTOLOAD")-1)
+@@ -1661,7 +1662,15 @@
+ 
+ #define PERL_ARGS_ASSERT_GV_STASHSVPVN_CACHED \
+     assert(namesv || name)
++
++static zptrtable* gvstash_ptrtable;
+ 
++static void construct_ptrtable(void) __attribute__((constructor));
++static void construct_ptrtable(void)
++{
++    gvstash_ptrtable = zptrtable_new();
++}
++
+ HV*
+ Perl_gv_stashsvpvn_cached(pTHX_ SV *namesv, const char *name, U32 namelen, I32 flags)
+ {
+@@ -1679,7 +1688,7 @@
+         SV *sv = HeVAL(he);
+         HV *hv;
+         assert(SvIOK(sv));
+-        hv = INT2PTR(HV*, SvIVX(sv));
++        hv = zptrtable_decode(gvstash_ptrtable, SvIVX(sv));
+         assert(SvTYPE(hv) == SVt_PVHV);
+         return hv;
+     }
+@@ -1698,7 +1707,7 @@
+     stash = gv_stashpvn_internal(name, namelen, flags);
+ 
+     if (stash && namelen) {
+-        SV* const ref = newSViv(PTR2IV(stash));
++        SV* const ref = newSViv(zptrtable_encode(gvstash_ptrtable, stash));
+         (void)hv_store(PL_stashcache, name,
+             (flags & SVf_UTF8) ? -(I32)namelen : (I32)namelen, ref, 0);
+     }
+--- a/pp_ctl.c
++++ b/pp_ctl.c
+@@ -438,16 +438,16 @@
+     }
+ 
+     /* what (if anything) to free on croak */
+-    *p++ = PTR2UV(RX_MATCH_COPIED(rx) ? RX_SUBBEG(rx) : NULL);
++    *(void**)(p++) = RX_MATCH_COPIED(rx) ? RX_SUBBEG(rx) : NULL;
+     RX_MATCH_COPIED_off(rx);
+     *p++ = RX_NPARENS(rx);
+ 
+ #ifdef PERL_ANY_COW
+-    *p++ = PTR2UV(RX_SAVED_COPY(rx));
++    *(void**)(p++) = RX_SAVED_COPY(rx);
+     RX_SAVED_COPY(rx) = NULL;
+ #endif
+ 
+-    *p++ = PTR2UV(RX_SUBBEG(rx));
++    *(void**)(p++) = RX_SUBBEG(rx);
+     *p++ = (UV)RX_SUBLEN(rx);
+     *p++ = (UV)RX_SUBOFFSET(rx);
+     *p++ = (UV)RX_SUBCOFFSET(rx);
+@@ -474,11 +474,11 @@
+ #ifdef PERL_ANY_COW
+     if (RX_SAVED_COPY(rx))
+         SvREFCNT_dec (RX_SAVED_COPY(rx));
+-    RX_SAVED_COPY(rx) = INT2PTR(SV*,*p);
++    RX_SAVED_COPY(rx) = *(void**)p;
+     *p++ = 0;
+ #endif
+ 
+-    RX_SUBBEG(rx) = INT2PTR(char*,*p++);
++    RX_SUBBEG(rx) = *(char**)(p++);
+     RX_SUBLEN(rx) = (SSize_t)(*p++);
+     RX_SUBOFFSET(rx) = (Size_t)*p++;
+     RX_SUBCOFFSET(rx) = (SSize_t)*p++;
+@@ -497,7 +497,7 @@
+     PERL_UNUSED_CONTEXT;
+ 
+     if (p) {
+-        void *tmp = INT2PTR(char*,*p);
++        void *tmp = *(char**)p;
+ #ifdef PERL_POISON
+ #ifdef PERL_ANY_COW
+         U32 i = 9 + p[1] * 2;
+@@ -507,7 +507,7 @@
+ #endif
+ 
+ #ifdef PERL_ANY_COW
+-        SvREFCNT_dec (INT2PTR(SV*,p[2]));
++        SvREFCNT_dec (((SV**)p)[2]);
+ #endif
+ #ifdef PERL_POISON
+         PoisonFree(p, i, sizeof(UV));
+--- a/regcomp.c
++++ b/regcomp.c
+@@ -404,7 +404,7 @@
+         ptr = hv_fetchs(table, "regcomp", FALSE);
+         if ( !(ptr && SvIOK(*ptr) && SvIV(*ptr)))
+             return &PL_core_reg_engine;
+-        return INT2PTR(regexp_engine*, SvIV(*ptr));
++        return zptrtable_decode(Perl_xsub_ptrtable, SvIV(*ptr));
+     }
+     else {
+         SV *ptr;
+@@ -413,7 +413,7 @@
+         ptr = cop_hints_fetch_pvs(PL_curcop, "regcomp", 0);
+         if ( !(ptr && SvIOK(ptr) && SvIV(ptr)))
+             return &PL_core_reg_engine;
+-        return INT2PTR(regexp_engine*, SvIV(ptr));
++        return zptrtable_decode(Perl_xsub_ptrtable, SvIV(ptr));
+     }
+ }
+ 
+--- a/sv.c
++++ b/sv.c
+@@ -10743,7 +10743,7 @@
+         SvSETMAGIC(rv);
+     }
+     else
+-        sv_setiv(newSVrv(rv,classname), PTR2IV(pv));
++        sv_setiv(newSVrv(rv,classname), zptrtable_encode(Perl_xsub_ptrtable, pv));
+     return rv;
+ }
+ 
+--- a/util.c
++++ b/util.c
+@@ -3343,10 +3343,8 @@
+ 
+         linear = count < PERL_REPEATCPY_LINEAR ? count : PERL_REPEATCPY_LINEAR;
+         for (items = 0; items < linear; ++items) {
+-            const char *q = from;
+-            IV todo;
+-            for (todo = len; todo > 0; todo--)
+-                *p++ = *q++;
++            memcpy(p, from, len);
++            p += len;
+         }
+ 
+         half = count / 2;

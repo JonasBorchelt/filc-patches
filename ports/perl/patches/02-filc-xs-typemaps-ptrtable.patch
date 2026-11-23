@@ -1,0 +1,581 @@
+Subject: Use Perl_xsub_ptrtable in XS typemaps and core extensions for Fil-C capabilities
+Policy-Class: P4-Audit
+Rationale: Adopted and decomposed from pinned Fil-C (cede3de02b42:projects/perl-5.40.0). Standard XS typemaps and core extensions (Encode, Storable, threads, threads::shared, B, DynaLoader, re, Compress::Raw::Zlib) convert C pointers to Perl IVs via PTR2IV/INT2PTR. Routing these conversions through Perl_xsub_ptrtable (zptrtable_encode/zptrtable_decode) preserves Fil-C pointer capabilities across XS boundaries.
+Upstream-Status: Fil-C-Specific
+Fil-C-Origin-Commits: b14fce6d8d8a
+
+--- a/lib/ExtUtils/typemap
++++ b/lib/ExtUtils/typemap
+@@ -202,11 +202,11 @@
+ T_PV
+ 	$var = ($type)SvPV_nolen($arg)
+ T_PTR
+-	$var = INT2PTR($type,SvIV($arg))
++	$var = zptrtable_decode(Perl_xsub_ptrtable, SvIV($arg))
+ T_PTRREF
+ 	if (SvROK($arg)) {
+ 	    IV tmp = SvIV((SV*)SvRV($arg));
+-	    $var = INT2PTR($type,tmp);
++	    $var = zptrtable_decode(Perl_xsub_ptrtable, tmp);
+ 	}
+ 	else
+ 	    Perl_croak_nocontext(\"%s: %s is not a reference\",
+@@ -241,7 +241,7 @@
+ T_PTROBJ
+ 	if (SvROK($arg) && sv_derived_from($arg, \"${ntype}\")) {
+ 	    IV tmp = SvIV((SV*)SvRV($arg));
+-	    $var = INT2PTR($type,tmp);
++	    $var = zptrtable_decode(Perl_xsub_ptrtable, tmp);
+ 	}
+ 	else {
+ 		const char* refstr = SvROK($arg) ? \"\" : SvOK($arg) ? \"scalar \" : \"undef\";
+@@ -372,7 +372,7 @@
+ T_PV
+ 	sv_setpv((SV*)$arg, $var);
+ T_PTR
+-	sv_setiv($arg, PTR2IV($var));
++	sv_setiv($arg, zptrtable_encode(Perl_xsub_ptrtable, $var));
+ T_PTRREF
+ 	sv_setref_pv($arg, Nullch, (void*)$var);
+ T_REF_IV_REF
+--- a/cpan/Compress-Raw-Zlib/typemap
++++ b/cpan/Compress-Raw-Zlib/typemap
+@@ -40,7 +40,7 @@
+             $var = NULL ;
+         else if (sv_derived_from($arg, \"${ntype}\")) {
+             IV tmp = SvIV(getInnerObject($arg)) ;
+-            $var = INT2PTR($type, tmp);
++            $var = zptrtable_decode(Perl_xsub_ptrtable, tmp);
+         }
+         else
+             croak(\"$var is not of type ${ntype}\")
+--- a/cpan/Encode/Encode.xs
++++ b/cpan/Encode/Encode.xs
+@@ -33,12 +33,20 @@
+ #define SVfARG(p) ((void*)(p))
+ #endif
+ 
++static zptrtable* encode_ptrtable;
++
++static void construct_ptrtable(void) __attribute__((constructor));
++static void construct_ptrtable(void)
++{
++    encode_ptrtable = zptrtable_new();
++}
++
+ static void
+ Encode_XSEncoding(pTHX_ encode_t * enc)
+ {
+     dSP;
+     HV *stash = gv_stashpv("Encode::XS", TRUE);
+-    SV *iv    = newSViv(PTR2IV(enc));
++    SV *iv    = newSViv(zptrtable_encode(encode_ptrtable, enc));
+     SV *sv    = sv_bless(newRV_noinc(iv),stash);
+     int i = 0;
+     /* with the SvLEN() == 0 hack, PVX won't be freed. We cast away name's
+@@ -769,7 +777,7 @@
+ PREINIT:
+     encode_t *enc;
+ INIT:
+-    enc = INT2PTR(encode_t *, SvIV(SvRV(obj)));
++    enc = zptrtable_decode(encode_ptrtable, SvIV(SvRV(obj)));
+ CODE:
+     RETVAL = newSVpvn(enc->name[0], strlen(enc->name[0]));
+ OUTPUT:
+@@ -799,7 +807,7 @@
+     check = SvROK(check_sv) ? ENCODE_PERLQQ|ENCODE_LEAVE_SRC : SvOK(check_sv) ? SvIV_nomg(check_sv) : 0;
+     fallback_cb = SvROK(check_sv) ? check_sv : &PL_sv_undef;
+     modify = (check && !(check & ENCODE_LEAVE_SRC));
+-    enc = INT2PTR(encode_t *, SvIV(SvRV(obj)));
++    enc = zptrtable_decode(encode_ptrtable, SvIV(SvRV(obj)));
+     offset = (STRLEN)SvIV(off);
+ CODE:
+     if (!SvOK(src))
+@@ -834,7 +842,7 @@
+     check = SvROK(check_sv) ? ENCODE_PERLQQ|ENCODE_LEAVE_SRC : SvOK(check_sv) ? SvIV_nomg(check_sv) : 0;
+     fallback_cb = SvROK(check_sv) ? check_sv : &PL_sv_undef;
+     modify = (check && !(check & ENCODE_LEAVE_SRC));
+-    enc = INT2PTR(encode_t *, SvIV(SvRV(obj)));
++    enc = zptrtable_decode(encode_ptrtable, SvIV(SvRV(obj)));
+ CODE:
+     if (!SvOK(src))
+         XSRETURN_UNDEF;
+@@ -866,7 +874,7 @@
+     check = SvROK(check_sv) ? ENCODE_PERLQQ|ENCODE_LEAVE_SRC : SvOK(check_sv) ? SvIV_nomg(check_sv) : 0;
+     fallback_cb = SvROK(check_sv) ? check_sv : &PL_sv_undef;
+     modify = (check && !(check & ENCODE_LEAVE_SRC));
+-    enc = INT2PTR(encode_t *, SvIV(SvRV(obj)));
++    enc = zptrtable_decode(encode_ptrtable, SvIV(SvRV(obj)));
+ CODE:
+     if (!SvOK(src))
+         XSRETURN_UNDEF;
+@@ -905,7 +913,7 @@
+ PREINIT:
+     encode_t *enc;
+ INIT:
+-    enc = INT2PTR(encode_t *, SvIV(SvRV(obj)));
++    enc = zptrtable_decode(encode_ptrtable, SvIV(SvRV(obj)));
+ CODE:
+     ENTER;
+     SAVETMPS;
+--- a/dist/Storable/Storable.xs
++++ b/dist/Storable/Storable.xs
+@@ -338,6 +338,14 @@
+ #if PTRSIZE > 4
+ #define HAS_U64
+ #endif
++
++static zptrtable* perinterp_ptrtable;
++
++static void construct_ptrtable(void) __attribute__((constructor));
++static void construct_ptrtable(void)
++{
++    perinterp_ptrtable = zptrtable_new();
++}
+ 
+ /*
+  * Fields s_tainted and s_dirty are prefixed with s_ because Perl's include
+@@ -495,7 +503,7 @@
+ #define dSTCXT_PTR(T,name)					\
+     T name = ((perinterp_sv                                     \
+                && SvIOK(perinterp_sv) && SvIVX(perinterp_sv)    \
+-               ? (T)SvPVX(SvRV(INT2PTR(SV*,SvIVX(perinterp_sv)))) : (T) 0))
++               ? (T)SvPVX(SvRV((SV*)zptrtable_decode(perinterp_ptrtable, SvIVX(perinterp_sv)))) : (T) 0))
+ #define dSTCXT					\
+     dSTCXT_SV;                                  \
+     dSTCXT_PTR(stcxt_t *, cxt)
+@@ -504,12 +512,12 @@
+     dSTCXT;                                             \
+     NEW_STORABLE_CXT_OBJ(cxt);                          \
+     assert(perinterp_sv);				\
+-    sv_setiv(perinterp_sv, PTR2IV(cxt->my_sv))
++    sv_setiv(perinterp_sv, zptrtable_encode(perinterp_ptrtable, cxt->my_sv))
+ 
+ #define SET_STCXT(x)					\
+     STMT_START {					\
+         dSTCXT_SV;                                      \
+-        sv_setiv(perinterp_sv, PTR2IV(x->my_sv));       \
++        sv_setiv(perinterp_sv, zptrtable_encode(perinterp_ptrtable, x->my_sv)); \
+     } STMT_END
+ 
+ #else /* !MULTIPLICITY && !PERL_OBJECT && !PERL_CAPI */
+--- a/dist/threads/threads.xs
++++ b/dist/threads/threads.xs
+@@ -66,6 +66,14 @@
+ #if !defined(HAS_GETPAGESIZE) && defined(I_SYS_PARAM)
+ #  include <sys/param.h>
+ #endif
++
++static zptrtable* threads_ptrtable;
++
++static void construct_ptrtable(void) __attribute__((constructor));
++static void construct_ptrtable(void)
++{
++    threads_ptrtable = zptrtable_new();
++}
+ 
+ /* Values for 'state' member */
+ #define PERL_ITHR_DETACHED           1 /* Thread has been detached */
+@@ -136,7 +144,7 @@
+ #define dMY_POOL \
+     SV *my_pool_sv = *hv_fetch(PL_modglobal, MY_POOL_KEY,               \
+                                sizeof(MY_POOL_KEY)-1, TRUE);            \
+-    my_pool_t *my_poolp = INT2PTR(my_pool_t*, SvUV(my_pool_sv))
++    my_pool_t *my_poolp = zptrtable_decode(threads_ptrtable, SvUV(my_pool_sv))
+ 
+ #define MY_POOL (*my_poolp)
+ 
+@@ -397,7 +405,7 @@
+ ithread_mg_get(pTHX_ SV *sv, MAGIC *mg)
+ {
+     ithread *thread = (ithread *)mg->mg_ptr;
+-    SvIV_set(sv, PTR2IV(thread));
++    SvIV_set(sv, zptrtable_encode(threads_ptrtable, thread));
+     SvIOK_on(sv);
+     return (0);
+ }
+@@ -730,7 +738,7 @@
+     }
+ 
+     sv = newSVrv(obj, classname);
+-    sv_setiv(sv, PTR2IV(thread));
++    sv_setiv(sv, zptrtable_encode(threads_ptrtable, thread));
+     mg = sv_magicext(sv, Nullsv, PERL_MAGIC_shared_scalar, &ithread_vtbl, (char *)thread, 0);
+     mg->mg_flags |= MGf_DUP;
+     SvREADONLY_on(sv);
+@@ -743,7 +751,7 @@
+ {
+     /* Argument is a thread */
+     if (SvROK(sv)) {
+-      return (INT2PTR(ithread *, SvIV(SvRV(sv))));
++      return (zptrtable_decode(threads_ptrtable, SvIV(SvRV(sv))));
+     }
+     /* Argument is classname, therefore return current thread */
+     return (S_ithread_get(aTHX));
+@@ -1103,7 +1111,7 @@
+         if (sv_isobject(ST(0))) {
+             /* $thr->create() */
+             classname = HvNAME(SvSTASH(SvRV(ST(0))));
+-            thread = INT2PTR(ithread *, SvIV(SvRV(ST(0))));
++            thread = zptrtable_decode(threads_ptrtable, SvIV(SvRV(ST(0))));
+             MUTEX_LOCK(&thread->mutex);
+             stack_size = thread->stack_size;
+             exit_opt = thread->state & PERL_ITHR_THREAD_EXIT_ONLY;
+@@ -1560,8 +1568,8 @@
+ 
+         /* Compares TIDs to determine thread equality */
+         if (sv_isobject(ST(0)) && sv_isobject(ST(1))) {
+-            ithread *thr1 = INT2PTR(ithread *, SvIV(SvRV(ST(0))));
+-            ithread *thr2 = INT2PTR(ithread *, SvIV(SvRV(ST(1))));
++            ithread *thr1 = zptrtable_decode(threads_ptrtable, SvIV(SvRV(ST(0))));
++            ithread *thr2 = zptrtable_decode(threads_ptrtable, SvIV(SvRV(ST(1))));
+             are_equal = (thr1->tid == thr2->tid);
+         }
+         if (are_equal) {
+@@ -1666,7 +1674,7 @@
+         PERL_UNUSED_VAR(items);
+         if (sv_isobject(ST(0))) {
+             /* $thr->get_stack_size() */
+-            ithread *thread = INT2PTR(ithread *, SvIV(SvRV(ST(0))));
++            ithread *thread = zptrtable_decode(threads_ptrtable, SvIV(SvRV(ST(0))));
+             stack_size = thread->stack_size;
+         } else {
+             /* threads->get_stack_size() */
+@@ -1708,7 +1716,7 @@
+             Perl_croak(aTHX_ "Usage: $thr->is_running()");
+         }
+ 
+-        thread = INT2PTR(ithread *, SvIV(SvRV(ST(0))));
++        thread = zptrtable_decode(threads_ptrtable, SvIV(SvRV(ST(0))));
+         MUTEX_LOCK(&thread->mutex);
+         ST(0) = (thread->state & PERL_ITHR_FINISHED) ? &PL_sv_no : &PL_sv_yes;
+         MUTEX_UNLOCK(&thread->mutex);
+@@ -1738,7 +1746,7 @@
+             Perl_croak(aTHX_ "Usage: $thr->is_joinable()");
+         }
+ 
+-        thread = INT2PTR(ithread *, SvIV(SvRV(ST(0))));
++        thread = zptrtable_decode(threads_ptrtable, SvIV(SvRV(ST(0))));
+         MUTEX_LOCK(&thread->mutex);
+         ST(0) = ((thread->state & PERL_ITHR_FINISHED) &&
+                  ! (thread->state & PERL_ITHR_UNCALLABLE))
+@@ -1789,7 +1797,7 @@
+             Perl_croak(aTHX_ "Usage: $thr->err()");
+         }
+ 
+-        thread = INT2PTR(ithread *, SvIV(SvRV(ST(0))));
++        thread = zptrtable_decode(threads_ptrtable, SvIV(SvRV(ST(0))));
+         MUTEX_LOCK(&thread->mutex);
+ 
+         /* If thread died, then clone the error into the calling thread */
+@@ -1871,7 +1879,7 @@
+     MY_CXT_INIT;
+ 
+     Zero(my_poolp, 1, my_pool_t);
+-    sv_setuv(my_pool_sv, PTR2UV(my_poolp));
++    sv_setuv(my_pool_sv, zptrtable_encode(threads_ptrtable, my_poolp));
+ 
+     PL_perl_destruct_level = 2;
+     MUTEX_INIT(&MY_POOL.create_destruct_mutex);
+--- a/dist/threads-shared/shared.xs
++++ b/dist/threads-shared/shared.xs
+@@ -385,11 +385,19 @@
+    The sharedsv_elem_vtbl associates the element with the array/hash and
+    the sharedsv_scalar_vtbl associates it with the value
+  */
++
++
++static zptrtable* sharedsv_ptrtable;
+ 
++static void construct_ptrtable(void) __attribute__((constructor));
++static void construct_ptrtable(void)
++{
++    sharedsv_ptrtable = zptrtable_new();
++}
+ 
+ /* Get shared aggregate SV pointed to by threads::shared::tie magic object */
+ 
+-#define SHAREDSV_FROM_OBJ(sv) ((SvROK(sv)) ? INT2PTR(SV *, SvIV(SvRV(sv))) : NULL)
++#define SHAREDSV_FROM_OBJ(sv) ((SvROK(sv)) ? zptrtable_decode(sharedsv_ptrtable, SvIV(SvRV(sv))) : NULL)
+ 
+ 
+ /* Return the user_lock structure (if any) associated with a shared SV.
+@@ -493,7 +501,7 @@
+             || (SV*) mg->mg_ptr != ssv)
+         {
+             SV *obj = newSV(0);
+-            sv_setref_iv(obj, "threads::shared::tie", PTR2IV(ssv));
++            sv_setref_iv(obj, "threads::shared::tie", zptrtable_encode(sharedsv_ptrtable, ssv));
+             if (mg) {
+                 sv_unmagic(sv, PERL_MAGIC_tied);
+             }
+--- a/ext/B/B.xs
++++ b/ext/B/B.xs
+@@ -107,7 +107,7 @@
+ make_op_object(pTHX_ const OP *o)
+ {
+     SV *opsv = sv_newmortal();
+-    sv_setiv(newSVrv(opsv, opclassnames[op_class(o)]), PTR2IV(o));
++    sv_setiv(newSVrv(opsv, opclassnames[op_class(o)]), zptrtable_encode(Perl_xsub_ptrtable,(void*)o));
+     return opsv;
+ }
+ 
+@@ -159,7 +159,7 @@
+     }
+     if (!type) {
+ 	type = svclassnames[SvTYPE(sv)];
+-	iv = PTR2IV(sv);
++	iv = zptrtable_encode(Perl_xsub_ptrtable, sv);
+     }
+     sv_setiv(newSVrv(arg, type), iv);
+     return arg;
+@@ -171,7 +171,7 @@
+     SV *target;
+     SV *arg = sv_newmortal();
+     const char *const type = svclassnames[SvTYPE(temp)];
+-    const IV iv = PTR2IV(temp);
++    const IV iv = zptrtable_encode(Perl_xsub_ptrtable, temp);
+ 
+     target = newSVrv(arg, type);
+     sv_setiv(target, iv);
+@@ -234,7 +234,7 @@
+ make_mg_object(pTHX_ MAGIC *mg)
+ {
+     SV *arg = sv_newmortal();
+-    sv_setiv(newSVrv(arg, "B::MAGIC"), PTR2IV(mg));
++    sv_setiv(newSVrv(arg, "B::MAGIC"), zptrtable_encode(Perl_xsub_ptrtable, mg));
+     return arg;
+ }
+ 
+@@ -380,7 +380,7 @@
+ 	ref = sv_newmortal();
+ 	object = newSVrv(ref, classname);
+     }
+-    sv_setiv(object, PTR2IV(o));
++    sv_setiv(object, zptrtable_encode(Perl_xsub_ptrtable, o));
+ 
+     if (walkoptree_debug) {
+ 	PUSHMARK(sp);
+@@ -662,7 +662,7 @@
+ 	{
+ 	    SV * const rv = sv_newmortal();
+ 	    sv_setiv(newSVrv(rv, padlist ? "B::PADLIST" : "B::NULL"),
+-		     PTR2IV(padlist));
++		     zptrtable_encode(Perl_xsub_ptrtable, padlist));
+ 	    PUSHs(rv);
+ 	}
+ 
+@@ -709,7 +709,7 @@
+     OUTPUT:
+ 	RETVAL
+ 
+-#define address(sv) PTR2IV(sv)
++#define address(sv) zptrtable_encode(Perl_xsub_ptrtable, sv)
+ 
+ IV
+ address(sv)
+@@ -974,7 +974,7 @@
+                         GV *const target = cPMOPo->op_pmreplrootu.op_pmtargetgv;
+                         sv_setiv(newSVrv(ret, target ?
+                                          svclassnames[SvTYPE((SV*)target)] : "B::SV"),
+-                                 PTR2IV(target));
++                                 zptrtable_encode(Perl_xsub_ptrtable, target));
+                     }
+ #endif
+ 		}
+@@ -1051,7 +1051,7 @@
+ 	    case 46: /* B::COP::hints_hash */
+ 		ret = sv_newmortal();
+ 		sv_setiv(newSVrv(ret, "B::RHE"),
+-			PTR2IV(CopHINTHASH_get(cCOPo)));
++                         zptrtable_encode(Perl_xsub_ptrtable, CopHINTHASH_get(cCOPo)));
+ 		break;
+ 	    case 52: /* B::OP::parent */
+ #ifdef PERL_OP_PARENT
+@@ -1175,7 +1175,7 @@
+ 
+         case OP_ARGELEM:
+             ret = sv_2mortal(Perl_newSVpvf(aTHX_ "%" IVdf,
+-                            PTR2IV(aux)));
++                                           zptrtable_encode(Perl_xsub_ptrtable, aux)));
+             break;
+ 
+         case OP_ARGCHECK:
+@@ -1216,7 +1216,7 @@
+             XSRETURN(0); /* by default, an empty list */
+ 
+         case OP_ARGELEM:
+-            XPUSHs(sv_2mortal(newSViv(PTR2IV(aux))));
++            XPUSHs(sv_2mortal(newSViv(zptrtable_encode(Perl_xsub_ptrtable, aux))));
+             XSRETURN(1);
+             break;
+ 
+@@ -1643,7 +1643,7 @@
+ 		PUSHu(RX_COMPFLAGS(sv));
+ 	    else
+ 	    /* FIXME - can we code this method more efficiently?  */
+-		PUSHi(PTR2IV(sv));
++		PUSHi(zptrtable_encode(Perl_xsub_ptrtable, sv));
+ 	}
+ 
+ MODULE = B  PACKAGE = B::INVLIST    PREFIX = Invlist
+@@ -1837,7 +1837,7 @@
+ 	    break;
+ 	case 7:
+ 	    if(mg->mg_type == PERL_MAGIC_qr) {
+-                mPUSHi(PTR2IV(mg->mg_obj));
++                mPUSHi(zptrtable_encode(Perl_xsub_ptrtable, mg->mg_obj));
+ 	    } else {
+ 		croak("REGEX is only meaningful on r-magic");
+ 	    }
+@@ -2187,7 +2187,7 @@
+ 	    sv_setiv(newSVrv(TARG, PadlistNAMES(padlist)
+ 				    ? "B::PADNAMELIST"
+ 				    : "B::NULL"),
+-		     PTR2IV(PadlistNAMES(padlist)));
++		     zptrtable_encode(Perl_xsub_ptrtable, PadlistNAMES(padlist)));
+ 	    XPUSHTARG;
+ 	    for (i = 1; i <= PadlistMAX(padlist); i++)
+ 		XPUSHs(make_sv_object(aTHX_ (SV *)padp[i]));
+@@ -2232,7 +2232,7 @@
+ 	    {
+ 		SV *rv = sv_newmortal();
+ 		sv_setiv(newSVrv(rv,padp[i] ? "B::PADNAME" : "B::SPECIAL"),
+-			 PTR2IV(padp[i]));
++			 zptrtable_encode(Perl_xsub_ptrtable, padp[i]));
+ 		XPUSHs(rv);
+ 	    }
+ 	}
+--- a/ext/B/typemap
++++ b/ext/B/typemap
+@@ -45,7 +45,7 @@
+ T_OP_OBJ
+ 	if (SvROK($arg)) {
+ 	    IV tmp = SvIV((SV*)SvRV($arg));
+-	    $var = INT2PTR($type,tmp);
++	    $var = zptrtable_decode(Perl_xsub_ptrtable,tmp);
+ 	}
+ 	else
+ 	    croak(\"$var is not a reference\")
+@@ -53,7 +53,7 @@
+ T_SV_OBJ
+ 	if (SvROK($arg)) {
+ 	    IV tmp = SvIV((SV*)SvRV($arg));
+-	    $var = INT2PTR($type,tmp);
++	    $var = zptrtable_decode(Perl_xsub_ptrtable,tmp);
+ 	}
+ 	else
+ 	    croak(\"$var is not a reference\")
+@@ -61,7 +61,7 @@
+ T_MG_OBJ
+ 	if (SvROK($arg)) {
+ 	    IV tmp = SvIV((SV*)SvRV($arg));
+-	    $var = INT2PTR($type,tmp);
++	    $var = zptrtable_decode(Perl_xsub_ptrtable,tmp);
+ 	}
+ 	else
+ 	    croak(\"$var is not a reference\")
+@@ -69,7 +69,7 @@
+ T_HE_OBJ
+ 	if (SvROK($arg)) {
+ 	    IV tmp = SvIV((SV*)SvRV($arg));
+-	    $var = INT2PTR($type,tmp);
++	    $var = zptrtable_decode(Perl_xsub_ptrtable,tmp);
+ 	}
+ 	else
+ 	    croak(\"$var is not a reference\")
+@@ -77,7 +77,7 @@
+ T_RHE_OBJ
+ 	if (SvROK($arg)) {
+ 	    IV tmp = SvIV((SV*)SvRV($arg));
+-	    $var = INT2PTR($type,tmp);
++	    $var = zptrtable_decode(Perl_xsub_ptrtable,tmp);
+ 	}
+ 	else
+ 	    croak(\"$var is not a reference\")
+@@ -85,7 +85,7 @@
+ T_PL_OBJ
+ 	if (SvROK($arg)) {
+ 	    IV tmp = SvIV((SV*)SvRV($arg));
+-	    $var = INT2PTR($type,tmp);
++	    $var = zptrtable_decode(Perl_xsub_ptrtable,tmp);
+ 	}
+ 	else
+ 	    croak(\"$var is not a reference\")
+@@ -93,7 +93,7 @@
+ T_PNL_OBJ
+ 	if (SvROK($arg)) {
+ 	    IV tmp = SvIV((SV*)SvRV($arg));
+-	    $var = INT2PTR($type,tmp);
++	    $var = zptrtable_decode(Perl_xsub_ptrtable,tmp);
+ 	}
+ 	else
+ 	    croak(\"$var is not a reference\")
+@@ -101,29 +101,29 @@
+ T_PN_OBJ
+ 	if (SvROK($arg)) {
+ 	    IV tmp = SvIV((SV*)SvRV($arg));
+-	    $var = INT2PTR($type,tmp);
++	    $var = zptrtable_decode(Perl_xsub_ptrtable,tmp);
+ 	}
+ 	else
+ 	    croak(\"$var is not a reference\")
+ 
+ OUTPUT
+ T_MG_OBJ
+-	sv_setiv(newSVrv($arg, "B::MAGIC"), PTR2IV($var));
++	sv_setiv(newSVrv($arg, "B::MAGIC"), zptrtable_encode(Perl_xsub_ptrtable,$var));
+ 
+ T_HE_OBJ
+-	sv_setiv(newSVrv($arg, "B::HE"), PTR2IV($var));
++	sv_setiv(newSVrv($arg, "B::HE"), zptrtable_encode(Perl_xsub_ptrtable,$var));
+ 
+ T_RHE_OBJ
+-	sv_setiv(newSVrv($arg, "B::RHE"), PTR2IV($var));
++	sv_setiv(newSVrv($arg, "B::RHE"), zptrtable_encode(Perl_xsub_ptrtable,$var));
+ 
+ T_PL_OBJ
+ 	sv_setiv(newSVrv($arg, $var ? "B::PADLIST" : "B::NULL"),
+-		 PTR2IV($var));
++		 zptrtable_encode(Perl_xsub_ptrtable,$var));
+ 
+ T_PNL_OBJ
+ 	sv_setiv(newSVrv($arg, $var ? "B::PADNAMELIST" : "B::NULL"),
+-		 PTR2IV($var));
++		 zptrtable_encode(Perl_xsub_ptrtable,$var));
+ 
+ T_PN_OBJ
+ 	sv_setiv(newSVrv($arg, $var ? "B::PADNAME" : "B::SPECIAL"),
+-		 PTR2IV($var));
++		 zptrtable_encode(Perl_xsub_ptrtable,$var));
+--- a/ext/DynaLoader/dl_dlopen.xs
++++ b/ext/DynaLoader/dl_dlopen.xs
+@@ -211,7 +211,7 @@
+     if (handle == NULL)
+ 	SaveError(aTHX_ "%s",dlerror()) ;
+     else
+-	sv_setiv( ST(0), PTR2IV(handle));
++	sv_setiv( ST(0), zptrtable_encode(Perl_xsub_ptrtable, handle));
+ }
+ 
+ 
+@@ -250,7 +250,7 @@
+         if (!ign_err)
+ 	    SaveError(aTHX_ "%s", dlerror());
+     } else
+-	sv_setiv( ST(0), PTR2IV(sym));
++	sv_setiv( ST(0), zptrtable_encode(Perl_xsub_ptrtable, sym));
+ 
+ 
+ void
+--- a/ext/re/re.xs
++++ b/ext/re/re.xs
+@@ -113,7 +113,7 @@
+     PPCODE:
+         PL_colorset = 0;	/* Allow reinspection of ENV. */
+         /* PL_debug |= DEBUG_r_FLAG; */
+-	XPUSHs(sv_2mortal(newSViv(PTR2IV(&my_reg_engine))));
++	XPUSHs(sv_2mortal(newSViv(zptrtable_encode(Perl_xsub_ptrtable, &my_reg_engine))));
+ 
+ void
+ regmust(sv)

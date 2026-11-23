@@ -1,10 +1,10 @@
 NAME="cmake"
-VERSION="3.30.2"
+VERSION="4.5.1"
 LICENSE="BSD-3-Clause"
-UPSTREAM_URL="https://github.com/Kitware/CMake/releases/download/v3.30.2/cmake-3.30.2.tar.gz"
-UPSTREAM_SHA256="46074c781eccebc433e98f0bbfa265ca3fd4381f245ca3b140e7711531d60db2"
-UPSTREAM_SHA256_SOURCE="sha256:https://github.com/Kitware/CMake/releases/download/v3.30.2/cmake-3.30.2-SHA-256.txt"
-EXTRACT_DIR="cmake-3.30.2"
+UPSTREAM_URL="https://github.com/Kitware/CMake/releases/download/v4.5.1/cmake-4.5.1.tar.gz"
+UPSTREAM_SHA256="a79bf33cbe05686fdf79c2bbbcfe5e8e62ad16d3d540fa737cbedfeed41fb69e"
+UPSTREAM_SHA256_SOURCE="sha256:https://github.com/Kitware/CMake/releases/download/v4.5.1/cmake-4.5.1-SHA-256.txt"
+EXTRACT_DIR="cmake-4.5.1"
 TIER=5
 DEPS="curl libarchive libuv expat zlib bzip2 xz zstd openssl nghttp2 ncurses pkgconf"
 BUILD_SYSTEM="custom"
@@ -13,8 +13,8 @@ MAKE_ARGS=""
 INSTALL_ARGS=""
 TEST_CMD=""
 POLICY_CLASS="P2-Package"
-POLICY_RATIONALE="Builds CMake 3.30.2 against Fil-C system libraries (--system-libs --bootstrap-system-libuv) with 3 minimal patches (+9/-4): lib instead of lib64 in GNUInstallDirs.cmake and long option variables for curl 8.16+ macro compatibility."
-FILC_ORIGIN_REF="fc54fc58e8e5:projects/cmake-3.30.2"
+POLICY_RATIONALE="Builds current stable CMake 4.5.1 against Fil-C system libraries (--system-libs --bootstrap-system-libuv); upstream 4.5.1 already includes curl 8.16+ long option types, leaving only a 1-line patch (+1/-1) in Modules/GNUInstallDirs.cmake to default LIBDIR to lib instead of lib64."
+FILC_ORIGIN_REF="16eec52fcf76:projects/cmake-3.30.2"
 
 port_configure() {
   PATH="$PIZFIX/bin:$PATH" \
@@ -30,7 +30,7 @@ port_configure() {
       --no-system-jsoncpp \
       --no-system-cppdap \
       --no-system-librhash \
-      --docdir=/share/doc/cmake-3.30.2 \
+      --docdir=/share/doc/cmake-4.5.1 \
       -- \
       -DCMAKE_PREFIX_PATH="$PIZFIX" \
       -DCMAKE_INCLUDE_PATH="$PIZFIX/include" \
@@ -51,7 +51,7 @@ port_test() {
   out="$("$PIZFIX/bin/cmake" --version)"
   ver="${out%%$'\n'*}"
   echo "cmake version: $ver"
-  printf '%s\n' "$ver" | grep -Fxq 'cmake version 3.30.2'
+  printf '%s\n' "$ver" | grep -Fxq 'cmake version 4.5.1'
   local td
   td="$(mktemp -d)"
   cat > "$td/CMakeLists.txt" <<'EOF'

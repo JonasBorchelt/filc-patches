@@ -13,7 +13,7 @@ MAKE_ARGS=""
 INSTALL_ARGS=""
 TEST_CMD=""
 POLICY_CLASS="P2-Package"
-POLICY_RATIONALE="Audited down from Fil-C libffi.projeny (13 files, +565/-13) to 7 core ABI files: drops Makefile.{am,in} -Wl,--version-script edits (handled by P1 llvm/06b), README, and local ffitest harness; keeps the genuine FFI_FILC ABI and capability-safe closure bridge for x86_64 and aarch64 with --disable-exec-static-tramp."
+POLICY_RATIONALE="Pinned to 3.8.0 to match the Fil-C libffi.projeny FFI_FILC ABI patch base (upstream 3.8.1 is a minor follow-up). Audited down from 13 files (+565/-13) to 7 core ABI files: drops Makefile.{am,in} -Wl,--version-script edits (handled by P1 llvm/06b), README, and local ffitest harness; keeps the genuine FFI_FILC ABI and capability-safe closure bridge for x86_64 and aarch64 with --disable-exec-static-tramp."
 FILC_ORIGIN_REF="cede3de02b42:projects/libffi.projeny"
 
 port_configure() {

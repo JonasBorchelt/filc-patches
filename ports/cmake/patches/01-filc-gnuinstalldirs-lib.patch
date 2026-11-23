@@ -1,0 +1,17 @@
+Subject: Default GNUInstallDirs LIBDIR to lib instead of lib64 for Fil-C sysroot
+Policy-Class: P2-Package
+Rationale: Fil-C installs all libraries under $PIZFIX/lib rather than lib64; defaulting 64-bit LIBDIR to lib keeps CMake-built packages consistent with the sysroot.
+Upstream-Status: Fil-C-Specific
+Fil-C-Origin-Commits: 16eec52fcf76
+
+--- a/Modules/GNUInstallDirs.cmake
++++ b/Modules/GNUInstallDirs.cmake
+@@ -474,7 +474,7 @@
+       # This host system uses a 'lib64' directory for 64-bit architectures.
+       # See https://gitlab.com/x86-psABIs/x86-64-ABI
+       if("${CMAKE_SIZEOF_VOID_P}" EQUAL "8")
+-        set(${out_var} "lib64")
++        set(${out_var} "lib")
+       endif()
+     endif()
+   endif()

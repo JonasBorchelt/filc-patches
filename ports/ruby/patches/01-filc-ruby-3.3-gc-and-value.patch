@@ -1,6 +1,6 @@
 Subject: Fil-C GC integration and capability-safe VALUE representation for Ruby 3.3.14
 Policy-Class: P4-Audit
-Rationale: Audited down from Fil-C ruby-3.3.10 (139 files, +6821/-4703) and refreshed to security release 3.3.14 (130 files, +3350/-1237, 60.2% line reduction, 0 fuzz, 0 offset): drops stray configure.txt, 5 unbuilt spec/ruby/optional/capi/ext/ files, auto-generated parse.c/parse.h/ext/ripper/ripper.c (+3445/-3441, regenerated cleanly from parse.y/ripper.y by bundled lrama during build), and obsolete vm_args.c VALUE-index hunk fixed upstream in 3.3.14, while keeping the 6 built ext/-test-/ extensions. Combines P3 flags (--disable-yjit --disable-rjit --without-jit --without-jemalloc --with-coroutine=pthread --with-setjmp-type=_setjmp) with the Fil-C gc.c and VALUE capability-tagging runtime bridge.
+Rationale: Audited down from Fil-C ruby-3.3.10 (139 files, +6821/-4703) and refreshed to security release 3.3.14 (135 files, +3371/-1258, 59.8% line reduction, 0 fuzz, 0 offset): drops stray configure.txt, auto-generated parse.c/parse.h/ext/ripper/ripper.c (+3445/-3441, regenerated cleanly from parse.y/ripper.y by bundled lrama during build), and obsolete vm_args.c VALUE-index hunk fixed upstream in 3.3.14, while keeping all built ext/-test-/ and spec/ruby/optional/capi/ext/ extensions. Combines P3 flags (--disable-yjit --disable-rjit --without-jit --without-jemalloc --with-coroutine=pthread --with-setjmp-type=_setjmp) with the Fil-C gc.c and VALUE capability-tagging runtime bridge.
 Upstream-Status: Fil-C-Specific
 Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
 
@@ -7850,6 +7850,125 @@ Fil-C-Origin-Commits: 50531d7ebf61, b3f4f2fb1438
  #ifdef SIGPIPE
      install_sighandler(SIGPIPE, sig_do_nothing);
  #endif
+--- a/spec/ruby/optional/capi/ext/class_spec.c
++++ b/spec/ruby/optional/capi/ext/class_spec.c
+@@ -73,7 +73,7 @@
+ 
+ static VALUE class_spec_rb_class_real(VALUE self, VALUE object) {
+   if (rb_type_p(object, T_FIXNUM)) {
+-    return INT2FIX(rb_class_real(FIX2INT(object)));
++    return (VALUE)INT2FIX((uintptr_t)rb_class_real((VALUE)FIX2INT(object)));
+   } else {
+     return rb_class_real(CLASS_OF(object));
+   }
+--- a/spec/ruby/optional/capi/ext/language_spec.c
++++ b/spec/ruby/optional/capi/ext/language_spec.c
+@@ -10,14 +10,14 @@
+     value = Qundef;
+   }
+ 
+-  switch (value) {
+-    case Qtrue:
++  switch ((uintptr_t)value) {
++    case (uintptr_t)Qtrue:
+       return ID2SYM(rb_intern("true"));
+-    case Qfalse:
++    case (uintptr_t)Qfalse:
+       return ID2SYM(rb_intern("false"));
+-    case Qnil:
++    case (uintptr_t)Qnil:
+       return ID2SYM(rb_intern("nil"));
+-    case Qundef:
++    case (uintptr_t)Qundef:
+       return ID2SYM(rb_intern("undef"));
+     default:
+       return ID2SYM(rb_intern("default"));
+--- a/spec/ruby/optional/capi/ext/object_spec.c
++++ b/spec/ruby/optional/capi/ext/object_spec.c
+@@ -388,7 +388,7 @@
+ }
+ 
+ static VALUE speced_allocator(VALUE klass) {
+-  VALUE flags = 0;
++  uintptr_t flags = 0;
+   VALUE instance;
+   if (RTEST(rb_class_inherited_p(klass, rb_cString))) {
+     flags = T_STRING;
+--- a/spec/ruby/optional/capi/ext/rbasic_spec.c
++++ b/spec/ruby/optional/capi/ext/rbasic_spec.c
+@@ -14,11 +14,11 @@
+ #endif
+ 
+ #ifndef FL_SHAREABLE
+-static const VALUE VISIBLE_BITS = FL_TAINT | FL_FREEZE;
+-static const VALUE DATA_VISIBLE_BITS = FL_TAINT | FL_FREEZE | ~(FL_USER0 - 1);
++static const uintptr_t VISIBLE_BITS = FL_TAINT | FL_FREEZE;
++static const uintptr_t DATA_VISIBLE_BITS = FL_TAINT | FL_FREEZE | ~(FL_USER0 - 1);
+ #else
+-static const VALUE VISIBLE_BITS = FL_FREEZE;
+-static const VALUE DATA_VISIBLE_BITS = FL_FREEZE | ~(FL_USER0 - 1);
++static const uintptr_t VISIBLE_BITS = FL_FREEZE;
++static const uintptr_t DATA_VISIBLE_BITS = FL_FREEZE | ~(FL_USER0 - 1);
+ #endif
+ 
+ #if SIZEOF_VALUE == SIZEOF_LONG
+@@ -42,12 +42,12 @@
+   return VALUE2NUM(RUBY_FL_FREEZE);
+ }
+ 
+-static VALUE spec_get_flags(VALUE obj, VALUE visible_bits) {
+-  VALUE flags = RB_FL_TEST(obj, visible_bits);
++static VALUE spec_get_flags(VALUE obj, uintptr_t visible_bits) {
++  uintptr_t flags = RB_FL_TEST(obj, visible_bits);
+   return VALUE2NUM(flags);
+ }
+ 
+-static VALUE spec_set_flags(VALUE obj, VALUE flags, VALUE visible_bits) {
++static VALUE spec_set_flags(VALUE obj, uintptr_t flags, uintptr_t visible_bits) {
+   flags &= visible_bits;
+ 
+   // Could also be done like:
+--- a/spec/ruby/optional/capi/ext/st_spec.c
++++ b/spec/ruby/optional/capi/ext/st_spec.c
+@@ -34,7 +34,7 @@
+ VALUE st_spec_st_insert(VALUE self) {
+   st_index_t entries;
+   st_table *tbl = st_init_numtable_with_size(128);
+-  st_insert(tbl, 1, 1);
++  st_insert(tbl, (st_data_t)1, (st_data_t)1);
+   entries = tbl->num_entries;
+   st_free_table(tbl);
+   return ST2NUM(entries);
+@@ -48,8 +48,8 @@
+ VALUE st_spec_st_foreach(VALUE self) {
+   int total = 0;
+   st_table *tbl = st_init_numtable_with_size(128);
+-  st_insert(tbl, 1, 3);
+-  st_insert(tbl, 2, 4);
++  st_insert(tbl, (st_data_t)1, (st_data_t)3);
++  st_insert(tbl, (st_data_t)2, (st_data_t)4);
+   st_foreach(tbl, sum, (st_data_t)&total);
+   st_free_table(tbl);
+   return INT2FIX(total);
+@@ -58,14 +58,14 @@
+ VALUE st_spec_st_lookup(VALUE self) {
+   st_data_t result = (st_data_t)0;
+   st_table *tbl = st_init_numtable_with_size(128);
+-  st_insert(tbl, 7, 42);
+-  st_insert(tbl, 2, 4);
++  st_insert(tbl, (st_data_t)7, (st_data_t)42);
++  st_insert(tbl, (st_data_t)2, (st_data_t)4);
+   st_lookup(tbl, (st_data_t)7, &result);
+   st_free_table(tbl);
+ #if SIZEOF_LONG == SIZEOF_VOIDP
+-  return ULONG2NUM(result);
++  return ULONG2NUM((unsigned long)result);
+ #else
+-  return ULL2NUM(result);
++  return ULL2NUM((unsigned long long)result);
+ #endif
+ }
+ 
 --- a/sprintf.c
 +++ b/sprintf.c
 @@ -31,6 +31,7 @@

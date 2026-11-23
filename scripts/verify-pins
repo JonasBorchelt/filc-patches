@@ -35,6 +35,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 FPR_RE = re.compile(r"^[0-9A-F]{40}$")
@@ -212,19 +213,98 @@ def validate_metadata(name: str, meta: dict, repo_root: str) -> list:
     return errors
 
 
-def curl_bytes(url: str, extra_headers=None) -> bytes:
-    cmd = ["curl", "-fsSL", "--retry", "3", "--retry-delay", "2", "--max-time", "60"]
-    if extra_headers:
-        for h in extra_headers:
-            cmd.extend(["-H", h])
-    cmd.append(url)
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"curl failed ({proc.returncode}) for {url}: "
-            f"{proc.stderr.decode('utf-8', errors='replace').strip()}"
+def mirror_fallback_urls(url: str) -> list:
+    """Return ordered [primary, *mirror_fallbacks] for GNU/Savannah URLs."""
+    urls = [url]
+    replacements = [
+        ("https://download.savannah.gnu.org/releases/", "https://download-mirror.savannah.gnu.org/releases/"),
+        ("https://download-mirror.savannah.gnu.org/releases/", "https://download.savannah.gnu.org/releases/"),
+        ("https://download.savannah.nongnu.org/releases/", "https://download-mirror.savannah.nongnu.org/releases/"),
+        ("https://download-mirror.savannah.nongnu.org/releases/", "https://download.savannah.nongnu.org/releases/"),
+        ("https://ftp.gnu.org/gnu/", "https://ftpmirror.gnu.org/gnu/"),
+        ("https://ftpmirror.gnu.org/gnu/", "https://ftp.gnu.org/gnu/"),
+    ]
+    for src_prefix, dst_prefix in replacements:
+        if url.startswith(src_prefix):
+            alt = dst_prefix + url[len(src_prefix) :]
+            if alt not in urls:
+                urls.append(alt)
+    return urls
+
+
+def curl_bytes(url: str, extra_headers=None, attempts: int = 3) -> bytes:
+    candidates = mirror_fallback_urls(url)
+    is_local = url.startswith("file://")
+    max_rounds = 1 if is_local else max(1, attempts)
+    backoffs = (2, 5, 10)
+    last_err = ""
+    for rnd in range(max_rounds):
+        for cand in candidates:
+            cmd = ["curl", "-fsSL", "--connect-timeout", "10", "--max-time", "20"]
+            if extra_headers:
+                for h in extra_headers:
+                    cmd.extend(["-H", h])
+            cmd.append(cand)
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            if proc.returncode == 0:
+                return proc.stdout
+            last_err = (
+                f"curl failed ({proc.returncode}) for {cand}: "
+                f"{proc.stderr.decode('utf-8', errors='replace').strip()}"
+            )
+        if rnd + 1 < max_rounds:
+            time.sleep(backoffs[min(rnd, len(backoffs) - 1)])
+    raise RuntimeError(last_err or f"curl failed for {url}")
+
+
+def meta_cache_path(url: str, cache_dir: str) -> str:
+    meta_dir = os.path.join(cache_dir, "verify-meta")
+    os.makedirs(meta_dir, exist_ok=True)
+    url_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+    base = os.path.basename(url.split("?", 1)[0].rstrip("/")) or "index"
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", base)[:64]
+    return os.path.join(meta_dir, f"{url_hash}-{safe}")
+
+
+def fetch_cached_bytes(
+    url: str, cache_dir: str, extra_headers=None, force_refresh: bool = False
+) -> tuple:
+    """Fetch verification metadata with persistent cache in cache_dir/verify-meta/.
+
+    Returns (bytes, from_cache).
+    """
+    cpath = meta_cache_path(url, cache_dir) if cache_dir else ""
+    if cpath and not force_refresh and os.path.isfile(cpath) and os.path.getsize(cpath) > 0:
+        with open(cpath, "rb") as f:
+            return f.read(), True
+    data = curl_bytes(url, extra_headers=extra_headers)
+    if cpath and data:
+        tmp_path = f"{cpath}.part.{os.getpid()}"
+        try:
+            with open(tmp_path, "wb") as f:
+                f.write(data)
+            os.replace(tmp_path, cpath)
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+    return data, False
+
+
+def fetch_and_extract(url: str, cache_dir: str, extractor, extra_headers=None):
+    """Fetch text/JSON from cache (refreshing once if entry not found in cached index).
+
+    Returns (extracted_value, from_cache).
+    """
+    raw, from_cache = fetch_cached_bytes(url, cache_dir, extra_headers=extra_headers)
+    try:
+        return extractor(raw), from_cache
+    except Exception:
+        if not from_cache:
+            raise
+        raw, _ = fetch_cached_bytes(
+            url, cache_dir, extra_headers=extra_headers, force_refresh=True
         )
-    return proc.stdout
+        return extractor(raw), False
 
 
 def file_hash(path: str, algo: str) -> str:
@@ -303,11 +383,11 @@ def extract_sha256_from_checksum_text(text: str, filename: str) -> str:
                         cand = cols[sha_idx].strip().lower()
                         if SHA256_RE.match(cand):
                             return cand
-    # Fallback: single-hash file containing only one 64-hex digest
+    # Fallback: bare single-hash file containing only one 64-hex digest (no filename)
     if len(lines) == 1:
-        tok = lines[0].split()[0].lower()
-        if SHA256_RE.match(tok):
-            return tok
+        parts = lines[0].split()
+        if len(parts) == 1 and SHA256_RE.match(parts[0].lower()):
+            return parts[0].lower()
     raise RuntimeError(f"could not find SHA-256 entry for {filename!r} in upstream checksum file")
 
 
@@ -322,75 +402,90 @@ def extract_sha256_b64_from_text(text: str, filename: str) -> str:
     return raw.hex()
 
 
-def verify_pgp_signature(tarball_path: str, sig_url: str, key_abs: str, expected_fpr: str) -> None:
+def verify_pgp_signature(
+    tarball_path: str, sig_url: str, key_abs: str, expected_fpr: str, cache_dir: str = ""
+) -> bool:
     gpg_bin = shutil.which("gpg")
     if not gpg_bin:
         raise RuntimeError("gpg is required for PGP signature verification but is not installed")
 
-    sig_bytes = curl_bytes(sig_url)
-    with tempfile.TemporaryDirectory(prefix="filc-verify-gpg-") as td:
-        gnupg_home = os.path.join(td, "gnupg")
-        os.makedirs(gnupg_home, mode=0o700)
-        sig_path = os.path.join(td, "tarball.sig")
-        with open(sig_path, "wb") as f:
-            f.write(sig_bytes)
+    def _run_gpg_verify(sig_bytes: bytes) -> None:
+        with tempfile.TemporaryDirectory(prefix="filc-verify-gpg-") as td:
+            gnupg_home = os.path.join(td, "gnupg")
+            os.makedirs(gnupg_home, mode=0o700)
+            sig_path = os.path.join(td, "tarball.sig")
+            with open(sig_path, "wb") as f:
+                f.write(sig_bytes)
 
-        env = os.environ.copy()
-        env["GNUPGHOME"] = gnupg_home
+            env = os.environ.copy()
+            env["GNUPGHOME"] = gnupg_home
 
-        imp = subprocess.run(
-            [gpg_bin, "--batch", "--quiet", "--import", key_abs],
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        if imp.returncode != 0:
-            raise RuntimeError(f"gpg --import failed: {imp.stderr.decode('utf-8', errors='replace').strip()}")
-
-        fpr_out = subprocess.run(
-            [gpg_bin, "--batch", "--with-colons", "--fingerprint"],
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=True,
-        ).stdout.decode("utf-8", errors="replace")
-        imported_fprs = {
-            line.split(":")[9].upper()
-            for line in fpr_out.splitlines()
-            if line.startswith("fpr:") and len(line.split(":")) > 9
-        }
-        if expected_fpr not in imported_fprs:
-            raise RuntimeError(f"pinned fingerprint {expected_fpr} missing after gpg --import")
-
-        ver = subprocess.run(
-            [gpg_bin, "--batch", "--status-fd", "1", "--verify", sig_path, tarball_path],
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        status_txt = ver.stdout.decode("utf-8", errors="replace")
-        if ver.returncode != 0:
-            raise RuntimeError(
-                f"gpg --verify failed ({ver.returncode}): "
-                f"{ver.stderr.decode('utf-8', errors='replace').strip()}"
+            imp = subprocess.run(
+                [gpg_bin, "--batch", "--quiet", "--import", key_abs],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
             )
+            if imp.returncode != 0:
+                raise RuntimeError(
+                    f"gpg --import failed: {imp.stderr.decode('utf-8', errors='replace').strip()}"
+                )
 
-        matched = False
-        for line in status_txt.splitlines():
-            if line.startswith("[GNUPG:] VALIDSIG "):
-                fields = line.split()
-                # VALIDSIG <signing-fpr> <date> <ts> <exp> <sig-ver> <res> <pubkey-alg> <hash-alg> <sig-class> [<primary-fpr>]
-                sig_fpr = fields[2].upper() if len(fields) > 2 else ""
-                primary_fpr = fields[11].upper() if len(fields) > 11 else ""
-                if expected_fpr in (sig_fpr, primary_fpr):
-                    matched = True
-                    break
-        if not matched:
-            raise RuntimeError(
-                f"gpg verified signature but VALIDSIG did not match pinned fingerprint {expected_fpr}"
+            fpr_out = subprocess.run(
+                [gpg_bin, "--batch", "--with-colons", "--fingerprint"],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            ).stdout.decode("utf-8", errors="replace")
+            imported_fprs = {
+                line.split(":")[9].upper()
+                for line in fpr_out.splitlines()
+                if line.startswith("fpr:") and len(line.split(":")) > 9
+            }
+            if expected_fpr not in imported_fprs:
+                raise RuntimeError(f"pinned fingerprint {expected_fpr} missing after gpg --import")
+
+            ver = subprocess.run(
+                [gpg_bin, "--batch", "--status-fd", "1", "--verify", sig_path, tarball_path],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
             )
+            status_txt = ver.stdout.decode("utf-8", errors="replace")
+            if ver.returncode != 0:
+                raise RuntimeError(
+                    f"gpg --verify failed ({ver.returncode}): "
+                    f"{ver.stderr.decode('utf-8', errors='replace').strip()}"
+                )
+
+            matched = False
+            for line in status_txt.splitlines():
+                if line.startswith("[GNUPG:] VALIDSIG "):
+                    fields = line.split()
+                    # VALIDSIG <signing-fpr> <date> <ts> <exp> <sig-ver> <res> <pubkey-alg> <hash-alg> <sig-class> [<primary-fpr>]
+                    sig_fpr = fields[2].upper() if len(fields) > 2 else ""
+                    primary_fpr = fields[11].upper() if len(fields) > 11 else ""
+                    if expected_fpr in (sig_fpr, primary_fpr):
+                        matched = True
+                        break
+            if not matched:
+                raise RuntimeError(
+                    f"gpg verified signature but VALIDSIG did not match pinned fingerprint {expected_fpr}"
+                )
+
+    sig_bytes, from_cache = fetch_cached_bytes(sig_url, cache_dir)
+    try:
+        _run_gpg_verify(sig_bytes)
+        return from_cache
+    except Exception:
+        if not from_cache:
+            raise
+        sig_bytes, _ = fetch_cached_bytes(sig_url, cache_dir, force_refresh=True)
+        _run_gpg_verify(sig_bytes)
+        return False
 
 
 def verify_port_online(name: str, meta: dict, repo_root: str, cache_dir: str, strict: bool) -> str:
@@ -400,20 +495,27 @@ def verify_port_online(name: str, meta: dict, repo_root: str, cache_dir: str, st
 
     if src.startswith("sha256:"):
         url = src[len("sha256:") :]
-        txt = curl_bytes(url).decode("utf-8", errors="replace")
-        got = extract_sha256_from_checksum_text(txt, filename)
+        got, from_cache = fetch_and_extract(
+            url,
+            cache_dir,
+            lambda raw: extract_sha256_from_checksum_text(raw.decode("utf-8", errors="replace"), filename),
+        )
         if got != expected:
             raise RuntimeError(
                 f"upstream checksum mismatch from {url}: PORT={expected}, upstream={got}"
             )
-        return f"OK [sha256] {name} {meta['VERSION']} ({expected[:12]}...)"
+        src_note = "cached, verified" if from_cache else "fetched, verified"
+        return f"OK [sha256] {name} {meta['VERSION']} ({expected[:12]}..., {src_note})"
 
     if src.startswith("pgp:"):
         spec = parse_pgp_source(src)
         details = ["pgp"]
         if "sha256_b64" in spec:
-            ann_txt = curl_bytes(spec["sha256_b64"]).decode("utf-8", errors="replace")
-            got_b64 = extract_sha256_b64_from_text(ann_txt, filename)
+            got_b64, _ = fetch_and_extract(
+                spec["sha256_b64"],
+                cache_dir,
+                lambda raw: extract_sha256_b64_from_text(raw.decode("utf-8", errors="replace"), filename),
+            )
             if got_b64 != expected:
                 raise RuntimeError(
                     f"release announcement SHA256 mismatch: PORT={expected}, upstream={got_b64}"
@@ -421,72 +523,93 @@ def verify_port_online(name: str, meta: dict, repo_root: str, cache_dir: str, st
             details.append("sha256_b64")
         tarball_path = ensure_cached_tarball(meta, cache_dir)
         key_abs = os.path.join(repo_root, spec["key"])
-        verify_pgp_signature(tarball_path, spec["pgp"], key_abs, spec["fpr"])
-        return f"OK [{'+'.join(details)}] {name} {meta['VERSION']} (fpr={spec['fpr'][:12]}..., sha256={expected[:12]}...)"
+        sig_cached = verify_pgp_signature(
+            tarball_path, spec["pgp"], key_abs, spec["fpr"], cache_dir=cache_dir
+        )
+        sig_note = "cached .sig, verified" if sig_cached else "fetched .sig, verified"
+        return f"OK [{'+'.join(details)}] {name} {meta['VERSION']} (fpr={spec['fpr'][:12]}..., sha256={expected[:12]}..., {sig_note})"
 
     if src.startswith("github-release-digest:"):
         api_url = src[len("github-release-digest:") :]
-        raw = curl_bytes(api_url, extra_headers=["Accept: application/vnd.github+json"])
-        rel = json.loads(raw.decode("utf-8"))
-        assets = {a["name"]: a for a in rel.get("assets", [])}
-        asset = assets.get(filename)
-        if not asset:
-            raise RuntimeError(f"asset {filename!r} not found in GitHub release {api_url}")
-        digest = asset.get("digest") or ""
+
+        def _extract_gh(raw: bytes) -> str:
+            rel = json.loads(raw.decode("utf-8"))
+            assets = {a["name"]: a for a in rel.get("assets", [])}
+            asset = assets.get(filename)
+            if not asset:
+                raise RuntimeError(f"asset {filename!r} not found in GitHub release {api_url}")
+            return asset.get("digest") or ""
+
+        digest, from_cache = fetch_and_extract(
+            api_url,
+            cache_dir,
+            _extract_gh,
+            extra_headers=["Accept: application/vnd.github+json"],
+        )
         if digest != f"sha256:{expected}":
             raise RuntimeError(
                 f"GitHub release digest mismatch for {filename}: PORT=sha256:{expected}, api={digest!r}"
             )
-        return f"OK [github-release-digest] {name} {meta['VERSION']} ({expected[:12]}...)"
+        src_note = "cached, verified" if from_cache else "fetched, verified"
+        return f"OK [github-release-digest] {name} {meta['VERSION']} ({expected[:12]}..., {src_note})"
 
     if src.startswith("sha256-html:"):
         url = src[len("sha256-html:") :]
-        txt = curl_bytes(url).decode("utf-8", errors="replace")
-        m_row = re.search(rf"{re.escape(filename)}.*?(?:</tr|</tr>|\n\n)", txt, re.S | re.I)
-        if not m_row:
-            raise RuntimeError(f"could not find row for {filename!r} in {url}")
-        hashes = re.findall(r"\b([0-9a-fA-F]{64})\b", m_row.group(0))
-        if not hashes:
-            raise RuntimeError(f"could not find 64-hex SHA-256 for {filename!r} in {url}")
-        got = hashes[0].lower()
+
+        def _extract_html(raw: bytes) -> str:
+            txt = raw.decode("utf-8", errors="replace")
+            m_row = re.search(rf"{re.escape(filename)}.*?(?:</tr|</tr>|\n\n)", txt, re.S | re.I)
+            if not m_row:
+                raise RuntimeError(f"could not find row for {filename!r} in {url}")
+            hashes = re.findall(r"\b([0-9a-fA-F]{64})\b", m_row.group(0))
+            if not hashes:
+                raise RuntimeError(f"could not find 64-hex SHA-256 for {filename!r} in {url}")
+            return hashes[0].lower()
+
+        got, from_cache = fetch_and_extract(url, cache_dir, _extract_html)
         if got != expected:
             raise RuntimeError(f"upstream HTML checksum mismatch from {url}: PORT={expected}, upstream={got}")
-        return f"OK [sha256-html] {name} {meta['VERSION']} ({expected[:12]}...)"
+        src_note = "cached, verified" if from_cache else "fetched, verified"
+        return f"OK [sha256-html] {name} {meta['VERSION']} ({expected[:12]}..., {src_note})"
 
     if src.startswith("upstream-sha512-only:"):
         url = src[len("upstream-sha512-only:") :]
-        txt = curl_bytes(url).decode("utf-8", errors="replace")
-        upstream_sha512 = None
-        for line in txt.splitlines():
-            m = re.match(r"^([0-9a-fA-F]{128})\s+(?:\d+\s+)?\*?(.+)$", line.strip())
-            if m and os.path.basename(m.group(2).strip()) == filename:
-                upstream_sha512 = m.group(1).lower()
-                break
-        if not upstream_sha512:
+
+        def _extract_sha512(raw: bytes) -> str:
+            txt = raw.decode("utf-8", errors="replace")
+            for line in txt.splitlines():
+                m = re.match(r"^([0-9a-fA-F]{128})\s+(?:\d+\s+)?\*?(.+)$", line.strip())
+                if m and os.path.basename(m.group(2).strip()) == filename:
+                    return m.group(1).lower()
             raise RuntimeError(f"could not find SHA-512 for {filename!r} at {url}")
+
+        upstream_sha512, from_cache = fetch_and_extract(url, cache_dir, _extract_sha512)
         tarball_path = ensure_cached_tarball(meta, cache_dir)
         got512 = file_hash(tarball_path, "sha512")
         if got512 != upstream_sha512:
             raise RuntimeError(f"SHA-512 mismatch for {filename}: expected {upstream_sha512}, got {got512}")
-        return f"OK [upstream-sha512] {name} {meta['VERSION']} ({expected[:12]}...)"
+        src_note = "cached, verified" if from_cache else "fetched, verified"
+        return f"OK [upstream-sha512] {name} {meta['VERSION']} ({expected[:12]}..., {src_note})"
 
     if src.startswith("upstream-sha3-256:"):
         url = src[len("upstream-sha3-256:") :]
-        txt = curl_bytes(url).decode("utf-8", errors="replace")
-        upstream_sha3 = None
-        for line in txt.splitlines():
-            if filename in line and line.strip().startswith("PRODUCT,"):
-                parts = line.strip().split(",")
-                if len(parts) >= 5 and re.match(r"^[0-9a-fA-F]{64}$", parts[4]):
-                    upstream_sha3 = parts[4].lower()
-                    break
-        if not upstream_sha3:
+
+        def _extract_sha3(raw: bytes) -> str:
+            txt = raw.decode("utf-8", errors="replace")
+            for line in txt.splitlines():
+                if filename in line and line.strip().startswith("PRODUCT,"):
+                    parts = line.strip().split(",")
+                    if len(parts) >= 5 and re.match(r"^[0-9a-fA-F]{64}$", parts[4]):
+                        return parts[4].lower()
             raise RuntimeError(f"could not find SHA3-256 for {filename!r} at {url}")
+
+        upstream_sha3, from_cache = fetch_and_extract(url, cache_dir, _extract_sha3)
         tarball_path = ensure_cached_tarball(meta, cache_dir)
         got3 = file_hash(tarball_path, "sha3_256")
         if got3 != upstream_sha3:
             raise RuntimeError(f"SHA3-256 mismatch for {filename}: expected {upstream_sha3}, got {got3}")
-        return f"OK [upstream-sha3-256] {name} {meta['VERSION']} ({expected[:12]}...)"
+        src_note = "cached, verified" if from_cache else "fetched, verified"
+        return f"OK [upstream-sha3-256] {name} {meta['VERSION']} ({expected[:12]}..., {src_note})"
 
     if strict:
         raise RuntimeError(f"{name}: non-verifiable UPSTREAM_SHA256_SOURCE under --strict: {src}")
@@ -520,12 +643,34 @@ def detect_changed_ports(repo_root: str, base_ref: str) -> list:
     return sorted(changed)
 
 
+def expand_with_deps(all_ports: dict, initial_names: list) -> list:
+    selected = set()
+    stack = list(initial_names)
+    while stack:
+        cur = stack.pop()
+        if cur not in all_ports:
+            raise ValueError(f"unknown port: {cur}")
+        if cur in selected:
+            continue
+        selected.add(cur)
+        for dep in all_ports[cur].get("DEPS", "").split():
+            dep = dep.strip()
+            if not dep:
+                continue
+            if dep not in all_ports:
+                raise ValueError(f"port '{cur}' depends on unknown port '{dep}'")
+            stack.append(dep)
+    return sorted(selected)
+
+
 def main() -> int:
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     parser = argparse.ArgumentParser(description="Verify ports/*/PORT upstream SHA-256 pins and PGP signatures")
     parser.add_argument("ports", nargs="*", help="Specific port names to verify")
     parser.add_argument("--all", action="store_true", help="Verify all ports in ports/")
     parser.add_argument("--verifiable-direct", action="store_true", help="Verify all ports with direct sha256: or pgp: sources")
+    parser.add_argument("--respect-filc-ports", action="store_true", help="When FILC_PORTS env var is set, restrict verification to its transitive dependency closure")
+    parser.add_argument("--with-deps", action="store_true", help="Expand explicitly listed ports to include transitive DEPS")
     parser.add_argument("--changed", nargs="?", const="", default=None, help="Verify ports whose PORT file changed relative to BASE_REF (default: origin/main)")
     parser.add_argument("--check-metadata-only", action="store_true", help="Offline check: validate UPSTREAM_SHA256_SOURCE metadata and pinned PGP key fingerprints only")
     parser.add_argument("--strict", action="store_true", help="Fail if any selected port has an unverified/unpinned source")
@@ -546,12 +691,33 @@ def main() -> int:
         print("error: no PORT recipes found", file=sys.stderr)
         return 1
 
+    filc_ports_env = os.environ.get("FILC_PORTS", "").strip() if args.respect_filc_ports else ""
+
     if args.ports:
-        selected = args.ports
-        for p in selected:
+        for p in args.ports:
             if p not in all_ports:
                 print(f"error: unknown port: {p}", file=sys.stderr)
                 return 1
+        selected = expand_with_deps(all_ports, args.ports) if args.with_deps else list(args.ports)
+    elif filc_ports_env:
+        wanted = [p.strip() for p in filc_ports_env.split(",") if p.strip()]
+        try:
+            closure = expand_with_deps(all_ports, wanted)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if args.verifiable_direct:
+            selected = [
+                n
+                for n in closure
+                if all_ports[n].get("UPSTREAM_SHA256_SOURCE", "").startswith(DIRECT_SCHEMES)
+            ]
+        else:
+            selected = closure
+        print(
+            f"verify-pins: FILC_PORTS={filc_ports_env} -> closure={len(closure)}, selected={len(selected)}",
+            flush=True,
+        )
     elif args.verifiable_direct:
         selected = [
             n

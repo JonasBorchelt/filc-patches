@@ -356,10 +356,8 @@ touch "$work/ports-state/$name.installed"
 EOF
 chmod +x "$FAKE_BUILDER"
 
-set +e
-"$REPO_ROOT/scripts/build-ports" --ports-dir "$MOCK_DIR" --builder "$FAKE_BUILDER" "$MOCK_WORK"
-RC=$?
-set -e
+RC=0
+"$REPO_ROOT/scripts/build-ports" --ports-dir "$MOCK_DIR" --builder "$FAKE_BUILDER" "$MOCK_WORK" || RC=$?
 if [[ $RC -eq 0 ]]; then
   echo "FAIL: build-ports should exit non-zero when a port fails" >&2
   exit 1
@@ -459,6 +457,12 @@ port_configure() {
   case ":\${LD_LIBRARY_PATH:-}:" in
     *":\$PIZFIX/lib:"*) echo "ERROR: LD_LIBRARY_PATH must not contain PIZFIX/lib" >&2; return 1 ;;
   esac
+  if [[ -n "\${CHECK_SHORT_TMPDIR:-}" ]]; then
+    if [[ "\${#TMPDIR}" -gt 48 ]]; then
+      echo "ERROR: TMPDIR too long for AF_UNIX sockets (\${#TMPDIR} > 48): \$TMPDIR" >&2
+      return 1
+    fi
+  fi
   touch "\$SRC_DIR/.configured"
 }
 port_build()     { test -f "\$SRC_DIR/.configured"; touch "\$SRC_DIR/.built"; }
@@ -504,14 +508,19 @@ port_test()      { :; }
 EOF
 
 for PAR_MODE in 1 4; do
-  FN_WORK_MODE="${FN_WORK}-p${PAR_MODE}"
+  # Use a deep work_root in parallel mode to verify per-port TMPDIR stays short (AF_UNIX <= 48 chars).
+  if [[ "$PAR_MODE" -gt 1 ]]; then
+    FN_WORK_MODE="${FN_WORK}/very-deep-ci-workspace-path-simulation-for-af-unix-limit-check/p${PAR_MODE}"
+    CHECK_TMP_FLAG="1"
+  else
+    FN_WORK_MODE="${FN_WORK}-p${PAR_MODE}"
+    CHECK_TMP_FLAG=""
+  fi
   FN_OUT="$TMP_DIR/fn-p${PAR_MODE}.out"
   FN_ERR="$TMP_DIR/fn-p${PAR_MODE}.err"
-  set +e
-  PATH="$FAKE_BIN:$PATH" FILC_TOOLCHAIN_ROOT="$FN_TC" \
-    "$REPO_ROOT/scripts/build-ports" --parallel "$PAR_MODE" --ports-dir "$FN_DIR" "$FN_WORK_MODE" >"$FN_OUT" 2>"$FN_ERR"
-  FN_RC=$?
-  set -e
+  FN_RC=0
+  CHECK_SHORT_TMPDIR="$CHECK_TMP_FLAG" PATH="$FAKE_BIN:$PATH" FILC_TOOLCHAIN_ROOT="$FN_TC" \
+    "$REPO_ROOT/scripts/build-ports" --parallel "$PAR_MODE" --ports-dir "$FN_DIR" "$FN_WORK_MODE" >"$FN_OUT" 2>"$FN_ERR" || FN_RC=$?
   if [[ $FN_RC -eq 0 ]]; then
     echo "FAIL (parallel=${PAR_MODE}): expected non-zero exit when fn-pkg-fail/fn-cfg-fail fail" >&2
     exit 1

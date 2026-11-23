@@ -13,6 +13,7 @@ require "fileutils"
 require "json"
 require "open3"
 require "optparse"
+require "securerandom"
 require "set"
 
 VALID_POLICY_CLASSES = Set.new(%w[
@@ -318,12 +319,13 @@ end
 
 def run_parallel_dag(ports, selected, order, opts, work_root, state_dir, parallel)
   logs_dir = File.join(work_root, "ports-logs")
-  tmp_dir = File.join(work_root, "ports-tmp")
   install_lock = ENV.fetch("FILC_PORTS_INSTALL_LOCK", File.join(work_root, "ports-install.lock"))
   FileUtils.mkdir_p(logs_dir)
-  FileUtils.mkdir_p(tmp_dir)
+  run_id = SecureRandom.hex(3)
+  created_tmps = []
 
   total_jobs = parse_positive_int(ENV["FILC_PORTS_JOBS"], Etc.nprocessors, "FILC_PORTS_JOBS")
+  base_timeout = parse_positive_int(ENV["FILC_PORT_TIMEOUT"], 900, "FILC_PORT_TIMEOUT")
   downstream = compute_downstream_counts(ports, selected)
   rdeps = Hash.new { |h, k| h[k] = [] }
   remaining_deps = {}
@@ -350,27 +352,37 @@ def run_parallel_dag(ports, selected, order, opts, work_root, state_dir, paralle
       meta = ports[name]
       started_count += 1
       slots = [parallel, running + 1 + ready.length].min
-      per_port_jobs = [[1, (total_jobs.to_f / slots).ceil].max, total_jobs].min
+      # Mild 1.5x job-pool overlap when multiple ports run concurrently because
+      # ports alternate between single-threaded configure/test and parallel make.
+      eff_pool = slots > 1 ? (total_jobs * 1.5).round : total_jobs
+      per_port_jobs = [[1, (eff_pool.to_f / slots).ceil].max, total_jobs].min
+      # Scale per-stage timeout inversely with reduced job budget so large C++
+      # builds (e.g. cmake) do not trip false timeouts under parallel load.
+      port_timeout = [[base_timeout, (base_timeout * total_jobs.to_f / per_port_jobs).ceil].max, 3600].min
 
-      port_tmp = File.join(tmp_dir, name)
+      # Keep TMPDIR short directly under /tmp so AF_UNIX sockets (e.g. Python
+      # multiprocessing/compileall) never exceed Linux's 108-byte sun_path limit.
+      port_tmp = "/tmp/fp.#{name}.#{run_id}"
       FileUtils.rm_rf(port_tmp)
       FileUtils.mkdir_p(port_tmp)
+      created_tmps << port_tmp
       log_file = File.join(logs_dir, "#{name}.log")
 
       $stdout.puts("[#{started_count}/#{total}] BUILDING #{name} #{meta['version']} " \
-                   "(T#{meta['tier']}, #{meta['policy_class']}, jobs=#{per_port_jobs})")
+                   "(T#{meta['tier']}, #{meta['policy_class']}, jobs=#{per_port_jobs}, timeout=#{port_timeout}s)")
       $stdout.puts("FILC_PORT #{name} building policy=#{meta['policy_class']}")
       $stdout.flush
 
       child_env = {
         "FILC_PORTS_DIR" => File.expand_path(opts[:ports_dir]),
         "FILC_PORTS_JOBS" => per_port_jobs.to_s,
+        "FILC_PORT_TIMEOUT" => port_timeout.to_s,
         "FILC_PORTS_INSTALL_LOCK" => install_lock,
         "TMPDIR" => port_tmp,
       }
 
       running += 1
-      Thread.new(name, child_env, log_file) do |pname, penv, plog|
+      Thread.new(name, child_env, log_file, port_tmp) do |pname, penv, plog, ptmp|
         rc = 1
         begin
           pid = Process.spawn(penv, opts[:builder], pname, work_root, %i[out err] => [plog, "w"])
@@ -379,79 +391,85 @@ def run_parallel_dag(ports, selected, order, opts, work_root, state_dir, paralle
         rescue StandardError => e
           File.open(plog, "a", encoding: "UTF-8") { |f| f.puts("runner spawn error: #{e.message}") }
           rc = 1
+        ensure
+          FileUtils.rm_rf(ptmp)
         end
         done_q.push([pname, rc, plog])
       end
     end
   end
 
-  launch_ready.call
+  begin
+    launch_ready.call
 
-  while running.positive?
-    name, rc, log_file = done_q.pop
-    running -= 1
-    meta = ports[name]
-    rec = load_port_result(state_dir, name, meta, rc)
-    results[name] = rec
+    while running.positive?
+      name, rc, log_file = done_q.pop
+      running -= 1
+      meta = ports[name]
+      rec = load_port_result(state_dir, name, meta, rc)
+      results[name] = rec
 
-    log_lines = if File.file?(log_file)
-                  File.binread(log_file).force_encoding("UTF-8")
-                      .encode("UTF-8", invalid: :replace, undef: :replace).lines
-                else
-                  []
-                end
+      log_lines = if File.file?(log_file)
+                    File.binread(log_file).force_encoding("UTF-8")
+                        .encode("UTF-8", invalid: :replace, undef: :replace).lines
+                  else
+                    []
+                  end
 
-    build_sec_lines = log_lines.select { |l| l.start_with?("FILC_PORT_BUILD_SECONDS ") }
-    final_marker = log_lines.reverse.find do |l|
-      l.start_with?("FILC_PORT #{name} ") && !l.start_with?("FILC_PORT #{name} building")
-    end
+      build_sec_lines = log_lines.select { |l| l.start_with?("FILC_PORT_BUILD_SECONDS ") }
+      final_marker = log_lines.reverse.find do |l|
+        l.start_with?("FILC_PORT #{name} ") && !l.start_with?("FILC_PORT #{name} building")
+      end
 
-    if rec["status"] == "failed"
-      $stderr.puts("=== FAILED PORT LOG: #{name} (last 120 lines; full log: #{log_file}) ===")
-      tail = log_lines.length > 120 ? log_lines[-120..] : log_lines
-      tail.each { |l| $stderr.write(l) }
-      $stderr.puts("") if !tail.empty? && !tail.last.end_with?("\n")
-      $stderr.puts("=== END FAILED PORT LOG: #{name} ===")
-      $stderr.flush
-    end
+      if rec["status"] == "failed"
+        $stderr.puts("=== FAILED PORT LOG: #{name} (last 120 lines; full log: #{log_file}) ===")
+        tail = log_lines.length > 120 ? log_lines[-120..] : log_lines
+        tail.each { |l| $stderr.write(l) }
+        $stderr.puts("") if !tail.empty? && !tail.last.end_with?("\n")
+        $stderr.puts("=== END FAILED PORT LOG: #{name} ===")
+        $stderr.flush
+      end
 
-    build_sec_lines.each { |l| $stdout.write(l) }
-    if final_marker
-      $stdout.write(final_marker)
-      $stdout.puts("") unless final_marker.end_with?("\n")
-    else
-      st_token = rec["status"] == "failed" ? "failed:#{rec['failed_kind'] || 'package'}" : rec["status"]
-      $stdout.puts("FILC_PORT #{name} #{st_token} policy=#{meta['policy_class']} " \
-                   "duration=#{rec['duration_seconds']} patches=#{rec['patch_count']}")
-    end
-    $stdout.flush
+      build_sec_lines.each { |l| $stdout.write(l) }
+      if final_marker
+        $stdout.write(final_marker)
+        $stdout.puts("") unless final_marker.end_with?("\n")
+      else
+        st_token = rec["status"] == "failed" ? "failed:#{rec['failed_kind'] || 'package'}" : rec["status"]
+        $stdout.puts("FILC_PORT #{name} #{st_token} policy=#{meta['policy_class']} " \
+                     "duration=#{rec['duration_seconds']} patches=#{rec['patch_count']}")
+      end
+      $stdout.flush
 
-    finished_nodes = [name]
-    until finished_nodes.empty?
-      cur = finished_nodes.shift
-      rdeps[cur].each do |nxt|
-        remaining_deps[nxt] -= 1
-        next unless remaining_deps[nxt].zero?
+      finished_nodes = [name]
+      until finished_nodes.empty?
+        cur = finished_nodes.shift
+        rdeps[cur].each do |nxt|
+          remaining_deps[nxt] -= 1
+          next unless remaining_deps[nxt].zero?
 
-        blockers = find_root_blockers(nxt, ports, results)
-        if !blockers.empty?
-          nxt_meta = ports[nxt]
-          started_count += 1
-          $stdout.puts("[#{started_count}/#{total}] BLOCKED #{nxt} (blocked by: #{blockers.join(', ')})")
-          $stdout.puts("FILC_PORT #{nxt} blocked policy=#{nxt_meta['policy_class']} blocked_by=#{blockers.join(',')}")
-          $stdout.flush
-          brec = make_blocked_record(nxt, nxt_meta, blockers)
-          results[nxt] = brec
-          write_json(File.join(state_dir, "#{nxt}.json"), brec)
-          finished_nodes << nxt
-        else
-          ready << nxt
-          ready.sort_by!(&priority)
+          blockers = find_root_blockers(nxt, ports, results)
+          if !blockers.empty?
+            nxt_meta = ports[nxt]
+            started_count += 1
+            $stdout.puts("[#{started_count}/#{total}] BLOCKED #{nxt} (blocked by: #{blockers.join(', ')})")
+            $stdout.puts("FILC_PORT #{nxt} blocked policy=#{nxt_meta['policy_class']} blocked_by=#{blockers.join(',')}")
+            $stdout.flush
+            brec = make_blocked_record(nxt, nxt_meta, blockers)
+            results[nxt] = brec
+            write_json(File.join(state_dir, "#{nxt}.json"), brec)
+            finished_nodes << nxt
+          else
+            ready << nxt
+            ready.sort_by!(&priority)
+          end
         end
       end
-    end
 
-    launch_ready.call
+      launch_ready.call
+    end
+  ensure
+    created_tmps.each { |ptmp| FileUtils.rm_rf(ptmp) }
   end
 
   if results.length != order.length

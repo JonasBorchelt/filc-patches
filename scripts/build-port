@@ -51,6 +51,7 @@ CLANG_BIN="${FILC_CLANG:-$TOOLCHAIN_ROOT/build/bin/clang}"
 CLANGXX_BIN="${FILC_CLANGXX:-$TOOLCHAIN_ROOT/build/bin/clang++}"
 LLVM_AR="${FILC_AR:-$TOOLCHAIN_ROOT/build/bin/llvm-ar}"
 LLVM_RANLIB="${FILC_RANLIB:-$TOOLCHAIN_ROOT/build/bin/llvm-ranlib}"
+LLVM_NM="${FILC_NM:-$TOOLCHAIN_ROOT/build/bin/llvm-nm}"
 
 NPROC="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)"
 JOBS="${FILC_PORTS_JOBS:-$NPROC}"
@@ -254,7 +255,7 @@ run_stage_fn() {
     trace_flag="set -x;"
   fi
   local stage_script="set -euo pipefail; export PS4='+ [$fn:\${LINENO}] '; trap 'rc=\$?; echo \"STAGE_CMD_FAILED port=\$PORT_NAME stage=\$CURRENT_STAGE fn=$fn line=\${LINENO} rc=\$rc cmd=\${BASH_COMMAND}\" >&2' ERR; source \"\$PORT_FILE\"; $trace_flag $fn"
-  export PORT_NAME CURRENT_STAGE PORT_FILE SRC_DIR PIZFIX CC CXX AR RANLIB PREFIX PKG_CONFIG_PATH PATH CFLAGS CXXFLAGS LDFLAGS JOBS
+  export PORT_NAME CURRENT_STAGE PORT_FILE SRC_DIR PIZFIX CC CXX AR RANLIB NM lt_cv_sys_global_symbol_pipe PREFIX PKG_CONFIG_PATH PATH CFLAGS CXXFLAGS LDFLAGS JOBS
   if [[ "$use_lock" == "1" ]]; then
     run_install_cmd bash -c "$stage_script"
   elif command -v timeout >/dev/null 2>&1; then
@@ -386,6 +387,18 @@ if [[ -x "$LLVM_RANLIB" ]]; then
   export RANLIB="$LLVM_RANLIB"
 else
   export RANLIB="${RANLIB:-ranlib}"
+fi
+if [[ -x "$LLVM_NM" ]]; then
+  export NM="$LLVM_NM"
+else
+  export NM="${NM:-nm}"
+fi
+# Provide a capability/ABI-aware libtool global_symbol_pipe centrally so
+# autotools/libtool ports using -export-symbols-regex work unmodified under
+# Fil-C's pizlonated_ symbol prefix (paired with Clang driver version-script
+# rewriting for both --version-script and -version-script).
+if [[ -z "${lt_cv_sys_global_symbol_pipe+x}" ]]; then
+  export lt_cv_sys_global_symbol_pipe="sed -n -e 's/^.*[	 ]\([ABCDGIRSTW][ABCDGIRSTW]*\)[	 ][	 ]*pizlonated_\([_A-Za-z][_A-Za-z0-9]*\)$/\1 pizlonated_\2 \2/p' | sed '/ __gnu_lto/d'"
 fi
 export PREFIX="$PIZFIX"
 export PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig:$PIZFIX/share/pkgconfig"

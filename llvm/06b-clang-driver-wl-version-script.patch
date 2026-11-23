@@ -1,20 +1,22 @@
-Subject: [PATCH] Rewrite -Wl,--version-script= arguments for Fil-C pizlonated symbols
+Subject: [PATCH] Rewrite -Wl,--version-script and -Wl,-version-script arguments for Fil-C pizlonated symbols
 Fil-C-Origin-Commits: original
 
 Upstream build systems (autotools, libtool, CMake, Meson) pass linker
 version scripts via -Wl,--version-script=<file>, -Wl,--version-script,<file>,
-or -Xlinker --version-script. AddLinkerInputs() forwards those directly into
-CmdArgs, bypassing the Fil-C driver's OPT_version_script_EQ rewrite loop and
-leaving un-pizlonated symbol names in the script.
+-Wl,-version-script,<file> (GNU libtool archive_expsym_cmds), or -Xlinker.
+AddLinkerInputs() forwards those directly into CmdArgs, bypassing the Fil-C
+driver's OPT_version_script_EQ rewrite loop and leaving un-pizlonated symbol
+names in the script.
 
 Scan CmdArgs right after AddLinkerInputs() to run PizlonateVersionScript() on
-both joined (--version-script=<file>) and separated (--version-script <file>)
-linker arguments, replacing missing-file aborts with err_drv_no_such_file.
+both joined (--version-script=<file>, -version-script=<file>) and separated
+(--version-script <file>, -version-script <file>) linker arguments, replacing
+missing-file aborts with err_drv_no_such_file.
 
 diff --git a/clang/lib/Driver/ToolChains/Gnu.cpp b/clang/lib/Driver/ToolChains/Gnu.cpp
 --- a/clang/lib/Driver/ToolChains/Gnu.cpp
 +++ b/clang/lib/Driver/ToolChains/Gnu.cpp
-@@ -723,27 +723,39 @@
+@@ -723,27 +723,43 @@
  
    AddLinkerInputs(ToolChain, Inputs, Args, CmdArgs, JA);
  
@@ -61,7 +63,11 @@ diff --git a/clang/lib/Driver/ToolChains/Gnu.cpp b/clang/lib/Driver/ToolChains/G
 +    if (ArgStr.starts_with("--version-script=")) {
 +      if (const char *Out = RewriteVersionScript(ArgStr.drop_front(strlen("--version-script="))))
 +        CmdArgs[I] = Args.MakeArgString(std::string("--version-script=") + Out);
-+    } else if (ArgStr == "--version-script" && I + 1 < CmdArgs.size()) {
++    } else if (ArgStr.starts_with("-version-script=")) {
++      if (const char *Out = RewriteVersionScript(ArgStr.drop_front(strlen("-version-script="))))
++        CmdArgs[I] = Args.MakeArgString(std::string("-version-script=") + Out);
++    } else if ((ArgStr == "--version-script" || ArgStr == "-version-script") &&
++               I + 1 < CmdArgs.size()) {
 +      if (const char *Out = RewriteVersionScript(CmdArgs[I + 1]))
 +        CmdArgs[I + 1] = Out;
 +      ++I;

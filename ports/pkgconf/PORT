@@ -12,8 +12,8 @@ CONFIGURE_ARGS=""
 MAKE_ARGS=""
 INSTALL_ARGS=""
 TEST_CMD=""
-POLICY_CLASS="P2-Package"
-POLICY_RATIONALE="Adjusts libtool symbol-export regex and global-symbol pipe in configure/Makefile.in for Fil-C's pizlonated_ ABI symbol prefix."
+POLICY_CLASS="P0-Clean"
+POLICY_RATIONALE="Builds unmodified upstream pkgconf 3.0.10 now that scripts/build-port exports llvm-nm and Fil-C's pizlonated_ libtool global_symbol_pipe centrally and the Clang driver rewrites -Wl,-version-script arguments."
 FILC_ORIGIN_REF="cede3de02b42:projects/pkgconf.projeny"
 
 port_install() {

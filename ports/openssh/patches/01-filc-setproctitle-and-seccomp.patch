@@ -82,7 +82,7 @@ diff --git a/openbsd-compat/setproctitle.c b/openbsd-compat/setproctitle.c
 -	for (i = 0; envp[i] != NULL; i++)
 -		environ[i] = strdup(envp[i]);
 -	environ[i] = NULL;
--#endif /* SPT_TYPE == SPT_REUSEARGV */
+-#endif /* SPT_REUSEARGV */
  }
  
  #ifndef HAVE_SETPROCTITLE
@@ -164,14 +164,14 @@ diff --git a/sandbox-seccomp-filter.c b/sandbox-seccomp-filter.c
  #ifdef __NR_clock_gettime
  	SC_ALLOW(__NR_clock_gettime),
  #endif
-@@ -541,6 +546,10 @@
- ssh_sandbox_child(struct ssh_sandbox *box)
+@@ -542,6 +547,10 @@
  {
  	struct rlimit rl_zero, rl_one = {.rlim_cur = 1, .rlim_max = 1};
-+
+ 
 +	/* Tell the Fil-C runtime that this is the last chance to create threads, and that it
 +	   shouldn't dynamically shutdown and restart needed threads after this point. */
 +	zlock_runtime_threads();
- 
++
  	/* Set rlimits for completeness if possible. */
  	rl_zero.rlim_cur = rl_zero.rlim_max = 0;
+ 	if (setrlimit(RLIMIT_FSIZE, &rl_zero) == -1)

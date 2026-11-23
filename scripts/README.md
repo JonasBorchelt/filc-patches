@@ -14,6 +14,7 @@ Fil-C toolchain, and run verification suites:
 - `scripts/nightly-check [LLVM_SRC_DIR] [BUILD_DIR] [REPORT_FILE]`: Automated latest-LLVM-release patch and smoke-test check used by nightly CI.
 - `scripts/verify-identical [--filc-dir <path>] [--work-dir <path>]`: Applies the full LLVM series against `UPSTREAM`'s `LLVM_COMMIT` and verifies bit-for-bit identity against `UPSTREAM`'s `FILC_COMMIT`.
 - `scripts/verify-pins [--check-metadata-only] [--all|--verifiable-direct|--changed [ref]|<port>...]`: Verifies `ports/*/PORT` `UPSTREAM_SHA256` pins against official upstream checksum files, GitHub release digests, or detached PGP signatures using pinned keys in `ports/pgp-keys/`.
+- `scripts/verify-patches [--all|--ports a,b [--with-deps]|<port>...]`: Verifies that every patch in `ports/*/patches/series` applies cleanly to its pinned, SHA-256-verified upstream tarball with zero fuzz and zero line offset.
 - `scripts/build-port <port-name> [WORK_ROOT]`: Builds, installs, and tests a single port recipe under the staged Fil-C toolchain.
 - `scripts/build-ports [--dry-run] [--wave N|--tiers ...|--ports ...] [WORK_ROOT]`: Validates the `ports/` dependency DAG and builds ports in topological order.
 - `scripts/test-ports`: Runs offline unit tests for the port runner, DAG validation, patch headers, and pin metadata.

@@ -8,6 +8,7 @@ set -euo pipefail
 #   4. Verifies SHA-256 mismatch rejection in scripts/build-port
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ORIG_CACHE_DIR="${FILC_PORTS_CACHE_DIR:-}"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 export FILC_PORTS_CACHE_DIR="$TMP_DIR/cache"
@@ -92,6 +93,86 @@ for series in sorted(glob.glob(os.path.join(ports_dir, "*", "patches", "series")
         checked += 1
 print(f"PATCH HEADERS OK (checked={checked})")
 PY
+
+echo "=== 2b. Zero-fuzz zero-offset patch-apply verification ==="
+VP_DIR="$TMP_DIR/vp-ports"
+VP_CACHE="$TMP_DIR/vp-cache"
+mkdir -p "$VP_DIR/cleanp/patches" "$VP_DIR/offsetp/patches" "$VP_DIR/fuzzp/patches" "$TMP_DIR/vp-src/demo-1.0"
+printf 'line1\nline2\nline3\nline4\nline5\nline6\nline7\n' > "$TMP_DIR/vp-src/demo-1.0/demo.txt"
+tar -czf "$TMP_DIR/demo-1.0.tar.gz" -C "$TMP_DIR/vp-src" demo-1.0
+if command -v sha256sum >/dev/null 2>&1; then
+  VP_SHA="$(sha256sum "$TMP_DIR/demo-1.0.tar.gz" | awk '{print $1}')"
+else
+  VP_SHA="$(shasum -a 256 "$TMP_DIR/demo-1.0.tar.gz" | awk '{print $1}')"
+fi
+for p in cleanp offsetp fuzzp; do
+  cat > "$VP_DIR/$p/PORT" <<EOF
+NAME="$p"
+VERSION="1.0"
+LICENSE="MIT"
+UPSTREAM_URL="file://$TMP_DIR/demo-1.0.tar.gz"
+UPSTREAM_SHA256="$VP_SHA"
+UPSTREAM_SHA256_SOURCE="unverified-upstream-no-checksum:file://$TMP_DIR/demo-1.0.tar.gz"
+EXTRACT_DIR="demo-1.0"
+TIER=0
+DEPS=""
+BUILD_SYSTEM="make"
+POLICY_CLASS="P2-Package"
+EOF
+  printf '01-test.patch\n' > "$VP_DIR/$p/patches/series"
+done
+cat > "$VP_DIR/cleanp/patches/01-test.patch" <<'EOF'
+--- a/demo.txt
++++ b/demo.txt
+@@ -2,5 +2,5 @@
+ line2
+ line3
+-line4
++line4_fixed
+ line5
+ line6
+EOF
+cat > "$VP_DIR/offsetp/patches/01-test.patch" <<'EOF'
+--- a/demo.txt
++++ b/demo.txt
+@@ -1,5 +1,5 @@
+ line2
+ line3
+-line4
++line4_fixed
+ line5
+ line6
+EOF
+cat > "$VP_DIR/fuzzp/patches/01-test.patch" <<'EOF'
+--- a/demo.txt
++++ b/demo.txt
+@@ -2,5 +2,5 @@
+ WRONG_CONTEXT
+ line3
+-line4
++line4_fixed
+ line5
+ line6
+EOF
+"$REPO_ROOT/scripts/verify-patches" --ports-dir "$VP_DIR" --cache-dir "$VP_CACHE" cleanp
+if "$REPO_ROOT/scripts/verify-patches" --ports-dir "$VP_DIR" --cache-dir "$VP_CACHE" offsetp 2>/dev/null; then
+  echo "FAIL: verify-patches should reject line-offset patch" >&2
+  exit 1
+fi
+if "$REPO_ROOT/scripts/verify-patches" --ports-dir "$VP_DIR" --cache-dir "$VP_CACHE" fuzzp 2>/dev/null; then
+  echo "FAIL: verify-patches should reject fuzz patch" >&2
+  exit 1
+fi
+echo "VERIFY-PATCHES UNIT TESTS OK"
+
+PATCH_CACHE_DIR="${ORIG_CACHE_DIR:-$REPO_ROOT/.work/ports/ports-cache}"
+if [[ -n "${FILC_TEST_VERIFY_PATCHES_PORTS:-}" ]]; then
+  "$REPO_ROOT/scripts/verify-patches" --with-deps --cache-dir "$PATCH_CACHE_DIR" --ports "$FILC_TEST_VERIFY_PATCHES_PORTS"
+elif [[ "${FILC_TEST_OFFLINE:-0}" == "1" ]]; then
+  "$REPO_ROOT/scripts/verify-patches" --cached-only --cache-dir "$PATCH_CACHE_DIR" --all
+else
+  "$REPO_ROOT/scripts/verify-patches" --cache-dir "$PATCH_CACHE_DIR" --all
+fi
 
 echo "=== 3. Cycle detection test ==="
 CYCLE_DIR="$TMP_DIR/cycle-ports"

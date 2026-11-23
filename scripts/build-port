@@ -149,6 +149,15 @@ dump_configure_logs() {
   done < <(find "$SRC_DIR" -maxdepth 3 \( -name 'config.log' -o -name 'CMakeError.log' \) -type f 2>/dev/null)
 }
 
+dump_patch_rejects() {
+  [[ -n "${SRC_DIR:-}" && -d "${SRC_DIR:-}" ]] || return 0
+  local rejf
+  while IFS= read -r rejf; do
+    echo "--- PATCH REJECT ($rejf) ---" >&2
+    head -n 80 "$rejf" >&2 || true
+  done < <(find "$SRC_DIR" -maxdepth 4 -name '*.rej' -type f 2>/dev/null)
+}
+
 classify_failure_kind() {
   local stage="$1"
   local rc="$2"
@@ -171,10 +180,13 @@ on_exit() {
   if [[ "$PORT_DONE" != "1" ]]; then
     local fkind
     fkind="$(classify_failure_kind "$CURRENT_STAGE" "$rc")"
+    echo "STAGE_FAILED port=$PORT_NAME stage=$CURRENT_STAGE rc=$rc kind=$fkind" >&2
     if [[ "$CURRENT_STAGE" == "test" ]]; then
       dump_test_logs || true
     elif [[ "$CURRENT_STAGE" == "configure" ]]; then
       dump_configure_logs || true
+    elif [[ "$CURRENT_STAGE" == "patch" ]]; then
+      dump_patch_rejects || true
     fi
     local dur=$(( $(date +%s) - T_START ))
     echo "FILC_PORT $PORT_NAME failed:$fkind policy=$POLICY_CLASS duration=$dur stage=$CURRENT_STAGE rc=$rc" >&2
@@ -193,11 +205,16 @@ run_with_timeout() {
 
 run_stage_fn() {
   local fn="$1"
+  local trace_flag=""
+  if [[ "$fn" == "port_test" ]]; then
+    trace_flag="set -x;"
+  fi
+  local stage_script="set -euo pipefail; export PS4='+ [$fn:\${LINENO}] '; trap 'rc=\$?; echo \"STAGE_CMD_FAILED port=\$PORT_NAME stage=\$CURRENT_STAGE fn=$fn line=\${LINENO} rc=\$rc cmd=\${BASH_COMMAND}\" >&2' ERR; source \"\$PORT_FILE\"; $trace_flag $fn"
+  export PORT_NAME CURRENT_STAGE PORT_FILE SRC_DIR PIZFIX CC CXX AR RANLIB PREFIX PKG_CONFIG_PATH PATH CFLAGS CXXFLAGS LDFLAGS JOBS
   if command -v timeout >/dev/null 2>&1; then
-    export PORT_FILE SRC_DIR PIZFIX CC CXX AR RANLIB PREFIX PKG_CONFIG_PATH PATH CFLAGS CXXFLAGS LDFLAGS JOBS
-    timeout --foreground "$TIMEOUT_SEC" bash -ceu "source \"\$PORT_FILE\"; $fn"
+    timeout --foreground "$TIMEOUT_SEC" bash -c "$stage_script"
   else
-    "$fn"
+    bash -c "$stage_script"
   fi
 }
 
@@ -405,7 +422,7 @@ if declare -F port_test >/dev/null 2>&1; then
   FINAL_STATUS="tested"
 elif [[ -n "$TEST_CMD" ]]; then
   CURRENT_STAGE="test"
-  run_with_timeout bash -ceu "$TEST_CMD"
+  run_with_timeout bash -ceuxo pipefail "$TEST_CMD"
   FINAL_STATUS="tested"
 fi
 

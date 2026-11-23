@@ -9,6 +9,8 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ORIG_CACHE_DIR="${FILC_PORTS_CACHE_DIR:-}"
+ORIG_FILC_PORTS="${FILC_PORTS:-}"
+unset FILC_PORTS
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 export FILC_PORTS_CACHE_DIR="$TMP_DIR/cache"
@@ -166,8 +168,11 @@ fi
 echo "VERIFY-PATCHES UNIT TESTS OK"
 
 PATCH_CACHE_DIR="${ORIG_CACHE_DIR:-$REPO_ROOT/.work/ports/ports-cache}"
-if [[ -n "${FILC_TEST_VERIFY_PATCHES_PORTS:-}" ]]; then
-  "$REPO_ROOT/scripts/verify-patches" --with-deps --cache-dir "$PATCH_CACHE_DIR" --ports "$FILC_TEST_VERIFY_PATCHES_PORTS"
+PATCH_PORTS_FILTER="${FILC_TEST_VERIFY_PATCHES_PORTS:-$ORIG_FILC_PORTS}"
+if [[ -n "$PATCH_PORTS_FILTER" && "${FILC_TEST_OFFLINE:-0}" == "1" ]]; then
+  "$REPO_ROOT/scripts/verify-patches" --cached-only --with-deps --cache-dir "$PATCH_CACHE_DIR" --ports "$PATCH_PORTS_FILTER"
+elif [[ -n "$PATCH_PORTS_FILTER" ]]; then
+  "$REPO_ROOT/scripts/verify-patches" --with-deps --cache-dir "$PATCH_CACHE_DIR" --ports "$PATCH_PORTS_FILTER"
 elif [[ "${FILC_TEST_OFFLINE:-0}" == "1" ]]; then
   "$REPO_ROOT/scripts/verify-patches" --cached-only --cache-dir "$PATCH_CACHE_DIR" --all
 else
@@ -403,6 +408,8 @@ if [[ $FN_RC -eq 0 ]]; then
   exit 1
 fi
 grep -q "MOCK_CONFIG_LOG_ERR: libfoo not found" "$TMP_DIR/fn.err"
+grep -q "STAGE_CMD_FAILED port=fn-pkg-fail stage=test fn=port_test" "$TMP_DIR/fn.err"
+grep -q "+ \[port_test:" "$TMP_DIR/fn.err"
 
 python3 - "$FN_WORK/ports-report.json" "$FN_WORK/ports-report.txt" <<'PY'
 import json, sys
@@ -415,7 +422,25 @@ assert by_name["fn-pkg-fail"]["status"] == "failed" and by_name["fn-pkg-fail"]["
 assert by_name["fn-cfg-fail"]["status"] == "failed" and by_name["fn-cfg-fail"]["failed_kind"] == "package" and by_name["fn-cfg-fail"]["failed_stage"] == "configure", by_name["fn-cfg-fail"]
 assert "PORTS_FAILED=2 (runner=0, package=2)" in txt, txt
 assert "failed:package(test)" in txt and "failed:package(configure)" in txt, txt
-print("CUSTOM RECIPE FUNCTIONS UNDER TIMEOUT, CONFIG.LOG DUMP & FAILED_KIND CHECKS OK")
+print("CUSTOM RECIPE FUNCTIONS UNDER TIMEOUT, CONFIG.LOG DUMP, TEST TRACE & FAILED_KIND CHECKS OK")
+PY
+
+echo "=== 7. --ports and FILC_PORTS subset selection test (openssh -> 8 ports) ==="
+SUB_WORK_CLI="$TMP_DIR/sub-work-cli"
+SUB_WORK_ENV="$TMP_DIR/sub-work-env"
+"$REPO_ROOT/scripts/build-ports" --builder "$FAKE_BUILDER" --ports openssh "$SUB_WORK_CLI"
+FILC_PORTS="openssh" "$REPO_ROOT/scripts/build-ports" --builder "$FAKE_BUILDER" "$SUB_WORK_ENV"
+python3 - "$SUB_WORK_CLI/ports-report.json" "$SUB_WORK_CLI/ports-report.txt" "$SUB_WORK_ENV/ports-report.json" "$SUB_WORK_ENV/ports-report.txt" <<'PY'
+import json, sys
+expected = {"lz4", "pkgconf", "zlib", "zstd", "ncurses", "libedit", "openssl", "openssh"}
+for jpath, tpath in ((sys.argv[1], sys.argv[2]), (sys.argv[3], sys.argv[4])):
+    rep = json.load(open(jpath))
+    txt = open(tpath).read()
+    names = {p["name"] for p in rep["ports"]}
+    assert rep["total"] == 8 and rep["tested"] == 8 and rep["failed"] == 0, rep
+    assert names == expected, (names, expected)
+    assert "PORTS_TOTAL=8" in txt and "PORTS_TESTED=8" in txt, txt
+print("SUBSET SELECTION (--ports openssh AND FILC_PORTS=openssh -> 8 PORTS) OK")
 PY
 
 echo "ALL PORTS TESTS PASSED"

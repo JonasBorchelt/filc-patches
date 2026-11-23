@@ -207,7 +207,11 @@ def main() -> int:
     parser.add_argument("--builder", default=os.path.join(repo_root, "scripts", "build-port"))
     parser.add_argument("--wave", type=int, choices=(1, 2, 3), default=0)
     parser.add_argument("--tiers", default="", help="Comma-separated tier numbers (e.g. 0,1)")
-    parser.add_argument("--ports", default="", help="Comma-separated port names")
+    parser.add_argument(
+        "--ports",
+        default="",
+        help="Comma-separated port names (falls back to FILC_PORTS env var when unset)",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Validate DAG and print plan only")
     args = parser.parse_args()
 
@@ -216,8 +220,12 @@ def main() -> int:
         print("error: no port recipes found", file=sys.stderr)
         return 1
 
-    if args.ports:
-        wanted = [p.strip() for p in args.ports.split(",") if p.strip()]
+    ports_spec = (args.ports or "").strip()
+    if not ports_spec and not args.tiers and not args.wave:
+        ports_spec = os.environ.get("FILC_PORTS", "").strip()
+
+    if ports_spec:
+        wanted = [p.strip() for p in ports_spec.split(",") if p.strip()]
     elif args.tiers:
         tier_set = {int(t.strip()) for t in args.tiers.split(",") if t.strip()}
         wanted = [n for n, m in ports.items() if m["tier"] in tier_set]
@@ -255,6 +263,8 @@ def main() -> int:
     results = {}
     env = os.environ.copy()
     env["FILC_PORTS_DIR"] = os.path.abspath(args.ports_dir)
+    if ports_spec:
+        print(f"FILC_PORTS_FILTER={ports_spec} selected={len(order)} ({','.join(order)})", flush=True)
     print(f"FILC_PORTS_TOTAL {len(order)}", flush=True)
 
     for idx, name in enumerate(order, 1):

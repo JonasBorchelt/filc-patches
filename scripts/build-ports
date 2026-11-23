@@ -8,6 +8,7 @@
 # 'blocked' status to transitive dependents when a dependency fails, and writes a
 # consolidated report (JSON + text) with policy metrics.
 
+require "etc"
 require "fileutils"
 require "json"
 require "open3"
@@ -241,6 +242,225 @@ def write_json(path, obj)
   File.write(path, "#{JSON.pretty_generate(sort_json_keys(obj))}\n", encoding: "UTF-8")
 end
 
+def compute_downstream_counts(ports, selected)
+  rdeps = Hash.new { |h, k| h[k] = [] }
+  selected.each do |n|
+    ports[n]["deps"].each { |d| rdeps[d] << n if selected.include?(d) }
+  end
+  counts = {}
+  selected.each do |n|
+    visited = Set.new
+    stack = rdeps[n].dup
+    until stack.empty?
+      cur = stack.pop
+      next if visited.include?(cur)
+
+      visited.add(cur)
+      stack.concat(rdeps[cur])
+    end
+    counts[n] = visited.length
+  end
+  counts
+end
+
+def parse_positive_int(raw, default_val, label)
+  return default_val if raw.nil? || raw.to_s.strip.empty?
+
+  val = Integer(raw.to_s.strip, 10)
+  raise ArgumentError, "#{label} must be >= 1, got #{raw.inspect}" if val < 1
+
+  val
+rescue ArgumentError
+  raise ArgumentError, "#{label} must be a positive integer, got #{raw.inspect}"
+end
+
+def load_port_result(state_dir, name, meta, rc)
+  state_file = File.join(state_dir, "#{name}.json")
+  if File.file?(state_file)
+    rec = JSON.parse(File.read(state_file, encoding: "UTF-8"))
+    rec["blocked_by"] = [] unless rec.key?("blocked_by")
+  else
+    rec = {
+      "name" => name,
+      "version" => meta["version"],
+      "tier" => meta["tier"],
+      "status" => rc.zero? ? "tested" : "failed",
+      "policy_class" => meta["policy_class"],
+      "deps" => meta["deps"],
+      "blocked_by" => [],
+      "duration_seconds" => 0,
+      "patch_count" => meta["patch_count"],
+      "added_lines" => meta["added_lines"],
+      "removed_lines" => meta["removed_lines"],
+      "files_changed" => meta["files_changed"],
+    }
+  end
+  rec["status"] = "failed" if rc != 0 && !%w[failed blocked].include?(rec["status"])
+  rec
+end
+
+def make_blocked_record(name, meta, blockers)
+  {
+    "name" => name,
+    "version" => meta["version"],
+    "tier" => meta["tier"],
+    "status" => "blocked",
+    "policy_class" => meta["policy_class"],
+    "deps" => meta["deps"],
+    "blocked_by" => blockers,
+    "duration_seconds" => 0,
+    "patch_count" => meta["patch_count"],
+    "added_lines" => meta["added_lines"],
+    "removed_lines" => meta["removed_lines"],
+    "files_changed" => meta["files_changed"],
+  }
+end
+
+def run_parallel_dag(ports, selected, order, opts, work_root, state_dir, parallel)
+  logs_dir = File.join(work_root, "ports-logs")
+  tmp_dir = File.join(work_root, "ports-tmp")
+  install_lock = ENV.fetch("FILC_PORTS_INSTALL_LOCK", File.join(work_root, "ports-install.lock"))
+  FileUtils.mkdir_p(logs_dir)
+  FileUtils.mkdir_p(tmp_dir)
+
+  total_jobs = parse_positive_int(ENV["FILC_PORTS_JOBS"], Etc.nprocessors, "FILC_PORTS_JOBS")
+  downstream = compute_downstream_counts(ports, selected)
+  rdeps = Hash.new { |h, k| h[k] = [] }
+  remaining_deps = {}
+  selected.each do |n|
+    deps = ports[n]["deps"]
+    remaining_deps[n] = deps.length
+    deps.each { |d| rdeps[d] << n }
+  end
+
+  priority = ->(x) { [ports[x]["tier"], -downstream[x], x] }
+  ready = remaining_deps.select { |_n, deg| deg.zero? }.keys.sort_by(&priority)
+  results = {}
+  done_q = Thread::Queue.new
+  running = 0
+  started_count = 0
+  total = order.length
+
+  $stdout.puts("FILC_PORTS_PARALLEL=#{parallel} FILC_PORTS_JOBS=#{total_jobs}")
+  $stdout.flush
+
+  launch_ready = lambda do
+    while running < parallel && !ready.empty?
+      name = ready.shift
+      meta = ports[name]
+      started_count += 1
+      slots = [parallel, running + 1 + ready.length].min
+      per_port_jobs = [[1, (total_jobs.to_f / slots).ceil].max, total_jobs].min
+
+      port_tmp = File.join(tmp_dir, name)
+      FileUtils.rm_rf(port_tmp)
+      FileUtils.mkdir_p(port_tmp)
+      log_file = File.join(logs_dir, "#{name}.log")
+
+      $stdout.puts("[#{started_count}/#{total}] BUILDING #{name} #{meta['version']} " \
+                   "(T#{meta['tier']}, #{meta['policy_class']}, jobs=#{per_port_jobs})")
+      $stdout.puts("FILC_PORT #{name} building policy=#{meta['policy_class']}")
+      $stdout.flush
+
+      child_env = {
+        "FILC_PORTS_DIR" => File.expand_path(opts[:ports_dir]),
+        "FILC_PORTS_JOBS" => per_port_jobs.to_s,
+        "FILC_PORTS_INSTALL_LOCK" => install_lock,
+        "TMPDIR" => port_tmp,
+      }
+
+      running += 1
+      Thread.new(name, child_env, log_file) do |pname, penv, plog|
+        rc = 1
+        begin
+          pid = Process.spawn(penv, opts[:builder], pname, work_root, %i[out err] => [plog, "w"])
+          _, status = Process.waitpid2(pid)
+          rc = status.exitstatus || 1
+        rescue StandardError => e
+          File.open(plog, "a", encoding: "UTF-8") { |f| f.puts("runner spawn error: #{e.message}") }
+          rc = 1
+        end
+        done_q.push([pname, rc, plog])
+      end
+    end
+  end
+
+  launch_ready.call
+
+  while running.positive?
+    name, rc, log_file = done_q.pop
+    running -= 1
+    meta = ports[name]
+    rec = load_port_result(state_dir, name, meta, rc)
+    results[name] = rec
+
+    log_lines = if File.file?(log_file)
+                  File.binread(log_file).force_encoding("UTF-8")
+                      .encode("UTF-8", invalid: :replace, undef: :replace).lines
+                else
+                  []
+                end
+
+    build_sec_lines = log_lines.select { |l| l.start_with?("FILC_PORT_BUILD_SECONDS ") }
+    final_marker = log_lines.reverse.find do |l|
+      l.start_with?("FILC_PORT #{name} ") && !l.start_with?("FILC_PORT #{name} building")
+    end
+
+    if rec["status"] == "failed"
+      $stdout.puts("=== FAILED PORT LOG: #{name} (last 120 lines; full log: #{log_file}) ===")
+      tail = log_lines.length > 120 ? log_lines[-120..] : log_lines
+      tail.each { |l| $stdout.write(l) }
+      $stdout.puts("") if !tail.empty? && !tail.last.end_with?("\n")
+      $stdout.puts("=== END FAILED PORT LOG: #{name} ===")
+    end
+
+    build_sec_lines.each { |l| $stdout.write(l) }
+    if final_marker
+      $stdout.write(final_marker)
+      $stdout.puts("") unless final_marker.end_with?("\n")
+    else
+      st_token = rec["status"] == "failed" ? "failed:#{rec['failed_kind'] || 'package'}" : rec["status"]
+      $stdout.puts("FILC_PORT #{name} #{st_token} policy=#{meta['policy_class']} " \
+                   "duration=#{rec['duration_seconds']} patches=#{rec['patch_count']}")
+    end
+    $stdout.flush
+
+    finished_nodes = [name]
+    until finished_nodes.empty?
+      cur = finished_nodes.shift
+      rdeps[cur].each do |nxt|
+        remaining_deps[nxt] -= 1
+        next unless remaining_deps[nxt].zero?
+
+        blockers = find_root_blockers(nxt, ports, results)
+        if !blockers.empty?
+          nxt_meta = ports[nxt]
+          started_count += 1
+          $stdout.puts("[#{started_count}/#{total}] BLOCKED #{nxt} (blocked by: #{blockers.join(', ')})")
+          $stdout.puts("FILC_PORT #{nxt} blocked policy=#{nxt_meta['policy_class']} blocked_by=#{blockers.join(',')}")
+          $stdout.flush
+          brec = make_blocked_record(nxt, nxt_meta, blockers)
+          results[nxt] = brec
+          write_json(File.join(state_dir, "#{nxt}.json"), brec)
+          finished_nodes << nxt
+        else
+          ready << nxt
+          ready.sort_by!(&priority)
+        end
+      end
+    end
+
+    launch_ready.call
+  end
+
+  if results.length != order.length
+    missing = (selected - Set.new(results.keys)).to_a.sort
+    raise "internal scheduler error: unfinished ports: #{missing.join(', ')}"
+  end
+
+  results
+end
+
 def main(argv)
   repo_root = File.expand_path("..", __dir__)
   opts = {
@@ -249,6 +469,7 @@ def main(argv)
     wave: 0,
     tiers: "",
     ports: "",
+    parallel: nil,
     dry_run: false,
   }
 
@@ -265,6 +486,11 @@ def main(argv)
     end
     o.on("--tiers LIST", "Comma-separated tier numbers (e.g. 0,1)") { |v| opts[:tiers] = v }
     o.on("--ports LIST", "Comma-separated port names (falls back to FILC_PORTS env var when unset)") { |v| opts[:ports] = v }
+    o.on("-j", "--parallel N", Integer, "Max concurrent port builds in DAG (default: FILC_PORTS_PARALLEL or 1)") do |v|
+      raise OptionParser::InvalidArgument, "parallel must be >= 1" if v < 1
+
+      opts[:parallel] = v
+    end
     o.on("--dry-run", "Validate DAG and print plan only") { opts[:dry_run] = true }
   end
 
@@ -327,9 +553,8 @@ def main(argv)
   state_dir = File.join(work_root, "ports-state")
   FileUtils.mkdir_p(state_dir)
 
+  parallel = opts[:parallel] || parse_positive_int(ENV["FILC_PORTS_PARALLEL"], 1, "FILC_PORTS_PARALLEL")
   t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-  results = {}
-  child_env = { "FILC_PORTS_DIR" => File.expand_path(opts[:ports_dir]) }
 
   unless ports_spec.empty?
     $stdout.puts("FILC_PORTS_FILTER=#{ports_spec} selected=#{order.length} (#{order.join(',')})")
@@ -338,60 +563,36 @@ def main(argv)
   $stdout.puts("FILC_PORTS_TOTAL #{order.length}")
   $stdout.flush
 
-  order.each_with_index do |name, idx|
-    meta = ports[name]
-    blockers = find_root_blockers(name, ports, results)
-    unless blockers.empty?
-      $stdout.puts("[#{idx + 1}/#{order.length}] BLOCKED #{name} (blocked by: #{blockers.join(', ')})")
-      $stdout.puts("FILC_PORT #{name} blocked policy=#{meta['policy_class']} blocked_by=#{blockers.join(',')}")
-      $stdout.flush
-      rec = {
-        "name" => name,
-        "version" => meta["version"],
-        "tier" => meta["tier"],
-        "status" => "blocked",
-        "policy_class" => meta["policy_class"],
-        "deps" => meta["deps"],
-        "blocked_by" => blockers,
-        "duration_seconds" => 0,
-        "patch_count" => meta["patch_count"],
-        "added_lines" => meta["added_lines"],
-        "removed_lines" => meta["removed_lines"],
-        "files_changed" => meta["files_changed"],
-      }
-      results[name] = rec
-      write_json(File.join(state_dir, "#{name}.json"), rec)
-      next
-    end
+  results = if parallel > 1
+              run_parallel_dag(ports, selected, order, opts, work_root, state_dir, parallel)
+            else
+              seq_results = {}
+              install_lock = ENV.fetch("FILC_PORTS_INSTALL_LOCK", File.join(work_root, "ports-install.lock"))
+              child_env = {
+                "FILC_PORTS_DIR" => File.expand_path(opts[:ports_dir]),
+                "FILC_PORTS_INSTALL_LOCK" => install_lock,
+              }
+              order.each_with_index do |name, idx|
+                meta = ports[name]
+                blockers = find_root_blockers(name, ports, seq_results)
+                unless blockers.empty?
+                  $stdout.puts("[#{idx + 1}/#{order.length}] BLOCKED #{name} (blocked by: #{blockers.join(', ')})")
+                  $stdout.puts("FILC_PORT #{name} blocked policy=#{meta['policy_class']} blocked_by=#{blockers.join(',')}")
+                  $stdout.flush
+                  rec = make_blocked_record(name, meta, blockers)
+                  seq_results[name] = rec
+                  write_json(File.join(state_dir, "#{name}.json"), rec)
+                  next
+                end
 
-    $stdout.puts("[#{idx + 1}/#{order.length}] BUILDING #{name} #{meta['version']} (T#{meta['tier']}, #{meta['policy_class']})")
-    $stdout.flush
-    system(child_env, opts[:builder], name, work_root)
-    rc = $?.exitstatus || 1
-
-    state_file = File.join(state_dir, "#{name}.json")
-    if File.file?(state_file)
-      rec = JSON.parse(File.read(state_file, encoding: "UTF-8"))
-      rec["blocked_by"] = [] unless rec.key?("blocked_by")
-    else
-      rec = {
-        "name" => name,
-        "version" => meta["version"],
-        "tier" => meta["tier"],
-        "status" => rc.zero? ? "tested" : "failed",
-        "policy_class" => meta["policy_class"],
-        "deps" => meta["deps"],
-        "blocked_by" => [],
-        "duration_seconds" => 0,
-        "patch_count" => meta["patch_count"],
-        "added_lines" => meta["added_lines"],
-        "removed_lines" => meta["removed_lines"],
-        "files_changed" => meta["files_changed"],
-      }
-    end
-    rec["status"] = "failed" if rc != 0 && !%w[failed blocked].include?(rec["status"])
-    results[name] = rec
-  end
+                $stdout.puts("[#{idx + 1}/#{order.length}] BUILDING #{name} #{meta['version']} (T#{meta['tier']}, #{meta['policy_class']})")
+                $stdout.flush
+                system(child_env, opts[:builder], name, work_root)
+                rc = $?.exitstatus || 1
+                seq_results[name] = load_port_result(state_dir, name, meta, rc)
+              end
+              seq_results
+            end
 
   counts = Hash.new(0)
   results.each_value { |r| counts[r["status"]] += 1 }

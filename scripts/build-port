@@ -226,15 +226,38 @@ run_with_timeout() {
   fi
 }
 
+run_with_install_lock() {
+  local lock_file="${FILC_PORTS_INSTALL_LOCK:-$WORK_ROOT/ports-install.lock}"
+  ruby -e '
+    lock_path = ARGV.shift
+    File.open(lock_path, File::CREAT | File::RDWR, 0o666) do |f|
+      f.flock(File::LOCK_EX)
+      ok = system(*ARGV)
+      exit(ok ? 0 : ($?.exitstatus || 1))
+    end
+  ' "$lock_file" "$@"
+}
+
+run_install_cmd() {
+  if command -v timeout >/dev/null 2>&1; then
+    run_with_install_lock timeout --foreground "$TIMEOUT_SEC" "$@"
+  else
+    run_with_install_lock "$@"
+  fi
+}
+
 run_stage_fn() {
   local fn="$1"
+  local use_lock="${2:-0}"
   local trace_flag=""
   if [[ "$fn" == "port_test" ]]; then
     trace_flag="set -x;"
   fi
   local stage_script="set -euo pipefail; export PS4='+ [$fn:\${LINENO}] '; trap 'rc=\$?; echo \"STAGE_CMD_FAILED port=\$PORT_NAME stage=\$CURRENT_STAGE fn=$fn line=\${LINENO} rc=\$rc cmd=\${BASH_COMMAND}\" >&2' ERR; source \"\$PORT_FILE\"; $trace_flag $fn"
   export PORT_NAME CURRENT_STAGE PORT_FILE SRC_DIR PIZFIX CC CXX AR RANLIB PREFIX PKG_CONFIG_PATH PATH CFLAGS CXXFLAGS LDFLAGS JOBS
-  if command -v timeout >/dev/null 2>&1; then
+  if [[ "$use_lock" == "1" ]]; then
+    run_install_cmd bash -c "$stage_script"
+  elif command -v timeout >/dev/null 2>&1; then
     timeout --foreground "$TIMEOUT_SEC" bash -c "$stage_script"
   else
     bash -c "$stage_script"
@@ -427,15 +450,15 @@ echo "FILC_PORT_BUILD_SECONDS port=$PORT_NAME build_seconds=$BUILD_SECONDS"
 
 CURRENT_STAGE="install"
 if declare -F port_install >/dev/null 2>&1; then
-  run_stage_fn port_install
+  run_stage_fn port_install 1
 else
   case "$BUILD_SYSTEM" in
     autotools|make)
       # shellcheck disable=SC2086
-      run_with_timeout make install $INSTALL_ARGS
+      run_install_cmd make install $INSTALL_ARGS
       ;;
     cmake)
-      run_with_timeout cmake --install "$SRC_DIR/_build"
+      run_install_cmd cmake --install "$SRC_DIR/_build"
       ;;
   esac
 fi

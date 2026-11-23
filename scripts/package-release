@@ -115,13 +115,16 @@ patchelf --remove-rpath "$STAGE/build/bin/$LLD_BASENAME" || true
 
 (
   cd "$STAGE/build/bin"
-  ln -fs "$CLANG_BASENAME" clang
-  ln -fs "$CLANG_BASENAME" clang++
-  ln -fs "$CLANG_BASENAME" filcc
-  ln -fs "$CLANG_BASENAME" fil++
-  ln -fs "$CLANG_BASENAME" filcpp
-  ln -fs "$LLD_BASENAME" ld.lld
-  ln -fs "$LLD_BASENAME" lld
+  for alias in clang clang++ filcc fil++ filcpp; do
+    if [[ "$alias" != "$CLANG_BASENAME" && ! -e "$alias" && ! -L "$alias" ]]; then
+      ln -s "$CLANG_BASENAME" "$alias"
+    fi
+  done
+  for alias in ld.lld lld; do
+    if [[ "$alias" != "$LLD_BASENAME" && ! -e "$alias" && ! -L "$alias" ]]; then
+      ln -s "$LLD_BASENAME" "$alias"
+    fi
+  done
 )
 
 # Relative POSIX-sh wrappers in top-level bin/ so users can add <root>/bin to PATH
@@ -155,12 +158,19 @@ for item in "$PIZFIX/lib"/*; do
   base="$(basename "$item")"
   if [[ -L "$item" ]]; then
     target="$(readlink "$item")"
-    ln -fs "$target" "$STAGE/pizfix/lib/$base"
+    if [[ "$target" == "$PIZFIX/lib/"* ]]; then
+      target="$(basename "$target")"
+    fi
+    if [[ "$target" != "$base" ]]; then
+      ln -fs "$target" "$STAGE/pizfix/lib/$base"
+    fi
   elif [[ -f "$item" ]]; then
     cp "$item" "$STAGE/pizfix/lib/$base"
   fi
 done
-ln -fs libyoloc.so "$STAGE/pizfix/lib/ld-fil1-${ARCH}.so"
+if [[ "ld-fil1-${ARCH}.so" != "libyoloc.so" ]]; then
+  ln -fs libyoloc.so "$STAGE/pizfix/lib/ld-fil1-${ARCH}.so"
+fi
 
 # Remove debug build paths from runtime libraries and set relocatable $ORIGIN RPATH
 for lib in "$STAGE/pizfix/lib"/*.so "$STAGE/pizfix/lib"/*.so.*; do
@@ -364,10 +374,21 @@ scanned_files = 0
 scanned_binaries = 0
 
 for p in sorted(stage.rglob("*")):
-    if not p.is_file() or p.is_symlink():
+    rel = p.relative_to(stage).as_posix()
+    if p.is_symlink():
+        target = os.readlink(p).encode("utf-8", errors="replace")
+        for lit in literal_forbidden:
+            if lit.encode("utf-8") in target:
+                hits.append((rel, "symlink_build_path"))
+                break
+        for label, pat in regex_forbidden:
+            if pat.search(target):
+                hits.append((rel, f"symlink_{label}"))
+                break
+        continue
+    if not p.is_file():
         continue
     scanned_files += 1
-    rel = p.relative_to(stage).as_posix()
     data = p.read_bytes()
     is_elf_or_ar = data.startswith(b"\x7fELF") or data.startswith(b"!<arch>\n")
     if is_elf_or_ar:

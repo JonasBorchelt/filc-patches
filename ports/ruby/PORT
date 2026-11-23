@@ -1,0 +1,77 @@
+NAME="ruby"
+VERSION="3.3.10"
+LICENSE="Ruby OR BSD-2-Clause"
+UPSTREAM_URL="https://cache.ruby-lang.org/pub/ruby/3.3/ruby-3.3.10.tar.xz"
+UPSTREAM_SHA256="3a06c3a709672a4ddae4e511d7e82f74799b8b3f550c8cf2d6f32089003cb84c"
+UPSTREAM_SHA256_SOURCE="sha256:https://cache.ruby-lang.org/pub/ruby/index.txt"
+EXTRACT_DIR="ruby-3.3.10"
+TIER=5
+DEPS="openssl libffi zlib yaml ncurses libedit pkgconf"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--enable-shared --disable-yjit --disable-rjit --without-jit --without-gcc --without-valgrind --with-thread=pthread --without-jemalloc --with-coroutine=pthread"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P4-Audit"
+POLICY_RATIONALE="Pinned to 3.3.10 because Fil-C's 2,247-line GC replacement in gc.c and 124-file VALUE capability-tagging patch base target Ruby 3.3's monolithic gc.c/RBasic/vm_insnhelper.h architecture (split and refactored in Ruby 3.4/3.5). Audited down from 139 files (+6821/-4703) to 124 files (+3551/-1438, 56.7% line reduction): drops stray configure.txt, 11 test-only spec/ and ext/-test-/ files, and auto-generated parse.c/parse.h/ext/ripper/ripper.c (+3445/-3441, regenerated cleanly during build via bundled lrama and host ruby). Disables YJIT/RJIT, jemalloc, and asm coroutines via P3 configure flags."
+FILC_ORIGIN_REF="50531d7ebf61:projects/ruby-3.3.10"
+
+port_configure() {
+  # Remove pre-generated parser outputs so make regenerates them cleanly from patched parse.y / ripper.y
+  rm -f parse.c parse.h ext/ripper/ripper.c
+  PATH="$PIZFIX/bin:$PATH" \
+    CPPFLAGS="-I$PIZFIX/include -I$PIZFIX/include/ncursesw" \
+    LDFLAGS="-L$PIZFIX/lib" \
+    PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" \
+    ./configure --prefix="$PIZFIX" \
+      --enable-shared \
+      --disable-yjit \
+      --disable-rjit \
+      --without-jit \
+      --without-gcc \
+      --without-valgrind \
+      --with-thread=pthread \
+      --without-jemalloc \
+      --with-coroutine=pthread \
+      --with-openssl-dir="$PIZFIX" \
+      --with-libyaml-dir="$PIZFIX" \
+      --with-libffi-dir="$PIZFIX" \
+      --with-zlib-dir="$PIZFIX"
+}
+
+port_install() {
+  # Ruby's RDoc installation requires a valid writable HOME directory
+  HOME="${HOME:-/tmp}" make -j"$JOBS" install
+}
+
+port_test() {
+  local out ver
+  out="$("$PIZFIX/bin/ruby" --version)"
+  ver="${out%%$'\n'*}"
+  echo "ruby version: $ver"
+  printf '%s\n' "$ver" | grep -q '^ruby 3\.3\.10 '
+  "$PIZFIX/bin/ruby" - <<'EOF' | grep -Fxq 'RUBY_FILC_OK'
+require "digest"
+require "fiddle"
+require "json"
+require "openssl"
+require "ripper"
+require "yaml"
+require "zlib"
+
+raise "digest" unless Digest::SHA256.hexdigest("hello\n") == "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
+raise "zlib" unless Zlib::Inflate.inflate(Zlib::Deflate.deflate("filc-ruby")) == "filc-ruby"
+raise "json" unless JSON.parse(JSON.generate({"a" => [1, 2, 3]}))["a"] == [1, 2, 3]
+raise "yaml" unless YAML.safe_load("k: 42\n")["k"] == 42
+raise "openssl" unless OpenSSL::Digest::SHA256.hexdigest("hello\n") == "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
+raise "ripper" unless Ripper.sexp("1 + 2").is_a?(Array)
+raise "fiddle" unless Fiddle::SIZEOF_VOIDP == 8
+
+fib = Fiber.new { Fiber.yield(21); 42 }
+raise "fiber1" unless fib.resume == 21
+raise "fiber2" unless fib.resume == 42
+
+GC.start
+puts "RUBY_FILC_OK"
+EOF
+}

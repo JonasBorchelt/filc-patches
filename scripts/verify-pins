@@ -290,6 +290,19 @@ def extract_sha256_from_checksum_text(text: str, filename: str) -> str:
         m_bsd = re.match(r"^SHA256\s*\(([^)]+)\)\s*=\s*([0-9a-fA-F]{64})$", line)
         if m_bsd and os.path.basename(m_bsd.group(1).strip()) == filename:
             return m_bsd.group(2).lower()
+    # Header-aware TSV table (e.g. Ruby's index.txt: name\turl\tsha1\tsha256\tsha512)
+    if lines and "\t" in lines[0]:
+        hdr = [c.strip().lower() for c in lines[0].split("\t")]
+        if "url" in hdr and "sha256" in hdr:
+            url_idx = hdr.index("url")
+            sha_idx = hdr.index("sha256")
+            for line in lines[1:]:
+                cols = line.split("\t")
+                if len(cols) > max(url_idx, sha_idx):
+                    if os.path.basename(cols[url_idx].strip().split("?", 1)[0]) == filename:
+                        cand = cols[sha_idx].strip().lower()
+                        if SHA256_RE.match(cand):
+                            return cand
     # Fallback: single-hash file containing only one 64-hex digest
     if len(lines) == 1:
         tok = lines[0].split()[0].lower()

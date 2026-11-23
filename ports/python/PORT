@@ -1,0 +1,68 @@
+NAME="python"
+VERSION="3.12.5"
+LICENSE="PSF-2.0"
+UPSTREAM_URL="https://www.python.org/ftp/python/3.12.5/Python-3.12.5.tar.xz"
+UPSTREAM_SHA256="fa8a2e12c5e620b09f53e65bcd87550d2e5a1e2e04bf8ba991dcc55113876397"
+UPSTREAM_SHA256_SOURCE="pgp:https://www.python.org/ftp/python/3.12.5/Python-3.12.5.tar.xz.asc key:ports/pgp-keys/python-wouters-release-key.asc fpr:7169605F62C751356D054A26A821E680E5FA6305"
+UPSTREAM_SIG_URL="https://www.python.org/ftp/python/3.12.5/Python-3.12.5.tar.xz.asc"
+UPSTREAM_PGP_KEY="ports/pgp-keys/python-wouters-release-key.asc"
+UPSTREAM_PGP_FPR="7169605F62C751356D054A26A821E680E5FA6305"
+EXTRACT_DIR="Python-3.12.5"
+TIER=5
+DEPS="openssl libffi zlib bzip2 xz expat sqlite ncurses libedit pkgconf"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--without-pymalloc --without-freelists --disable-test-modules --with-system-expat"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P4-Audit"
+POLICY_RATIONALE="Pinned to 3.12.5 because Fil-C's 35-file VM/GC/pointer-tagging patch base targets CPython 3.12 internals (pycore_gc.h, gcmodule.c, obmalloc.c, pycore_atomic.h) that were rewritten in 3.13/3.14. Audited down from 37 files (+230/-403) to 35 files (+224/-394): drops macOS-only Lib/urllib/request.py and configure.ac, moves ac_cv_gcc_asm_for_{x64,x87,mc68881}=no to P3 configure env vars, and disables custom allocators via --without-pymalloc --without-freelists --disable-test-modules."
+FILC_ORIGIN_REF="4d81217a0e27:projects/Python-3.12.5"
+
+port_configure() {
+  PATH="$PIZFIX/bin:$PATH" \
+    CPPFLAGS="-I$PIZFIX/include -I$PIZFIX/include/ncursesw" \
+    LDFLAGS="-L$PIZFIX/lib" \
+    PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" \
+    ac_cv_gcc_asm_for_x64=no \
+    ac_cv_gcc_asm_for_x87=no \
+    ac_cv_gcc_asm_for_mc68881=no \
+    ./configure --prefix="$PIZFIX" \
+      --with-openssl="$PIZFIX" \
+      --with-system-expat \
+      --without-pymalloc \
+      --without-freelists \
+      --disable-test-modules
+}
+
+port_test() {
+  local out ver
+  out="$("$PIZFIX/bin/python3" --version)"
+  ver="${out%%$'\n'*}"
+  echo "python3 version: $ver"
+  printf '%s\n' "$ver" | grep -Fxq 'Python 3.12.5'
+  "$PIZFIX/bin/python3" - <<'EOF' | grep -Fxq 'PYTHON_FILC_OK'
+import bz2, ctypes, gc, hashlib, json, lzma, re, sqlite3, ssl, xml.etree.ElementTree as ET, zlib
+
+assert hashlib.sha256(b"hello\n").hexdigest() == "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
+assert zlib.decompress(zlib.compress(b"filc-zlib")) == b"filc-zlib"
+assert bz2.decompress(bz2.compress(b"filc-bz2")) == b"filc-bz2"
+assert lzma.decompress(lzma.compress(b"filc-xz")) == b"filc-xz"
+assert ET.fromstring("<root><x>42</x></root>").find("x").text == "42"
+assert re.match(r"([a-z]+)-(\d+)", "filc-312").groups() == ("filc", "312")
+assert json.loads(json.dumps({"ok": [1, 2, 3]}))["ok"] == [1, 2, 3]
+
+conn = sqlite3.connect(":memory:")
+conn.execute("CREATE TABLE t (v INT)")
+conn.execute("INSERT INTO t VALUES (42)")
+assert conn.execute("SELECT v FROM t").fetchone() == (42,)
+conn.close()
+
+assert hasattr(ssl, "OPENSSL_VERSION")
+c_int = ctypes.c_int(42)
+assert c_int.value == 42
+
+gc.collect()
+print("PYTHON_FILC_OK")
+EOF
+}

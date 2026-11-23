@@ -29,6 +29,10 @@ port_test() {
   ver="${out%%$'\n'*}"
   echo "m4 version: $ver"
   printf '%s\n' "$ver" | grep -Fxq 'm4 (GNU M4) 1.4.21'
-  printf 'define(SQ, eval(($1)*($1)))SQ(7)\n' | "$PIZFIX/bin/m4" | grep -Fxq '49'
-  printf 'define(GREET, ifelse($1, filc, OK, BAD))GREET(filc)\n' | "$PIZFIX/bin/m4" | grep -Fxq 'OK'
+  "$PIZFIX/bin/m4" <<'EOF' | grep -Fxq '49'
+define(`SQ', `eval(($1)*($1))')SQ(7)
+EOF
+  "$PIZFIX/bin/m4" <<'EOF' | grep -Fxq 'OK'
+define(`GREET', `ifelse(`$1', `filc', `OK', `BAD')')GREET(filc)
+EOF
 }

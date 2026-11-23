@@ -466,8 +466,8 @@ check_compile_reject() {
   fi
 }
 
-check_compile_reject reject_builtin_setjmp "$TEST_DIR/reject_builtin_setjmp.c" "__builtin_setjmp is not supported for this target"
-check_compile_reject reject_builtin_longjmp "$TEST_DIR/reject_builtin_longjmp.c" "__builtin_longjmp is not supported for this target"
+check_compile_reject reject_builtin_setjmp "$TEST_DIR/reject_builtin_setjmp.c" "__builtin_setjmp is not supported for the current target"
+check_compile_reject reject_builtin_longjmp "$TEST_DIR/reject_builtin_longjmp.c" "__builtin_longjmp is not supported for the current target"
 check_compile_reject reject_define_setjmp "$TEST_DIR/reject_define_setjmp.c" "Fil-C: cannot define reserved pass-through function 'setjmp'"
 check_compile_reject reject_addrspace "$TEST_DIR/reject_addrspace.c" "Fil-C does not support non-zero pointer address spaces"
 check_compile_reject reject_module_asm "$TEST_DIR/reject_module_asm.c" "Fil-C: unsupported or invalid module-level inline assembly"

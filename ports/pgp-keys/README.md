@@ -9,6 +9,7 @@ Armored OpenPGP release signing keys pinned for `scripts/verify-pins`:
 - `gnu-demaille-release-key.asc`: Akim Demaille (`keyserver.ubuntu.com`, GNU bison), fingerprint `7DF84374B1EE1F9764BBE25D0DDCAA3278D5264E`.
 - `gnu-gruenbacher-release-key.asc`: Andreas Gruenbacher (`keys.openpgp.org`, GNU attr/patch), fingerprint `259B3792B3D6D319212CC4DCD5BF9FEB0313653A`.
 - `gnu-meyering-release-key.asc`: Jim Meyering (`keyserver.ubuntu.com`, GNU gzip/sed/grep), fingerprint `155D3FC500C834486D1EEA677FD9FCCB000BEEEE`.
+- `gnu-nudelman-release-key.asc`: Mark Nudelman (`keyserver.ubuntu.com`, GNU less), fingerprint `AE27252BD6846E7D6EAE1DD6F153A7C833235259`.
 - `gnu-ramey-release-key.asc`: Chet Ramey (`keyserver.ubuntu.com`, GNU bash), fingerprint `7C0135FB088AAF6C66C650B9BB5869F064EA74AB`.
 - `libarchive-release-key.asc`: Martin Matuska (`keyserver.ubuntu.com`), fingerprint `DB2C7CF1B4C265FAEF56E3FC5848A18B8F14184B`.
 - `libevent-release-key.asc`: Azat Khuzhin (`keyserver.ubuntu.com`), fingerprint `9E3AC83A27974B84D1B3401DB86086848EF8686D`.

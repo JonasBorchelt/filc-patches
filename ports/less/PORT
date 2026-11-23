@@ -1,0 +1,36 @@
+NAME="less"
+VERSION="710"
+LICENSE="GPL-3.0-or-later OR BSD-2-Clause"
+UPSTREAM_URL="https://ftp.gnu.org/gnu/less/less-710.tar.gz"
+UPSTREAM_SHA256="d1008fb78dcae1323ddab664bcb352a61f022b1b131bd8018548e021d975ec7a"
+UPSTREAM_SHA256_SOURCE="pgp:https://ftp.gnu.org/gnu/less/less-710.tar.gz.sig key:ports/pgp-keys/gnu-nudelman-release-key.asc fpr:AE27252BD6846E7D6EAE1DD6F153A7C833235259"
+UPSTREAM_SIG_URL="https://ftp.gnu.org/gnu/less/less-710.tar.gz.sig"
+UPSTREAM_PGP_KEY="ports/pgp-keys/gnu-nudelman-release-key.asc"
+UPSTREAM_PGP_FPR="AE27252BD6846E7D6EAE1DD6F153A7C833235259"
+EXTRACT_DIR="less-710"
+TIER=4
+DEPS="ncurses"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--with-regex=posix"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P3-BuildOpt"
+POLICY_RATIONALE="Builds unmodified upstream GNU less 710 against staged Fil-C ncurses using POSIX regex (--with-regex=posix) with zero source patches. Passes Fil-C CC and ncursesw include/library paths explicitly on the lesstest sub-make command line so lesstest/display.c finds termcap.h under $PIZFIX/include/ncursesw during the upstream lesstest run. Verified against pinned Fil-C (cede3de02b42) that no less port patch exists upstream."
+FILC_ORIGIN_REF="none (new Stage 6b port; verified no less patch in cede3de02b42)"
+
+port_configure() {
+  CPPFLAGS="-I$PIZFIX/include -I$PIZFIX/include/ncursesw" \
+    LDFLAGS="-L$PIZFIX/lib" \
+    ./configure --prefix="$PIZFIX" --with-regex=posix
+}
+
+port_test() {
+  "$PIZFIX/bin/less" --version | grep -q '^less 710 '
+  make -j"$JOBS" LESSTEST=1
+  make -C lesstest -j"$JOBS" \
+    CC="$CC" \
+    CFLAGS="-O2 -g -I$PIZFIX/include -I$PIZFIX/include/ncursesw" \
+    LDFLAGS="-L$PIZFIX/lib"
+  (cd lesstest && ./runtest -e -l "$SRC_DIR/less_t" lt)
+}

@@ -695,7 +695,7 @@ Fil-C-Origin-Commits: 4d81217a0e27
              return SRE_ERROR_MEMORY;
          }
 -        state->data_stack = (char *)stack;
-+        state->data_stack_ptrs = (char *)stack;
++        state->data_stack_ptrs = stack;
          state->data_stack_size = cursize;
      }
      return 0;
@@ -906,8 +906,8 @@ Fil-C-Origin-Commits: 4d81217a0e27
          assert(trueprev == prev);
 -        assert((gc->_gc_prev & PREV_MASK_COLLECTING) == prev_value);
 -        assert((gc->_gc_next & NEXT_MASK_UNREACHABLE) == next_value);
-+        assert(zandptr(gc->_gc_prev, PREV_MASK_COLLECTING) == prev_value);
-+        assert(zandptr(gc->_gc_next, NEXT_MASK_UNREACHABLE) == next_value);
++        assert(((uintptr_t)gc->_gc_prev & PREV_MASK_COLLECTING) == prev_value);
++        assert(((uintptr_t)gc->_gc_next & NEXT_MASK_UNREACHABLE) == next_value);
          prev = gc;
          gc = truenext;
      }

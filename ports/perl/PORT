@@ -13,7 +13,7 @@ MAKE_ARGS=""
 INSTALL_ARGS=""
 TEST_CMD=""
 POLICY_CLASS="P4-Audit"
-POLICY_RATIONALE="Adopted from pinned Fil-C (cede3de02b42:projects/perl-5.40.0 + build_perl.sh), refreshed cleanly to latest 5.40.x security release 5.40.5 (0 fuzz, 0 offset), and decomposed into 4 thematic patches: (01) core zptrtable/rxres/repeatcpy (adopted), (02) XS typemaps and core extensions ptrtable routing (adopted, keeping OP_ARGELEM integer op_aux and sharing Perl_xsub_ptrtable in Encode.xs), (03) doio.c DIR ptrtable and mg.c prctl pointer preservation (adopted), and (04) project-authored completeness fixes for remaining ExtUtils typemap decodes, B.xs overlay key, Encode enc2xs submodules, Digest::SHA, and Compress::Raw::Bzip2. Configures with -Uusenm (compile-probe libc checks instead of nm/ar scanning of libc.so) and runs the upstream Perl test suite (make test_harness) plus core module smoke checks."
+POLICY_RATIONALE="Adopted from pinned Fil-C (cede3de02b42:projects/perl-5.40.0 + build_perl.sh), refreshed cleanly to latest 5.40.x security release 5.40.5 (0 fuzz, 0 offset), and decomposed into 5 thematic patches: (01) core zptrtable/rxres/repeatcpy (adopted), (02) XS typemaps and core extensions ptrtable routing (adopted, keeping OP_ARGELEM integer op_aux and sharing Perl_xsub_ptrtable in Encode.xs), (03) doio.c DIR ptrtable and mg.c prctl pointer preservation (adopted), (04) project-authored XS/CPAN completeness fixes (ExtUtils typemap decodes, B.xs overlay key, Encode enc2xs + all 8 submodule Makefile.PL/Makefile_PL.e2x Encode_XSEncoding generators, Digest::SHA, Compress::Raw::Bzip2), and (05) project-authored core capability fixes (DPTR2FPTR/FPTR2DPTR direct casts plus ptrtable routing for custom ops, blockhooks, MRO, mortal_svfunc_x, and dbline breakpoints). Configures with -Uusenm and runs make test_harness with 3 approved, visibly logged Fil-C platform exclusions (IPC-SysV GETALL/SETALL ENOSYS; POSIX fenv musl stub)."
 FILC_ORIGIN_REF="cede3de02b42:projects/perl-5.40.0"
 
 port_configure() {
@@ -74,12 +74,34 @@ port_test() {
     die "encode" unless length($u) == 5;
     print "PERL_FILC_SMOKE_OK\n";
   ' | grep -Fxq 'PERL_FILC_SMOKE_OK'
+  local -a excluded_tests=(
+    "cpan/IPC-SysV/t/ipcsysv.t|Fil-C runtime returns ENOSYS for semctl GETALL/SETALL (filc_runtime.c:11429-11432, pinned cede3de02b42)"
+    "cpan/IPC-SysV/t/sem.t|Fil-C runtime returns ENOSYS for semctl GETALL/SETALL (filc_runtime.c:11429-11432, pinned cede3de02b42)"
+    "ext/POSIX/t/fenv.t|Fil-C musl flavor stubs fenv assembly; fesetround is a no-op (filc/tests/fenvroundtrip/fenvroundtrip.c:4-8, pinned cede3de02b42)"
+  )
+  local entry tpath reason
+  for entry in "${excluded_tests[@]}"; do
+    tpath="${entry%%|*}"
+    reason="${entry#*|}"
+    test -f "$SRC_DIR/$tpath"
+    mv "$SRC_DIR/$tpath" "$SRC_DIR/$tpath.excluded-platform"
+    echo "PERL_TEST_EXCLUSION: $tpath -> excluded (platform): $reason"
+  done
+
   local harness_log="$SRC_DIR/.filc-test-harness.log"
   local rc=0
   set +e
   TEST_JOBS="$JOBS" make test_harness 2>&1 | tee "$harness_log"
   rc=${PIPESTATUS[0]}
   set -e
+
+  for entry in "${excluded_tests[@]}"; do
+    tpath="${entry%%|*}"
+    if [[ -f "$SRC_DIR/$tpath.excluded-platform" ]]; then
+      mv "$SRC_DIR/$tpath.excluded-platform" "$SRC_DIR/$tpath"
+    fi
+  done
+
   if [[ "$rc" -ne 0 ]]; then
     ruby - "$SRC_DIR" "$harness_log" <<'RB' || true
 require "open3"
@@ -100,7 +122,7 @@ end
 puts "=== PERL FAILURE DIAGNOSTICS ==="
 puts "failing_test_files=#{failed.length}"
 t_dir = File.join(src_dir, "t")
-failed.first(45).each do |tpath, wstat|
+failed.first(200).each do |tpath, wstat|
   rel = File.exist?(File.join(t_dir, tpath)) ? tpath : "../#{tpath}"
   cmd = ["timeout", "--foreground", "90", "./perl", "-I../lib", rel]
   out, st = Open3.capture2e({ "PERL_CORE" => "1" }, *cmd, chdir: t_dir)

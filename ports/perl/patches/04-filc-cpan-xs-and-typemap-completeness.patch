@@ -1,6 +1,6 @@
-Subject: Route remaining Perl 5.40.5 XS typemaps, B overlay, Encode enc2xs, Digest::SHA, and Compress::Raw::Bzip2 through Perl_xsub_ptrtable
+Subject: Route remaining Perl 5.40.5 XS typemaps, B overlay, Encode generators, Digest::SHA, and Compress::Raw::Bzip2 through Perl_xsub_ptrtable
 Policy-Class: P4-Audit
-Rationale: Project-authored completeness patch separated from the adopted Fil-C commits for P4 auditability. A central perl.h replacement of INT2PTR/PTR2IV is semantically invalid because Perl defines PTR2IV/PTR2UV via INT2PTR(IV/UV,p) and intentionally stores non-pointer integers in pointer slots (e.g. B.xs OP_ARGELEM op_aux, Storable.xs classnum/tagnum via INT2PTR(SV*,...)). Instead, this patch covers the remaining 5 XS pointer-via-IV boundaries in Perl 5.40.5: (1) lib/ExtUtils/typemap T_REF_IV_REF, T_REF_IV_PTR, T_PTRDESC, T_REFREF, T_REFOBJ decodes matching sv_setref_pv; (2) ext/B/B.xs get_overlay_object key encoding matching B::Deparse $$op; (3) cpan/Encode/bin/enc2xs Encode_XSEncoding using Perl_xsub_ptrtable so generated submodules (Byte, CN, JP, KR, TW, Symbol, EBCDIC) match Encode.xs; (4) cpan/Digest-SHA/SHA.xs getSHA decode matching sv_setref_pv; (5) cpan/Compress-Raw-Bzip2/typemap T_PTROBJ_AV decode.
+Rationale: Project-authored completeness patch separated from the adopted Fil-C commits for P4 auditability. A central perl.h replacement of INT2PTR/PTR2IV is semantically invalid because Perl defines PTR2IV/PTR2UV via INT2PTR(IV/UV,p) and intentionally stores non-pointer integers in pointer slots (e.g. B.xs OP_ARGELEM op_aux, Storable.xs classnum/tagnum). This patch covers all remaining XS/CPAN pointer-via-IV boundaries in Perl 5.40.5: (1) lib/ExtUtils/typemap T_REF_IV_REF, T_REF_IV_PTR, T_PTRDESC, T_REFREF, T_REFOBJ decodes matching sv_setref_pv; (2) ext/B/B.xs get_overlay_object key encoding matching B::Deparse $$op; (3) cpan/Encode/bin/enc2xs plus all 8 hardcoded Encode_XSEncoding generators in Byte/CN/EBCDIC/JP/KR/Symbol/TW Makefile.PL and Encode/Makefile_PL.e2x using Perl_xsub_ptrtable to match Encode.xs; (4) cpan/Digest-SHA/SHA.xs getSHA decode matching sv_setref_pv; (5) cpan/Compress-Raw-Bzip2/typemap T_PTROBJ_AV decode.
 Upstream-Status: Fil-C-Specific
 Fil-C-Origin-Commits: none
 
@@ -65,6 +65,94 @@ Fil-C-Origin-Commits: none
 --- a/cpan/Encode/bin/enc2xs
 +++ b/cpan/Encode/bin/enc2xs
 @@ -387,7 +387,7 @@
+ {
+  dSP;
+  HV *stash = gv_stashpv("Encode::XS", TRUE);
+- SV *iv    = newSViv(PTR2IV(enc));
++ SV *iv    = newSViv(zptrtable_encode(Perl_xsub_ptrtable, enc));
+  SV *sv    = sv_bless(newRV_noinc(iv),stash);
+  int i = 0;
+  /* with the SvLEN() == 0 hack, PVX won't be freed. We cast away name's
+--- a/cpan/Encode/Byte/Makefile.PL
++++ b/cpan/Encode/Byte/Makefile.PL
+@@ -118,7 +118,7 @@
+ {
+  dSP;
+  HV *stash = gv_stashpv("Encode::XS", TRUE);
+- SV *iv    = newSViv(PTR2IV(enc));
++ SV *iv    = newSViv(zptrtable_encode(Perl_xsub_ptrtable, enc));
+  SV *sv    = sv_bless(newRV_noinc(iv),stash);
+  int i = 0;
+  /* with the SvLEN() == 0 hack, PVX won't be freed. We cast away name's
+--- a/cpan/Encode/CN/Makefile.PL
++++ b/cpan/Encode/CN/Makefile.PL
+@@ -94,7 +94,7 @@
+ {
+  dSP;
+  HV *stash = gv_stashpv("Encode::XS", TRUE);
+- SV *iv    = newSViv(PTR2IV(enc));
++ SV *iv    = newSViv(zptrtable_encode(Perl_xsub_ptrtable, enc));
+  SV *sv    = sv_bless(newRV_noinc(iv),stash);
+  int i = 0;
+  /* with the SvLEN() == 0 hack, PVX won't be freed. We cast away name's
+--- a/cpan/Encode/EBCDIC/Makefile.PL
++++ b/cpan/Encode/EBCDIC/Makefile.PL
+@@ -75,7 +75,7 @@
+ {
+  dSP;
+  HV *stash = gv_stashpv("Encode::XS", TRUE);
+- SV *iv    = newSViv(PTR2IV(enc));
++ SV *iv    = newSViv(zptrtable_encode(Perl_xsub_ptrtable, enc));
+  SV *sv    = sv_bless(newRV_noinc(iv),stash);
+  int i = 0;
+  /* with the SvLEN() == 0 hack, PVX won't be freed. We cast away name's
+--- a/cpan/Encode/JP/Makefile.PL
++++ b/cpan/Encode/JP/Makefile.PL
+@@ -94,7 +94,7 @@
+ {
+  dSP;
+  HV *stash = gv_stashpv("Encode::XS", TRUE);
+- SV *iv    = newSViv(PTR2IV(enc));
++ SV *iv    = newSViv(zptrtable_encode(Perl_xsub_ptrtable, enc));
+  SV *sv    = sv_bless(newRV_noinc(iv),stash);
+  int i = 0;
+  /* with the SvLEN() == 0 hack, PVX won't be freed. We cast away name's
+--- a/cpan/Encode/KR/Makefile.PL
++++ b/cpan/Encode/KR/Makefile.PL
+@@ -92,7 +92,7 @@
+ {
+  dSP;
+  HV *stash = gv_stashpv("Encode::XS", TRUE);
+- SV *iv    = newSViv(PTR2IV(enc));
++ SV *iv    = newSViv(zptrtable_encode(Perl_xsub_ptrtable, enc));
+  SV *sv    = sv_bless(newRV_noinc(iv),stash);
+  int i = 0;
+  /* with the SvLEN() == 0 hack, PVX won't be freed. We cast away name's
+--- a/cpan/Encode/Symbol/Makefile.PL
++++ b/cpan/Encode/Symbol/Makefile.PL
+@@ -80,7 +80,7 @@
+ {
+  dSP;
+  HV *stash = gv_stashpv("Encode::XS", TRUE);
+- SV *iv    = newSViv(PTR2IV(enc));
++ SV *iv    = newSViv(zptrtable_encode(Perl_xsub_ptrtable, enc));
+  SV *sv    = sv_bless(newRV_noinc(iv),stash);
+  int i = 0;
+  /* with the SvLEN() == 0 hack, PVX won't be freed. We cast away name's
+--- a/cpan/Encode/TW/Makefile.PL
++++ b/cpan/Encode/TW/Makefile.PL
+@@ -90,7 +90,7 @@
+ {
+  dSP;
+  HV *stash = gv_stashpv("Encode::XS", TRUE);
+- SV *iv    = newSViv(PTR2IV(enc));
++ SV *iv    = newSViv(zptrtable_encode(Perl_xsub_ptrtable, enc));
+  SV *sv    = sv_bless(newRV_noinc(iv),stash);
+  int i = 0;
+  /* with the SvLEN() == 0 hack, PVX won't be freed. We cast away name's
+--- a/cpan/Encode/Encode/Makefile_PL.e2x
++++ b/cpan/Encode/Encode/Makefile_PL.e2x
+@@ -110,7 +110,7 @@
  {
   dSP;
   HV *stash = gv_stashpv("Encode::XS", TRUE);

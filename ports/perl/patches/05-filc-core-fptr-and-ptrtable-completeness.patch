@@ -1,0 +1,140 @@
+Subject: Preserve Fil-C capabilities across DPTR2FPTR/FPTR2DPTR and remaining Perl core ptrtable pairs
+Policy-Class: P4-Audit
+Rationale: Project-authored core capability completeness patch covering 6 Perl 5.40.5 core locations where pointers were round-tripped through integers without preserving Fil-C capabilities: (1) perl.h:2536-2537 DPTR2FPTR/FPTR2DPTR previously cast via PTR2nat(p) (unsigned long), stripping function-pointer capabilities in op.c:14756,14847 (cv_get/set_call_checker_flags used by XS::APItest, Devel::Peek, IO, File::DosGlob, POSIX), sv.c:15368-15377 (thread destructor dup), and toke.c (source filters); replaced with direct ((t)(p)) casts; (2) op.c:15326,15406,15480 Perl_custom_op_register/get_field/free XOP* storage in PL_custom_ops routed via Perl_xsub_ptrtable; (3) op.c:4670 and op.h:858-860 Perl_blockhook_register/CALL_BLOCK_HOOKS BHK* storage routed via Perl_xsub_ptrtable; (4) mro_core.c:127,140 Perl_mro_register/get_from_name struct mro_alg* storage routed via Perl_xsub_ptrtable; (5) scope.c:1950,1977 Perl_mortal_svfunc_x/S_call_freedestruct SVFUNC_t storage routed via Perl_xsub_ptrtable; (6) op.c:1373,8714 and mg.c:2337 debugger breakpoint dbline COP* storage routed via Perl_xsub_ptrtable.
+Upstream-Status: Fil-C-Specific
+Fil-C-Origin-Commits: none
+
+--- a/perl.h
++++ b/perl.h
+@@ -2535,8 +2535,8 @@
+  * The only feasible use is probably temporarily storing
+  * function pointers in a data pointer (such as a void pointer). */
+ 
+-#define DPTR2FPTR(t,p) ((t)PTR2nat(p))	/* data pointer to function pointer */
+-#define FPTR2DPTR(t,p) ((t)PTR2nat(p))	/* function pointer to data pointer */
++#define DPTR2FPTR(t,p) ((t)(p))	/* data pointer to function pointer */
++#define FPTR2DPTR(t,p) ((t)(p))	/* function pointer to data pointer */
+ 
+ #ifdef USE_LONG_DOUBLE
+ #  if LONG_DOUBLESIZE == DOUBLESIZE
+--- a/op.h
++++ b/op.h
+@@ -855,9 +855,9 @@
+                 \
+                 assert(SvIOK(sv)); \
+                 if (SvUOK(sv)) \
+-                    hk = INT2PTR(BHK *, SvUVX(sv)); \
++                    hk = (BHK *)zptrtable_decode(Perl_xsub_ptrtable, SvUVX(sv)); \
+                 else \
+-                    hk = INT2PTR(BHK *, SvIVX(sv)); \
++                    hk = (BHK *)zptrtable_decode(Perl_xsub_ptrtable, SvIVX(sv)); \
+                 \
+                 if (BhkENTRY(hk, which)) \
+                     BhkENTRY(hk, which)(aTHX_ arg); \
+--- a/op.c
++++ b/op.c
+@@ -1370,7 +1370,7 @@
+         AV *av = CopFILEAVn(cop);
+         if (av) {
+             SV * const * const svp = av_fetch(av, CopLINE(cop), FALSE);
+-            if (svp && *svp != &PL_sv_undef && SvIVX(*svp) == PTR2IV(cop) ) {
++            if (svp && *svp != &PL_sv_undef && SvIVX(*svp) == (IV)zptrtable_encode(Perl_xsub_ptrtable, cop) ) {
+                 SvIV_set(*svp, 0);
+             }
+         }
+@@ -4667,7 +4667,7 @@
+ {
+     PERL_ARGS_ASSERT_BLOCKHOOK_REGISTER;
+ 
+-    Perl_av_create_and_push(aTHX_ &PL_blockhooks, newSViv(PTR2IV(hk)));
++    Perl_av_create_and_push(aTHX_ &PL_blockhooks, newSViv(zptrtable_encode(Perl_xsub_ptrtable, hk)));
+ }
+ 
+ void
+@@ -8711,7 +8711,7 @@
+             SV * const * const svp = av_fetch(av, CopLINE(cop), FALSE);
+             if (svp && *svp != &PL_sv_undef ) {
+                 (void)SvIOK_on(*svp);
+-                SvIV_set(*svp, PTR2IV(cop));
++                SvIV_set(*svp, zptrtable_encode(Perl_xsub_ptrtable, cop));
+             }
+         }
+     }
+@@ -15323,7 +15323,7 @@
+     XOP *xop;
+ 
+     PERL_UNUSED_ARG(mg);
+-    xop = INT2PTR(XOP *, SvIV(sv));
++    xop = (XOP *)zptrtable_decode(Perl_xsub_ptrtable, SvIV(sv));
+     Safefree(xop->xop_name);
+     Safefree(xop->xop_desc);
+     Safefree(xop);
+@@ -15403,7 +15403,7 @@
+         if (!he)
+             xop = (XOP *)&xop_null;
+         else
+-            xop = INT2PTR(XOP *, SvIV(HeVAL(he)));
++            xop = (XOP *)zptrtable_decode(Perl_xsub_ptrtable, SvIV(HeVAL(he)));
+     }
+ 
+     {
+@@ -15477,7 +15477,7 @@
+     if (!PL_custom_ops)
+         PL_custom_ops = newHV();
+ 
+-    if (!hv_store_ent(PL_custom_ops, keysv, newSViv(PTR2IV(xop)), 0))
++    if (!hv_store_ent(PL_custom_ops, keysv, newSViv(zptrtable_encode(Perl_xsub_ptrtable, (void*)xop)), 0))
+         Perl_croak(aTHX_ "panic: can't register custom OP %s", xop->xop_name);
+ }
+ 
+--- a/mg.c
++++ b/mg.c
+@@ -2334,7 +2334,7 @@
+                    sv_2iv(MUTABLE_SV((mg)->mg_ptr)), FALSE);
+ 
+     if (svp && SvIOKp(*svp)) {
+-        OP * const o = INT2PTR(OP*,SvIVX(*svp));
++        OP * const o = (OP *)zptrtable_decode(Perl_xsub_ptrtable, SvIVX(*svp));
+         if (o) {
+ #ifdef PERL_DEBUG_READONLY_OPS
+             Slab_to_rw(OpSLAB(o));
+--- a/mro_core.c
++++ b/mro_core.c
+@@ -124,7 +124,7 @@
+         return NULL;
+     assert(SvTYPE(*data) == SVt_IV);
+     assert(SvIOK(*data));
+-    return INT2PTR(const struct mro_alg *, SvUVX(*data));
++    return (const struct mro_alg *)zptrtable_decode(Perl_xsub_ptrtable, SvUVX(*data));
+ }
+ 
+ /*
+@@ -137,7 +137,7 @@
+ 
+ void
+ Perl_mro_register(pTHX_ const struct mro_alg *mro) {
+-    SV *wrapper = newSVuv(PTR2UV(mro));
++    SV *wrapper = newSVuv(zptrtable_encode(Perl_xsub_ptrtable, (void*)mro));
+ 
+     PERL_ARGS_ASSERT_MRO_REGISTER;
+ 
+--- a/scope.c
++++ b/scope.c
+@@ -1947,7 +1947,7 @@
+ void
+ Perl_mortal_svfunc_x(pTHX_ SVFUNC_t f, SV *sv) {
+     PERL_ARGS_ASSERT_MORTAL_SVFUNC_X;
+-    SV *sviv = newSViv(PTR2IV(f));
++    SV *sviv = newSViv(zptrtable_encode(Perl_xsub_ptrtable, (void*)f));
+     mortal_destructor_sv(sviv,sv);
+ }
+ 
+@@ -1974,7 +1974,7 @@
+ 
+     /* Deal with C function destructor */
+     if (SvTYPE(coderef) == SVt_IV && !SvROK(coderef)) {
+-        SVFUNC_t f = INT2PTR(SVFUNC_t, SvIV(coderef));
++        SVFUNC_t f = (SVFUNC_t)zptrtable_decode(Perl_xsub_ptrtable, SvIV(coderef));
+         (f)(aTHX_ args_any.sv);
+         return 0;
+     }

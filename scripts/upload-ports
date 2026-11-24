@@ -1,0 +1,220 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Uploads a packaged, leak-gated, and minisign-signed Fil-C ports channel
+# directory to filc-live using a dedicated least-privilege upload token
+# (FILC_PORTS_UPLOAD_TOKEN). Refuses unsigned or inconsistent channels.
+
+require "digest/sha2"
+require "json"
+require "net/http"
+require "optparse"
+require "uri"
+
+module PortsUploader
+  SHA256_RE = /\A[0-9a-f]{64}\z/
+  CHANNEL_RE = /\A\d+\.\d+\.\d+(?:-[a-z0-9.]+)?\z/
+  ARCH_RE = /\A(?:x86_64|aarch64)-linux\z/
+  INFRA_WORDS = [
+    %w[ci server].join("-"),
+    %w[wood pecker].join,
+    %w[prox mox].join,
+    %w[hyper ingress].join("-")
+  ].freeze
+  FORBIDDEN_RE = [
+    /(?:^|[^0-9])192\.168\.\d{1,3}\.\d{1,3}(?:[^0-9]|$)/,
+    /(?:^|[^0-9])10\.\d{1,3}\.\d{1,3}\.\d{1,3}(?:[^0-9]|$)/,
+    Regexp.new("\\b(?:#{INFRA_WORDS.join('|')})\\b", Regexp::IGNORECASE),
+    %r{/ccache/},
+    Regexp.new("/#{%w[wood pecker].join}/"),
+    %r{/\.work/}
+  ].freeze
+
+  module_function
+
+  def file_sha256(path)
+    sha = Digest::SHA256.new
+    File.open(path, "rb") do |f|
+      while (buf = f.read(65_536))
+        sha.update(buf)
+      end
+    end
+    sha.hexdigest
+  end
+
+  def leak_check_text!(label, text)
+    FORBIDDEN_RE.each do |re|
+      if (m = re.match(text))
+        raise "LEAK_GATE FAILED on #{label}: matched #{m[0].strip.inspect}"
+      end
+    end
+  end
+
+  def verify_channel_before_upload!(channel_dir, channel, arch)
+    index_path = File.join(channel_dir, "index.json")
+    index_sig_path = File.join(channel_dir, "index.json.minisig")
+    sums_path = File.join(channel_dir, "SHA256SUMS")
+    sums_sig_path = File.join(channel_dir, "SHA256SUMS.minisig")
+
+    [index_path, index_sig_path, sums_path, sums_sig_path].each do |req|
+      raise "refusing upload: missing required channel file #{req}" unless File.file?(req)
+    end
+
+    index_raw = File.read(index_path, encoding: "UTF-8")
+    index_sig = File.read(index_sig_path, encoding: "UTF-8")
+    sums_raw = File.read(sums_path, encoding: "UTF-8")
+    sums_sig = File.read(sums_sig_path, encoding: "UTF-8")
+
+    leak_check_text!("index.json", index_raw)
+    leak_check_text!("SHA256SUMS", sums_raw)
+
+    parsed = JSON.parse(index_raw)
+    raise "index.json channel mismatch (#{parsed['channel']} != #{channel})" unless parsed["channel"] == channel
+    raise "index.json arch mismatch (#{parsed['arch']} != #{arch})" unless parsed["arch"] == arch
+    raise "index.json packages must be non-empty" unless parsed["packages"].is_a?(Hash) && !parsed["packages"].empty?
+
+    uploads = { "src" => [], "recipes" => [], "bin" => [] }
+    seen = {}
+
+    parsed["packages"].each do |pkg_name, entry|
+      %w[source recipe binary].each do |kind|
+        art = entry[kind]
+        raise "package #{pkg_name} missing #{kind} entry" unless art.is_a?(Hash) && art["path"].is_a?(String) && SHA256_RE.match?(art["sha256"].to_s)
+
+        rel = art["path"]
+        bucket = rel.split("/", 2).first
+        full = File.join(channel_dir, rel)
+        raise "missing artifact file #{full}" unless File.file?(full)
+
+        actual = file_sha256(full)
+        raise "SHA-256 mismatch for #{rel} (index=#{art['sha256']}, disk=#{actual})" unless actual == art["sha256"]
+
+        next if seen[rel]
+
+        seen[rel] = true
+        uploads[bucket] << { rel: rel, full: full, sha256: actual, size: File.size(full) }
+      end
+    end
+
+    {
+      index_raw: index_raw,
+      index_sig: index_sig,
+      sums_raw: sums_raw,
+      sums_sig: sums_sig,
+      uploads: uploads,
+      package_count: parsed["packages"].size
+    }
+  end
+
+  def http_for(uri)
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = uri.scheme == "https"
+    http.open_timeout = 15
+    http.read_timeout = 300
+    http.write_timeout = 300 if http.respond_to?(:write_timeout=)
+    http
+  end
+
+  def upload_artifact(base_uri, channel, arch, item, token)
+    path = "/api/ports-artifacts/#{channel}/#{arch}/#{item[:rel]}"
+    http = http_for(base_uri)
+
+    # 1. Idempotency check via HEAD
+    head_req = Net::HTTP::Head.new(path)
+    head_req["Authorization"] = "Bearer #{token}"
+    head_res = http.request(head_req)
+    if head_res.code == "200" && head_res["x-content-sha256"] == item[:sha256]
+      return :skipped
+    end
+
+    # 2. Streaming PUT (never loads full tarball into RAM)
+    File.open(item[:full], "rb") do |io|
+      put_req = Net::HTTP::Put.new(path)
+      put_req["Authorization"] = "Bearer #{token}"
+      put_req["Content-Type"] = "application/octet-stream"
+      put_req["Content-Length"] = item[:size].to_s
+      put_req["X-Content-SHA256"] = item[:sha256]
+      put_req.body_stream = io
+      res = http.request(put_req)
+      unless %w[200 201].include?(res.code)
+        raise "PUT #{path} failed (#{res.code}): #{res.body}"
+      end
+    end
+    :uploaded
+  end
+
+  def commit_index(base_uri, channel, arch, verified, token)
+    path = "/api/ports-artifacts/#{channel}/#{arch}/commit-index"
+    http = http_for(base_uri)
+    req = Net::HTTP::Post.new(path)
+    req["Authorization"] = "Bearer #{token}"
+    req["Content-Type"] = "application/json"
+    req.body = JSON.generate(
+      "index_json" => verified[:index_raw],
+      "index_minisig" => verified[:index_sig],
+      "sha256sums" => verified[:sums_raw],
+      "sha256sums_minisig" => verified[:sums_sig]
+    )
+    res = http.request(req)
+    raise "POST #{path} failed (#{res.code}): #{res.body}" unless res.code == "200"
+
+    JSON.parse(res.body)
+  end
+
+  def main(argv)
+    opts = {
+      channel_dir: nil,
+      channel: nil,
+      arch: "x86_64-linux",
+      base_url: ENV["FILC_PORTS_UPLOAD_URL"].to_s.strip,
+      token_env: "FILC_PORTS_UPLOAD_TOKEN",
+      dry_run: false
+    }
+
+    parser = OptionParser.new do |o|
+      o.banner = "Usage: scripts/upload-ports [options]"
+      o.on("--channel-dir DIR", "Directory containing channel/<arch>/index.json or <out-dir>/<channel>/<arch>") { |v| opts[:channel_dir] = File.expand_path(v) }
+      o.on("--channel VERSION", "Toolchain release channel (e.g. 0.1.3)") { |v| opts[:channel] = v }
+      o.on("--arch ARCH", "Target architecture (default: x86_64-linux)") { |v| opts[:arch] = v }
+      o.on("--base-url URL", "filc-live base URL") { |v| opts[:base_url] = v }
+      o.on("--token-env VAR", "Env var containing upload token (default: FILC_PORTS_UPLOAD_TOKEN)") { |v| opts[:token_env] = v }
+      o.on("--dry-run", "Verify locally without uploading") { opts[:dry_run] = true }
+    end
+    parser.parse!(argv)
+
+    raise ArgumentError, "--channel-dir is required" if opts[:channel_dir].nil? || opts[:channel_dir].empty?
+    raise ArgumentError, "--channel invalid" unless CHANNEL_RE.match?(opts[:channel].to_s)
+    raise ArgumentError, "--arch invalid" unless ARCH_RE.match?(opts[:arch].to_s)
+
+    verified = verify_channel_before_upload!(opts[:channel_dir], opts[:channel], opts[:arch])
+    if opts[:dry_run]
+      puts "UPLOAD_PORTS: DRY_RUN OK channel=#{opts[:channel]} arch=#{opts[:arch]} packages=#{verified[:package_count]}"
+      return 0
+    end
+
+    token = ENV[opts[:token_env]].to_s.strip
+    raise "missing upload token in env #{opts[:token_env]}" if token.empty?
+    raise ArgumentError, "--base-url or FILC_PORTS_UPLOAD_URL is required" if opts[:base_url].empty?
+
+    base_uri = URI.parse(opts[:base_url])
+    uploaded = 0
+    skipped = 0
+
+    %w[src recipes bin].each do |bucket|
+      verified[:uploads][bucket].each do |item|
+        st = upload_artifact(base_uri, opts[:channel], opts[:arch], item, token)
+        if st == :uploaded
+          uploaded += 1
+        else
+          skipped += 1
+        end
+      end
+    end
+
+    result = commit_index(base_uri, opts[:channel], opts[:arch], verified, token)
+    puts "UPLOAD_PORTS: OK channel=#{opts[:channel]} arch=#{opts[:arch]} packages=#{result['packages']} uploaded=#{uploaded} skipped=#{skipped}"
+    0
+  end
+end
+
+exit(PortsUploader.main(ARGV)) if $PROGRAM_NAME == __FILE__

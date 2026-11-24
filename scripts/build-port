@@ -356,11 +356,70 @@ run_with_install_lock() {
   ' "$lock_file" "$@"
 }
 
+# Atomically snapshot $PIZFIX before and after install while holding the
+# exclusive ports-install.lock, writing the exact per-port file manifest to
+# $STATE_DIR/$PORT_NAME.manifest.json for scripts/package-port.
+run_install_with_manifest() {
+  local lock_file="${FILC_PORTS_INSTALL_LOCK:-$WORK_ROOT/ports-install.lock}"
+  local manifest_out="$STATE_DIR/$PORT_NAME.manifest.json"
+  ruby -e '
+    require "digest/sha2"
+    require "json"
+
+    lock_path = ARGV.shift
+    pizfix = ARGV.shift
+    manifest_out = ARGV.shift
+    port_name = ARGV.shift
+    cmd = ARGV
+
+    def snapshot_tree(root)
+      entries = {}
+      return entries unless File.directory?(root)
+      stack = [""]
+      until stack.empty?
+        rel = stack.pop
+        full = rel.empty? ? root : File.join(root, rel)
+        Dir.children(full).each do |child|
+          crel = rel.empty? ? child : "#{rel}/#{child}"
+          cfull = File.join(root, crel)
+          st = File.lstat(cfull)
+          if st.directory? && !st.symlink?
+            stack << crel
+          elsif st.symlink?
+            entries[crel] = [:symlink, File.readlink(cfull)]
+          elsif st.file?
+            entries[crel] = [:file, st.size, st.mtime.to_f]
+          end
+        end
+      end
+      entries
+    end
+
+    File.open(lock_path, File::CREAT | File::RDWR, 0o666) do |f|
+      f.flock(File::LOCK_EX)
+      before = snapshot_tree(pizfix)
+      ok = system(*cmd)
+      exit($?.exitstatus || 1) unless ok
+      after = snapshot_tree(pizfix)
+      changed = []
+      after.keys.sort.each do |rel|
+        next if before[rel] == after[rel]
+        changed << rel
+      end
+      payload = {
+        "port" => port_name,
+        "files" => changed
+      }
+      File.write(manifest_out, JSON.pretty_generate(payload) + "\n", encoding: "UTF-8")
+    end
+  ' "$lock_file" "$PIZFIX" "$manifest_out" "$PORT_NAME" "$@"
+}
+
 run_install_cmd() {
   if command -v timeout >/dev/null 2>&1; then
-    run_with_install_lock timeout --foreground "$TIMEOUT_SEC" "$@"
+    run_install_with_manifest timeout --foreground "$TIMEOUT_SEC" "$@"
   else
-    run_with_install_lock "$@"
+    run_install_with_manifest "$@"
   fi
 }
 

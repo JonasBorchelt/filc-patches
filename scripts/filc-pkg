@@ -1,0 +1,124 @@
+#!/bin/sh
+set -eu
+
+# Lightweight installer for signed Fil-C userland port binary packages.
+#
+# Usage:
+#   scripts/filc-pkg --toolchain-root /path/to/filc-0.1.3-x86_64-linux [--channel 0.1.3] [--base-url https://filc.connected.link] [--pubkey /path/to/pubkey.pub] install <pkg> [pkg...]
+
+BASE_URL="${FILC_PORTS_BASE_URL:-https://filc.connected.link}"
+TOOLCHAIN_ROOT="${FILC_TOOLCHAIN_ROOT:-}"
+CHANNEL="${FILC_PORTS_CHANNEL:-}"
+ARCH="x86_64-linux"
+PUBKEY_PATH="${FILC_PORTS_PUBKEY:-}"
+SKIP_SIG=0
+
+usage() {
+  echo "Usage: $0 --toolchain-root DIR [--channel VER] [--base-url URL] [--pubkey FILE] install <pkg>..." >&2
+  exit 2
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --toolchain-root) TOOLCHAIN_ROOT="$2"; shift 2 ;;
+    --channel) CHANNEL="$2"; shift 2 ;;
+    --base-url) BASE_URL="$2"; shift 2 ;;
+    --arch) ARCH="$2"; shift 2 ;;
+    --pubkey) PUBKEY_PATH="$2"; shift 2 ;;
+    --allow-unsigned-test) SKIP_SIG=1; shift ;;
+    -h|--help) usage ;;
+    install) shift; break ;;
+    *) usage ;;
+  esac
+done
+
+[ -n "$TOOLCHAIN_ROOT" ] || { echo "error: --toolchain-root is required" >&2; exit 2; }
+[ $# -ge 1 ] || usage
+
+PIZFIX="$TOOLCHAIN_ROOT/pizfix"
+[ -d "$PIZFIX" ] || { echo "error: pizfix not found under $TOOLCHAIN_ROOT" >&2; exit 1; }
+
+PROV="$TOOLCHAIN_ROOT/PROVENANCE"
+LOCAL_VER=""
+if [ -f "$PROV" ]; then
+  LOCAL_VER="$(awk -F= '$1=="VERSION"{print $2}' "$PROV" | head -n 1)"
+fi
+if [ -z "$CHANNEL" ]; then
+  CHANNEL="$LOCAL_VER"
+fi
+[ -n "$CHANNEL" ] || { echo "error: --channel required (no VERSION in $PROV)" >&2; exit 1; }
+if [ -n "$LOCAL_VER" ] && [ "$LOCAL_VER" != "$CHANNEL" ]; then
+  echo "error: ABI channel mismatch (local toolchain=$LOCAL_VER, requested channel=$CHANNEL)" >&2
+  exit 1
+fi
+
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/filc-pkg-XXXXXX")"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+CHANNEL_URL="${BASE_URL%/}/ports/${CHANNEL}/${ARCH}"
+curl -fsSL "$CHANNEL_URL/index.json" -o "$TMP_DIR/index.json"
+curl -fsSL "$CHANNEL_URL/index.json.minisig" -o "$TMP_DIR/index.json.minisig"
+
+if [ "$SKIP_SIG" != "1" ]; then
+  if [ -z "$PUBKEY_PATH" ] || [ ! -f "$PUBKEY_PATH" ]; then
+    echo "error: --pubkey <ports-pubkey.pub> is required to verify index.json.minisig" >&2
+    exit 1
+  fi
+  command -v minisign >/dev/null 2>&1 || { echo "error: minisign not found in PATH" >&2; exit 1; }
+  minisign -Vm "$TMP_DIR/index.json" -p "$PUBKEY_PATH" -x "$TMP_DIR/index.json.minisig"
+fi
+
+# Resolve transitive dependencies in topological order using python3
+PLAN_FILE="$TMP_DIR/plan.tsv"
+python3 - "$TMP_DIR/index.json" "$PLAN_FILE" "$@" <<'PY'
+import json, sys
+
+index_path, plan_path, *requested = sys.argv[1:]
+data = json.load(open(index_path, encoding="utf-8"))
+pkgs = data.get("packages", {})
+
+ordered = []
+seen = set()
+
+def add_pkg(name):
+    if name in seen:
+        return
+    if name not in pkgs:
+        sys.exit(f"error: package '{name}' not found in channel {data.get('channel')}")
+    entry = pkgs[name]
+    for dep in entry.get("transitive_deps", []):
+        add_pkg(dep)
+    seen.add(name)
+    ordered.append(name)
+
+for req in requested:
+    add_pkg(req)
+
+with open(plan_path, "w", encoding="utf-8") as out:
+    for name in ordered:
+        b = pkgs[name]["binary"]
+        out.write(f"{name}\t{b['path']}\t{b['sha256']}\n")
+PY
+
+while IFS="$(printf '\t')" read -r pkg relpath expected_sha; do
+  [ -n "$pkg" ] || continue
+  archive="$TMP_DIR/$(basename "$relpath")"
+  echo "Downloading $pkg ($relpath)..."
+  curl -fsSL "$CHANNEL_URL/$relpath" -o "$archive"
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual_sha="$(sha256sum "$archive" | awk '{print $1}')"
+  else
+    actual_sha="$(shasum -a 256 "$archive" | awk '{print $1}')"
+  fi
+  if [ "$actual_sha" != "$expected_sha" ]; then
+    echo "error: SHA-256 mismatch for $pkg ($actual_sha != $expected_sha)" >&2
+    exit 1
+  fi
+  extract_dir="$TMP_DIR/extract-$pkg"
+  mkdir -p "$extract_dir"
+  tar -xf "$archive" -C "$extract_dir"
+  if [ -d "$extract_dir/prefix" ]; then
+    cp -R "$extract_dir/prefix/." "$PIZFIX/"
+  fi
+  echo "Installed $pkg into $PIZFIX"
+done < "$PLAN_FILE"

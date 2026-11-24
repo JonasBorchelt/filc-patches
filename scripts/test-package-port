@@ -1,0 +1,205 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Self-tests for scripts/package-port and scripts/upload-ports using isolated
+# temporary directories and a local mock HTTP server (no network, no real builds).
+
+require "digest/sha2"
+require "fileutils"
+require "json"
+require "open3"
+require "socket"
+require "tmpdir"
+
+REPO_ROOT = File.expand_path("..", __dir__)
+PACKAGE_SCRIPT = File.join(REPO_ROOT, "scripts", "package-port")
+UPLOAD_SCRIPT = File.join(REPO_ROOT, "scripts", "upload-ports")
+
+def assert(cond, msg)
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+Dir.mktmpdir("filc-pkg-test-") do |td|
+  repo = File.join(td, "repo")
+  work = File.join(td, "work")
+  pizfix = File.join(td, "pizfix")
+  cache = File.join(work, "ports-cache")
+  state = File.join(work, "ports-state")
+  out = File.join(td, "out")
+
+  FileUtils.mkdir_p([
+    File.join(repo, "ports", "demo", "patches"),
+    File.join(pizfix, "bin"),
+    File.join(pizfix, "lib", "pkgconfig"),
+    File.join(pizfix, "include"),
+    cache,
+    state,
+    out
+  ])
+
+  # Create upstream source tarball
+  src_bytes = "demo upstream source archive content\n"
+  src_sha = Digest::SHA256.hexdigest(src_bytes)
+  src_file = File.join(cache, "demo-1.0-#{src_sha[0, 12]}-demo-1.0.tar.gz")
+  File.binwrite(src_file, src_bytes)
+
+  File.write(File.join(repo, "UPSTREAM"), <<~UP)
+    LLVM_TAG=llvmorg-23.1.6
+    FILC_COMMIT=cede3de02b42b58a14acc9ce39c9894ab952a915
+    MUSL_COMMIT=f314e133929b6379eccc632bef32eaebb66a7335
+  UP
+
+  File.write(File.join(repo, "ports", "demo", "PORT"), <<~PORT)
+    NAME=demo
+    VERSION=1.0
+    LICENSE=GPL-3.0-or-later
+    UPSTREAM_URL=https://example.invalid/demo-1.0.tar.gz
+    UPSTREAM_SHA256=#{src_sha}
+    EXTRACT_DIR=demo-1.0
+    TIER=0
+    DEPS=""
+    BUILD_SYSTEM=autotools
+    POLICY_CLASS=P0-Clean
+  PORT
+
+  # Installed files in pizfix + install manifest
+  File.write(File.join(pizfix, "include", "demo.h"), "#define DEMO_VER 1\n")
+  File.write(File.join(pizfix, "lib", "pkgconfig", "demo.pc"), <<~PC)
+    prefix=#{pizfix}
+    exec_prefix=${prefix}
+    libdir=${exec_prefix}/lib
+    includedir=${prefix}/include
+
+    Name: demo
+    Description: Demo library
+    Version: 1.0
+    Libs: -L${libdir} -ldemo
+    Cflags: -I${includedir}
+  PC
+  File.write(File.join(state, "demo.manifest.json"), JSON.pretty_generate(
+    "port" => "demo",
+    "files" => ["include/demo.h", "lib/pkgconfig/demo.pc"]
+  ) + "\n")
+
+  # 1. Clean packaging + .pc relocation + GPL corresponding source + recipe
+  out_s, err_s, st = Open3.capture3(
+    "ruby", PACKAGE_SCRIPT,
+    "--repo-root", repo,
+    "--work-dir", work,
+    "--pizfix", pizfix,
+    "--ports-cache-dir", cache,
+    "--out-dir", out,
+    "--channel", "0.1.3",
+    "--arch", "x86_64-linux"
+  )
+  assert(st.success?, "package-port failed: #{out_s}\n#{err_s}")
+  assert(out_s.include?("PACKAGE_PORT: OK"), "missing PACKAGE_PORT: OK banner")
+
+  ch_dir = File.join(out, "0.1.3", "x86_64-linux")
+  idx = JSON.parse(File.read(File.join(ch_dir, "index.json")))
+  assert(idx["channel"] == "0.1.3", "wrong channel")
+  pkg = idx.dig("packages", "demo")
+  assert(pkg && pkg["version"] == "1.0", "missing demo package in index.json")
+  assert(File.file?(File.join(ch_dir, pkg.dig("binary", "path"))), "missing binary tar.xz")
+  assert(File.file?(File.join(ch_dir, pkg.dig("source", "path"))), "missing GPL corresponding source tarball")
+  assert(File.file?(File.join(ch_dir, pkg.dig("recipe", "path"))), "missing recipe tar.xz")
+
+  # Verify .pc relocation inside binary tarball
+  extract = File.join(td, "extract")
+  FileUtils.mkdir_p(extract)
+  _to, terr, tst = Open3.capture3("tar", "-xf", File.join(ch_dir, pkg.dig("binary", "path")), "-C", extract)
+  assert(tst.success?, "tar extract failed: #{terr}")
+  pc_text = File.read(File.join(extract, "prefix", "lib", "pkgconfig", "demo.pc"))
+  assert(pc_text.include?("prefix=${pcfiledir}/../.."), "demo.pc was not relocated: #{pc_text}")
+  assert(!pc_text.include?(pizfix), "demo.pc still contains absolute pizfix path")
+
+  # 2. Leak-gate MUST fail if a staged file contains a private IP
+  fake_private_ip = %w[192 168 0 1].join(".")
+  File.write(File.join(pizfix, "include", "demo.h"), "#define LEAK \"#{fake_private_ip}\"\n")
+  _lo, lerr, lst = Open3.capture3(
+    "ruby", PACKAGE_SCRIPT,
+    "--repo-root", repo,
+    "--work-dir", work,
+    "--pizfix", pizfix,
+    "--ports-cache-dir", cache,
+    "--out-dir", File.join(td, "out-leak"),
+    "--channel", "0.1.3",
+    "--arch", "x86_64-linux"
+  )
+  assert(!lst.success?, "leak-gate must reject private IP in staged file")
+  assert(lerr.include?("LEAK_GATE FAILED"), "expected LEAK_GATE FAILED message, got: #{lerr}")
+
+  # 3. Upload script MUST refuse unsigned channel
+  _uo, uerr, ust = Open3.capture3(
+    "ruby", UPLOAD_SCRIPT,
+    "--channel-dir", ch_dir,
+    "--channel", "0.1.3",
+    "--arch", "x86_64-linux",
+    "--dry-run"
+  )
+  assert(!ust.success?, "upload-ports must refuse unsigned channel")
+  assert(uerr.include?("missing required channel file"), "expected missing signature error: #{uerr}")
+
+  # 4. Upload script end-to-end against mock HTTP server (with dummy minisig files)
+  File.write(File.join(ch_dir, "index.json.minisig"), "untrusted comment: test\nAA==\ntrusted comment: t\nAA==\n")
+  File.write(File.join(ch_dir, "SHA256SUMS.minisig"), "untrusted comment: test\nAA==\ntrusted comment: t\nAA==\n")
+
+  received = []
+  srv = TCPServer.new("127.0.0.1", 0)
+  port = srv.addr[1]
+  server_thr = Thread.new do
+    loop do
+      sock = begin
+        srv.accept
+      rescue IOError
+        break
+      end
+      req_head = +""
+      while (line = sock.gets)
+        req_head << line
+        break if line == "\r\n"
+      end
+      first = req_head.lines.first.to_s.strip
+      method, path, = first.split(" ", 3)
+      cl = req_head[/^Content-Length:\s*(\d+)/i, 1].to_i
+      auth = req_head[/^Authorization:\s*(.+)\r?$/i, 1].to_s.strip
+      body = cl > 0 ? sock.read(cl) : ""
+      received << [method, path, auth, body.bytesize]
+
+      if method == "HEAD"
+        sock.write("HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+      elsif method == "PUT"
+        resp = JSON.generate("ok" => true, "created" => true)
+        sock.write("HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: #{resp.bytesize}\r\nConnection: close\r\n\r\n#{resp}")
+      elsif method == "POST"
+        resp = JSON.generate("ok" => true, "packages" => 1)
+        sock.write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: #{resp.bytesize}\r\nConnection: close\r\n\r\n#{resp}")
+      end
+      sock.close
+    end
+  end
+
+  begin
+    uo2, ue2, ust2 = Open3.capture3(
+      { "FILC_PORTS_UPLOAD_TOKEN" => "ci-upload-secret" },
+      "ruby", UPLOAD_SCRIPT,
+      "--channel-dir", ch_dir,
+      "--channel", "0.1.3",
+      "--arch", "x86_64-linux",
+      "--base-url", "http://127.0.0.1:#{port}"
+    )
+    assert(ust2.success?, "upload-ports failed against mock server: #{uo2}\n#{ue2}")
+    assert(uo2.include?("UPLOAD_PORTS: OK"), "missing UPLOAD_PORTS: OK: #{uo2}")
+    puts_paths = received.select { |m, _| m == "PUT" }.map { |_, p| p }
+    assert(puts_paths.length == 3, "expected 3 PUT uploads (src, recipe, bin), got #{puts_paths.inspect}")
+    assert(puts_paths[0].include?("/src/") && puts_paths[1].include?("/recipes/") && puts_paths[2].include?("/bin/"),
+           "uploads must run in src -> recipes -> bin order: #{puts_paths.inspect}")
+    assert(received.last[0] == "POST" && received.last[1].end_with?("/commit-index"), "must end with commit-index")
+    assert(received.all? { |_, _, a, _| a == "Bearer ci-upload-secret" }, "every upload request must carry Bearer token")
+  ensure
+    srv.close
+    server_thr.join(2)
+  end
+end
+
+puts "TEST_PACKAGE_PORT: PASS (4/4)"

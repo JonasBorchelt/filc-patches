@@ -548,7 +548,7 @@ Verified by the toolchain end-to-end self-test and full userland port sweep:
 
 - Shared-library \`-Wl,--version-script\` export filtering and safe \`-Wa\` assembler flag filtering
 - Clean compile-time rejection of unsupported constructs (\`__builtin_setjmp\`, \`__builtin_longjmp\`, reserved \`setjmp\` redefinition, non-zero address spaces, invalid module inline assembly, and runtime trap for \`asm goto\`)
-- \`<fenv.h>\` x87 and SSE rounding-mode and exception-flag tests
+- \`<fenv.h>\` x87 and SSE rounding-mode and environment save/restore tests
 - \`semctl(GETALL/SETALL)\` roundtrip and out-of-bounds memory-safety trap
 - \`prctl(PR_SET_NAME)\` TGID leader \`/proc/self/comm\` synchronization
 - \`<ucontext.h>\` multi-fiber GC stress test and fiber stack-overflow memory-safety trap

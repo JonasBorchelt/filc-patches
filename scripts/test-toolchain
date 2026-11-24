@@ -674,7 +674,9 @@ int main(void) {
 EOF
 
 cat > "$TEST_DIR/trap_semctl_oob.c" <<'EOF'
+#include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/ipc.h>
 #include <sys/sem.h>
 #include <sys/wait.h>
@@ -684,25 +686,45 @@ union semun {
     unsigned short *array;
 };
 
-int main(void) {
-    int semid = semget(IPC_PRIVATE, 4, IPC_CREAT | 0600);
-    if (semid < 0)
-        return 1;
+static int run_oob_child(int semid, int cmd) {
+    fflush(NULL);
     pid_t pid = fork();
+    if (pid < 0)
+        return -1;
     if (pid == 0) {
-        unsigned short tiny[2] = {0, 0};
+        /* Fil-C rounds allocation upper bounds to FILC_MINALIGN (16 bytes),
+           so allocate exactly 16 bytes (8 shorts) against sem_nsems=16 (32 bytes). */
+        unsigned short *tiny = (unsigned short *)calloc(8, sizeof(unsigned short));
+        if (!tiny)
+            _exit(10);
         union semun arg;
         arg.array = tiny;
-        /* Must trap with Fil-C OOB safety panic because sem_nsems=4 > 2 */
-        int rc = semctl(semid, 0, GETALL, arg);
-        printf("UNEXPECTED_SEMCTL_OOB_SURVIVED=%d\n", rc);
+        int rc = semctl(semid, 0, cmd, arg);
+        printf("UNEXPECTED_SEMCTL_OOB_SURVIVED cmd=%d rc=%d errno=%d\n", cmd, rc, errno);
+        fflush(stdout);
         _exit(0);
     }
     int status = 0;
-    waitpid(pid, &status, 0);
+    if (waitpid(pid, &status, 0) < 0)
+        return -2;
+    if (!WIFSIGNALED(status)) {
+        fprintf(stderr, "semctl OOB child (cmd=%d) did not trap by signal (status=0x%x)\n", cmd, status);
+        return 1;
+    }
+    return 0;
+}
+
+int main(void) {
+    int semid = semget(IPC_PRIVATE, 16, IPC_CREAT | 0600);
+    if (semid < 0)
+        return 1;
+    int r_get = run_oob_child(semid, GETALL);
+    int r_set = run_oob_child(semid, SETALL);
     semctl(semid, 0, IPC_RMID);
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+    if (r_get != 0)
         return 2;
+    if (r_set != 0)
+        return 3;
     printf("SEMCTL_OOB_TRAPPED_OK\n");
     return 0;
 }
@@ -723,8 +745,10 @@ run_and_capture trap_semctl_oob "$TEST_DIR/trap_semctl_oob"
 RC_SEMCTL_OOB="$(cat "$TEST_DIR/trap_semctl_oob.rc")"
 if [[ "$RC_SEMCTL_OOB" -ne 0 ]] \
   || grep -q "UNEXPECTED_SEMCTL_OOB_SURVIVED" "$TEST_DIR/trap_semctl_oob.stdout" \
-  || ! grep -Fxq "SEMCTL_OOB_TRAPPED_OK" "$TEST_DIR/trap_semctl_oob.stdout"; then
+  || ! grep -Fxq "SEMCTL_OOB_TRAPPED_OK" "$TEST_DIR/trap_semctl_oob.stdout" \
+  || ! grep -qi "filc safety error" "$TEST_DIR/trap_semctl_oob.stderr"; then
   echo "error: trap_semctl_oob did not safely trap (rc=$RC_SEMCTL_OOB)" >&2
+  cat "$TEST_DIR/trap_semctl_oob.stdout" >&2
   cat "$TEST_DIR/trap_semctl_oob.stderr" >&2
   SEMCTL_PRCTL_OK=0
 fi

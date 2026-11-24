@@ -82,7 +82,7 @@ Building and packaging software with Fil-C follows a toolchain-first policy desi
 2. **Small, upstreamable package patches only when necessary:** Genuinely unsafe or non-portable patterns in a package (such as pointer-to-integer casts, custom allocators, inline assembly, JIT engines, or address-based hashing) receive a minimal, documented, upstreamable patch with an explicit rationale.
 3. **Prefer build options over source patches:** Build-system and configuration issues are resolved through build flags and configuration options instead of patching package sources.
 4. **Audit imported port patches:** Adopted Fil-C port patches serve only as a starting point with full provenance attribution and are reviewed to verify whether they mask an underlying toolchain gap.
-5. **Measure and reduce patch debt:** We track unmodified versus patched package counts and patch sizes, with the explicit goal of driving the number and size of package patches down over time.
+5. **Measure and reduce patch debt:** Unmodified versus patched package counts and patch sizes are tracked, with the explicit goal of driving the number and size of package patches down over time.
 
 ## Known Limitations
 

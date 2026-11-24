@@ -1,0 +1,155 @@
+NAME="nginx"
+VERSION="1.30.8"
+LICENSE="BSD-2-Clause"
+UPSTREAM_URL="https://nginx.org/download/nginx-1.30.8.tar.gz"
+UPSTREAM_SHA256="f867314ada32e717b949930859656c48a72dc6657aec598db58af2f98a40e1c1"
+UPSTREAM_SHA256_SOURCE="pgp:https://nginx.org/download/nginx-1.30.8.tar.gz.asc key:ports/pgp-keys/nginx-kandaurov-release-key.asc fpr:D6786CE303D9A9022998DC6CC8464D549AF75C0A"
+UPSTREAM_SIG_URL="https://nginx.org/download/nginx-1.30.8.tar.gz.asc"
+UPSTREAM_PGP_KEY="ports/pgp-keys/nginx-kandaurov-release-key.asc"
+UPSTREAM_PGP_FPR="D6786CE303D9A9022998DC6CC8464D549AF75C0A"
+EXTRACT_DIR="nginx-1.30.8"
+TIER=4
+DEPS="pcre2 zlib openssl"
+BUILD_SYSTEM="custom"
+CONFIGURE_ARGS=""
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P2-Package"
+POLICY_RATIONALE="Builds upstream stable nginx 1.30.8 against staged Fil-C pcre2, zlib, and openssl with HTTP SSL, HTTP/2, and thread-pool support, with 1 minimal, portable, upstreamable CHERI/Fil-C capability-safety patch eliminating pointer-to-uintptr_t-to-pointer round-trips in ngx_align_ptr, ngx_epoll_module, ngx_hash, ngx_slab, upstream_zone, nginx.c, and ngx_event_openssl.c. Verified against pinned Fil-C (cede3de02b42) that no nginx port patch exists upstream."
+FILC_ORIGIN_REF="none (new Stage 6b port; verified no nginx patch in cede3de02b42)"
+
+port_configure() {
+  ./configure \
+    --prefix="$PIZFIX/nginx" \
+    --sbin-path="$PIZFIX/sbin/nginx" \
+    --conf-path="$PIZFIX/etc/nginx/nginx.conf" \
+    --pid-path="$PIZFIX/var/run/nginx.pid" \
+    --lock-path="$PIZFIX/var/run/nginx.lock" \
+    --error-log-path="$PIZFIX/var/log/nginx/error.log" \
+    --http-log-path="$PIZFIX/var/log/nginx/access.log" \
+    --with-cc="$CC" \
+    --with-cc-opt="-O2 -g -I$PIZFIX/include" \
+    --with-ld-opt="-L$PIZFIX/lib" \
+    --with-pcre \
+    --with-http_ssl_module \
+    --with-http_v2_module \
+    --with-http_gzip_static_module \
+    --with-threads
+}
+
+port_build() {
+  make -j"$JOBS"
+}
+
+port_install() {
+  make install
+}
+
+port_test() {
+  local ver
+  ver="$("$PIZFIX/sbin/nginx" -V 2>&1)"
+  printf '%s\n' "$ver" | grep -q 'nginx version: nginx/1\.30\.8'
+  printf '%s\n' "$ver" | grep -q -- '--with-http_ssl_module'
+  printf '%s\n' "$ver" | grep -q -- '--with-http_v2_module'
+
+  local td http_port https_port
+  td="$(mktemp -d)"
+  mkdir -p "$td/html" "$td/logs" "$td/tmp"
+  printf 'FILC_NGINX_STATIC_OK\n' > "$td/html/hello.txt"
+
+  "$PIZFIX/bin/openssl" req -x509 -newkey rsa:2048 -nodes \
+    -keyout "$td/server.key" -out "$td/server.crt" \
+    -days 1 -subj "/CN=127.0.0.1" >/dev/null 2>&1
+
+  read -r http_port https_port < <(python3 -c '
+import socket
+socks = []
+ports = []
+for _ in range(2):
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    ports.append(s.getsockname()[1])
+    socks.append(s)
+for s in socks:
+    s.close()
+print(ports[0], ports[1])
+')
+
+  cat > "$td/nginx.conf" <<EOF
+worker_processes 1;
+master_process off;
+daemon on;
+pid $td/nginx.pid;
+error_log $td/logs/error.log notice;
+
+events {
+    worker_connections 64;
+}
+
+http {
+    access_log off;
+    client_body_temp_path $td/tmp/body;
+    proxy_temp_path $td/tmp/proxy;
+    fastcgi_temp_path $td/tmp/fastcgi;
+    uwsgi_temp_path $td/tmp/uwsgi;
+    scgi_temp_path $td/tmp/scgi;
+    gzip on;
+    gzip_min_length 1;
+    gzip_types text/plain;
+
+    server {
+        listen 127.0.0.1:${http_port};
+        server_name localhost *.filc.invalid;
+        root $td/html;
+
+        location = /hello.txt {
+            default_type text/plain;
+        }
+
+        location ~ ^/re/([a-z0-9]+)\$ {
+            default_type text/plain;
+            return 200 "RE:\$1\n";
+        }
+    }
+
+    server {
+        listen 127.0.0.1:${https_port} ssl;
+        http2 on;
+        server_name localhost;
+        ssl_certificate $td/server.crt;
+        ssl_certificate_key $td/server.key;
+        ssl_session_cache shared:SSL:1m;
+        root $td/html;
+
+        location = /hello.txt {
+            default_type text/plain;
+        }
+    }
+}
+EOF
+
+  "$PIZFIX/sbin/nginx" -p "$td" -c "$td/nginx.conf" -t
+
+  "$PIZFIX/sbin/nginx" -p "$td" -c "$td/nginx.conf"
+  local rc=0
+  {
+    sleep 1
+    # 1. Plain HTTP static file
+    curl -fsS "http://127.0.0.1:${http_port}/hello.txt" | grep -Fxq 'FILC_NGINX_STATIC_OK'
+    # 2. HTTP with gzip compression (verifies Fil-C zlib)
+    curl -fsS --compressed -D "$td/gzip.hdr" "http://127.0.0.1:${http_port}/hello.txt" | grep -Fxq 'FILC_NGINX_STATIC_OK'
+    grep -iq '^content-encoding:[[:space:]]*gzip' "$td/gzip.hdr"
+    # 3. PCRE2 regex capture location + wildcard server_name hash (verifies Fil-C pcre2 + ngx_hash)
+    curl -fsS -H "Host: app.filc.invalid" "http://127.0.0.1:${http_port}/re/filc42" | grep -Fxq 'RE:filc42'
+    # 4. HTTPS + HTTP/2 + shared SSL session slab cache (verifies Fil-C openssl + ngx_slab)
+    curl -fsSk --http2 "https://127.0.0.1:${https_port}/hello.txt" | grep -Fxq 'FILC_NGINX_STATIC_OK'
+  } || rc=$?
+
+  "$PIZFIX/sbin/nginx" -p "$td" -c "$td/nginx.conf" -s stop >/dev/null 2>&1 || true
+  if [[ "$rc" -ne 0 && -f "$td/logs/error.log" ]]; then
+    cat "$td/logs/error.log" >&2 || true
+  fi
+  rm -rf "$td"
+  return "$rc"
+}

@@ -18,5 +18,6 @@ Armored OpenPGP release signing keys pinned for `scripts/verify-pins`:
 - `libunistring-release-key.asc`: Bruno Haible (`keyserver.ubuntu.com`), fingerprint `E0FFBD975397F77A32AB76ECB6301D9E1BBEAC08`.
 - `libuv-release-key.asc`: Santiago Gimeno (`keyserver.ubuntu.com`), fingerprint `612F0EAD9401622379DF4402F28C3C8DA33C03BE`.
 - `ncurses-release-key.asc`: Thomas E. Dickey (`https://invisible-island.net/public/dickey@invisible-island.net-rsa3072.asc`), fingerprint `19882D92DDA4C400C22C0D56CC2AF4472167BE03`.
+- `nginx-kandaurov-release-key.asc`: Sergey Kandaurov (`https://nginx.org/keys/pluknet.key`), primary fingerprint `D6786CE303D9A9022998DC6CC8464D549AF75C0A`.
 - `openssh-release-key.asc`: Damien Miller (`https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/RELEASE_KEY.asc`), fingerprint `7168B983815A5EEF59A4ADFD2A3F414E736060BA`.
 - `python-wouters-release-key.asc`: Thomas Wouters (`keyserver.ubuntu.com`, Python 3.12 Release Manager), fingerprint `7169605F62C751356D054A26A821E680E5FA6305`.

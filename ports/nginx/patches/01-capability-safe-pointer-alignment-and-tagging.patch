@@ -1,0 +1,449 @@
+Subject: Preserve pointer provenance across alignment, low-bit tagging, and slab allocation
+Policy-Class: P2-Package
+Rationale: Eliminates pointer-to-uintptr_t-to-pointer round-trips that strip pointer capabilities on CHERI and Fil-C architectures, using portable standard C without Fil-C-specific headers: (1) ngx_align_ptr uses byte-pointer offset arithmetic (p + delta); (2) ngx_epoll_module, ngx_hash, and http/stream upstream_zone use byte-pointer +/- tag arithmetic instead of (uintptr_t) bit-OR/AND casts; (3) ngx_slab uses a typed ngx_slab_page_t *prev plus separate type field and u_char* page addresses; (4) nginx.c and ngx_event_openssl.c drop redundant (uintptr_t) intermediate casts.
+Upstream-Status: Upstreamable
+Fil-C-Origin-Commits: none
+
+--- a/src/core/ngx_config.h
++++ b/src/core/ngx_config.h
+@@ -99,7 +99,8 @@
+ 
+ #define ngx_align(d, a)     (((d) + (a - 1)) & ~(a - 1))
+ #define ngx_align_ptr(p, a)                                                   \
+-    (u_char *) (((uintptr_t) (p) + ((uintptr_t) a - 1)) & ~((uintptr_t) a - 1))
++    ((u_char *) (p) + ((((uintptr_t) (p) + ((uintptr_t) (a) - 1))            \
++                        & ~((uintptr_t) (a) - 1)) - (uintptr_t) (p)))
+ 
+ 
+ #define ngx_abort       abort
+--- a/src/core/nginx.c
++++ b/src/core/nginx.c
+@@ -441,7 +441,7 @@
+         } else {
+             ngx_write_stderr("built with " OPENSSL_VERSION_TEXT
+                              " (running with ");
+-            ngx_write_stderr((char *) (uintptr_t) ngx_ssl_version());
++            ngx_write_stderr((char *) ngx_ssl_version());
+             ngx_write_stderr(")" NGX_LINEFEED);
+         }
+ #ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
+--- a/src/core/ngx_hash.c
++++ b/src/core/ngx_hash.c
+@@ -109,11 +109,11 @@
+                 }
+ 
+                 hwc = (ngx_hash_wildcard_t *)
+-                                          ((uintptr_t) value & (uintptr_t) ~3);
++                               ((u_char *) value - ((uintptr_t) value & 3));
+                 return hwc->value;
+             }
+ 
+-            hwc = (ngx_hash_wildcard_t *) ((uintptr_t) value & (uintptr_t) ~3);
++            hwc = (ngx_hash_wildcard_t *) ((u_char *) value - ((uintptr_t) value & 3));
+ 
+             value = ngx_hash_find_wc_head(hwc, name, n - 1);
+ 
+@@ -133,7 +133,7 @@
+                 return NULL;
+             }
+ 
+-            return (void *) ((uintptr_t) value & (uintptr_t) ~3);
++            return (void *) ((u_char *) value - ((uintptr_t) value & 3));
+         }
+ 
+         return value;
+@@ -189,7 +189,7 @@
+ 
+             i++;
+ 
+-            hwc = (ngx_hash_wildcard_t *) ((uintptr_t) value & (uintptr_t) ~3);
++            hwc = (ngx_hash_wildcard_t *) ((u_char *) value - ((uintptr_t) value & 3));
+ 
+             value = ngx_hash_find_wc_tail(hwc, &name[i], len - i);
+ 
+@@ -613,10 +613,10 @@
+                 wdc->value = names[n].value;
+             }
+ 
+-            name->value = (void *) ((uintptr_t) wdc | (dot ? 3 : 2));
++            name->value = (void *) ((u_char *) wdc + (dot ? 3 : 2));
+ 
+         } else if (dot) {
+-            name->value = (void *) ((uintptr_t) name->value | 1);
++            name->value = (void *) ((u_char *) name->value + 1);
+         }
+     }
+ 
+--- a/src/core/ngx_slab.h
++++ b/src/core/ngx_slab.h
+@@ -18,7 +18,8 @@
+ struct ngx_slab_page_s {
+     uintptr_t         slab;
+     ngx_slab_page_t  *next;
+-    uintptr_t         prev;
++    ngx_slab_page_t  *prev;
++    uintptr_t         type;
+ };
+ 
+ 
+--- a/src/core/ngx_slab.c
++++ b/src/core/ngx_slab.c
+@@ -44,14 +44,12 @@
+ #define ngx_slab_slots(pool)                                                  \
+     (ngx_slab_page_t *) ((u_char *) (pool) + sizeof(ngx_slab_pool_t))
+ 
+-#define ngx_slab_page_type(page)   ((page)->prev & NGX_SLAB_PAGE_MASK)
++#define ngx_slab_page_type(page)   ((page)->type)
+ 
+-#define ngx_slab_page_prev(page)                                              \
+-    (ngx_slab_page_t *) ((page)->prev & ~NGX_SLAB_PAGE_MASK)
++#define ngx_slab_page_prev(page)   ((page)->prev)
+ 
+ #define ngx_slab_page_addr(pool, page)                                        \
+-    ((((page) - (pool)->pages) << ngx_pagesize_shift)                         \
+-     + (uintptr_t) (pool)->start)
++    ((pool)->start + (((page) - (pool)->pages) << ngx_pagesize_shift))
+ 
+ 
+ #if (NGX_DEBUG_MALLOC)
+@@ -119,7 +117,8 @@
+         /* only "next" is used in list head */
+         slots[i].slab = 0;
+         slots[i].next = &slots[i];
+-        slots[i].prev = 0;
++        slots[i].prev = NULL;
++        slots[i].type = NGX_SLAB_PAGE;
+     }
+ 
+     p += n * sizeof(ngx_slab_page_t);
+@@ -141,11 +140,13 @@
+     /* only "next" is used in list head */
+     pool->free.slab = 0;
+     pool->free.next = page;
+-    pool->free.prev = 0;
++    pool->free.prev = NULL;
++    pool->free.type = NGX_SLAB_PAGE;
+ 
+     page->slab = pages;
+     page->next = &pool->free;
+-    page->prev = (uintptr_t) &pool->free;
++    page->prev = &pool->free;
++    page->type = NGX_SLAB_PAGE;
+ 
+     pool->start = ngx_align_ptr(p + pages * sizeof(ngx_slab_page_t),
+                                 ngx_pagesize);
+@@ -184,7 +185,8 @@
+ ngx_slab_alloc_locked(ngx_slab_pool_t *pool, size_t size)
+ {
+     size_t            s;
+-    uintptr_t         p, m, mask, *bitmap;
++    u_char           *p;
++    uintptr_t         m, mask, *bitmap;
+     ngx_uint_t        i, n, slot, shift, map;
+     ngx_slab_page_t  *page, *prev, *slots;
+ 
+@@ -199,7 +201,7 @@
+             p = ngx_slab_page_addr(pool, page);
+ 
+         } else {
+-            p = 0;
++            p = NULL;
+         }
+ 
+         goto done;
+@@ -244,7 +246,7 @@
+ 
+                         i = (n * 8 * sizeof(uintptr_t) + i) << shift;
+ 
+-                        p = (uintptr_t) bitmap + i;
++                        p = (u_char *) bitmap + i;
+ 
+                         pool->stats[slot].used++;
+ 
+@@ -260,7 +262,8 @@
+                             page->next->prev = page->prev;
+ 
+                             page->next = NULL;
+-                            page->prev = NGX_SLAB_SMALL;
++                            page->prev = NULL;
++                            page->type = NGX_SLAB_SMALL;
+                         }
+ 
+                         goto done;
+@@ -283,7 +286,8 @@
+                     page->next->prev = page->prev;
+ 
+                     page->next = NULL;
+-                    page->prev = NGX_SLAB_EXACT;
++                    page->prev = NULL;
++                    page->type = NGX_SLAB_EXACT;
+                 }
+ 
+                 p = ngx_slab_page_addr(pool, page) + (i << shift);
+@@ -314,7 +318,8 @@
+                     page->next->prev = page->prev;
+ 
+                     page->next = NULL;
+-                    page->prev = NGX_SLAB_BIG;
++                    page->prev = NULL;
++                    page->type = NGX_SLAB_BIG;
+                 }
+ 
+                 p = ngx_slab_page_addr(pool, page) + (i << shift);
+@@ -358,7 +363,8 @@
+ 
+             page->slab = shift;
+             page->next = &slots[slot];
+-            page->prev = (uintptr_t) &slots[slot] | NGX_SLAB_SMALL;
++            page->prev = &slots[slot];
++            page->type = NGX_SLAB_SMALL;
+ 
+             slots[slot].next = page;
+ 
+@@ -374,7 +380,8 @@
+ 
+             page->slab = 1;
+             page->next = &slots[slot];
+-            page->prev = (uintptr_t) &slots[slot] | NGX_SLAB_EXACT;
++            page->prev = &slots[slot];
++            page->type = NGX_SLAB_EXACT;
+ 
+             slots[slot].next = page;
+ 
+@@ -390,7 +397,8 @@
+ 
+             page->slab = ((uintptr_t) 1 << NGX_SLAB_MAP_SHIFT) | shift;
+             page->next = &slots[slot];
+-            page->prev = (uintptr_t) &slots[slot] | NGX_SLAB_BIG;
++            page->prev = &slots[slot];
++            page->type = NGX_SLAB_BIG;
+ 
+             slots[slot].next = page;
+ 
+@@ -404,7 +412,7 @@
+         }
+     }
+ 
+-    p = 0;
++    p = NULL;
+ 
+     pool->stats[slot].fails++;
+ 
+@@ -492,7 +500,7 @@
+         m = (uintptr_t) 1 << (n % (8 * sizeof(uintptr_t)));
+         n /= 8 * sizeof(uintptr_t);
+         bitmap = (uintptr_t *)
+-                             ((uintptr_t) p & ~((uintptr_t) ngx_pagesize - 1));
++                             ((u_char *) p - ((uintptr_t) p & (ngx_pagesize - 1)));
+ 
+         if (bitmap[n] & m) {
+             slot = shift - pool->min_shift;
+@@ -503,8 +511,9 @@
+                 page->next = slots[slot].next;
+                 slots[slot].next = page;
+ 
+-                page->prev = (uintptr_t) &slots[slot] | NGX_SLAB_SMALL;
+-                page->next->prev = (uintptr_t) page | NGX_SLAB_SMALL;
++                page->prev = &slots[slot];
++                page->type = NGX_SLAB_SMALL;
++                page->next->prev = page;
+             }
+ 
+             bitmap[n] &= ~m;
+@@ -558,8 +567,9 @@
+                 page->next = slots[slot].next;
+                 slots[slot].next = page;
+ 
+-                page->prev = (uintptr_t) &slots[slot] | NGX_SLAB_EXACT;
+-                page->next->prev = (uintptr_t) page | NGX_SLAB_EXACT;
++                page->prev = &slots[slot];
++                page->type = NGX_SLAB_EXACT;
++                page->next->prev = page;
+             }
+ 
+             page->slab &= ~m;
+@@ -598,8 +608,9 @@
+                 page->next = slots[slot].next;
+                 slots[slot].next = page;
+ 
+-                page->prev = (uintptr_t) &slots[slot] | NGX_SLAB_BIG;
+-                page->next->prev = (uintptr_t) page | NGX_SLAB_BIG;
++                page->prev = &slots[slot];
++                page->type = NGX_SLAB_BIG;
++                page->next->prev = page;
+             }
+ 
+             page->slab &= ~m;
+@@ -684,25 +695,28 @@
+         if (page->slab >= pages) {
+ 
+             if (page->slab > pages) {
+-                page[page->slab - 1].prev = (uintptr_t) &page[pages];
++                page[page->slab - 1].prev = &page[pages];
++                page[page->slab - 1].type = NGX_SLAB_PAGE;
+ 
+                 page[pages].slab = page->slab - pages;
+                 page[pages].next = page->next;
+                 page[pages].prev = page->prev;
++                page[pages].type = NGX_SLAB_PAGE;
+ 
+-                p = (ngx_slab_page_t *) page->prev;
++                p = page->prev;
+                 p->next = &page[pages];
+-                page->next->prev = (uintptr_t) &page[pages];
++                page->next->prev = &page[pages];
+ 
+             } else {
+-                p = (ngx_slab_page_t *) page->prev;
++                p = page->prev;
+                 p->next = page->next;
+                 page->next->prev = page->prev;
+             }
+ 
+             page->slab = pages | NGX_SLAB_PAGE_START;
+             page->next = NULL;
+-            page->prev = NGX_SLAB_PAGE;
++            page->prev = NULL;
++            page->type = NGX_SLAB_PAGE;
+ 
+             pool->pfree -= pages;
+ 
+@@ -713,7 +727,8 @@
+             for (p = page + 1; pages; pages--) {
+                 p->slab = NGX_SLAB_PAGE_BUSY;
+                 p->next = NULL;
+-                p->prev = NGX_SLAB_PAGE;
++                p->prev = NULL;
++                p->type = NGX_SLAB_PAGE;
+                 p++;
+             }
+ 
+@@ -766,7 +781,8 @@
+ 
+                 join->slab = NGX_SLAB_PAGE_FREE;
+                 join->next = NULL;
+-                join->prev = NGX_SLAB_PAGE;
++                join->prev = NULL;
++                join->type = NGX_SLAB_PAGE;
+             }
+         }
+     }
+@@ -790,7 +806,8 @@
+ 
+                 page->slab = NGX_SLAB_PAGE_FREE;
+                 page->next = NULL;
+-                page->prev = NGX_SLAB_PAGE;
++                page->prev = NULL;
++                page->type = NGX_SLAB_PAGE;
+ 
+                 page = join;
+             }
+@@ -798,13 +815,15 @@
+     }
+ 
+     if (pages) {
+-        page[pages].prev = (uintptr_t) page;
++        page[pages].prev = page;
++        page[pages].type = NGX_SLAB_PAGE;
+     }
+ 
+-    page->prev = (uintptr_t) &pool->free;
++    page->prev = &pool->free;
++    page->type = NGX_SLAB_PAGE;
+     page->next = pool->free.next;
+ 
+-    page->next->prev = (uintptr_t) page;
++    page->next->prev = page;
+ 
+     pool->free.next = page;
+ }
+--- a/src/event/ngx_event_openssl.c
++++ b/src/event/ngx_event_openssl.c
+@@ -4521,7 +4521,7 @@
+     ngx_ssl_sess_id_t        *sess_id;
+     ngx_ssl_session_cache_t  *cache;
+ 
+-    hash = ngx_crc32_short((u_char *) (uintptr_t) id, (size_t) len);
++    hash = ngx_crc32_short((u_char *) id, (size_t) len);
+     *copy = 0;
+ 
+     c = ngx_ssl_get_connection(ssl_conn);
+@@ -4559,7 +4559,7 @@
+ 
+         sess_id = (ngx_ssl_sess_id_t *) node;
+ 
+-        rc = ngx_memn2cmp((u_char *) (uintptr_t) id, sess_id->id,
++        rc = ngx_memn2cmp((u_char *) id, sess_id->id,
+                           (size_t) len, (size_t) node->data);
+ 
+         if (rc == 0) {
+--- a/src/event/modules/ngx_epoll_module.c
++++ b/src/event/modules/ngx_epoll_module.c
+@@ -618,7 +618,7 @@
+ #endif
+ 
+     ee.events = events | (uint32_t) flags;
+-    ee.data.ptr = (void *) ((uintptr_t) c | ev->instance);
++    ee.data.ptr = (void *) ((u_char *) c + ev->instance);
+ 
+     ngx_log_debug3(NGX_LOG_DEBUG_EVENT, ev->log, 0,
+                    "epoll add event: fd:%d op:%d ev:%08XD",
+@@ -673,7 +673,7 @@
+     if (e->active) {
+         op = EPOLL_CTL_MOD;
+         ee.events = prev | (uint32_t) flags;
+-        ee.data.ptr = (void *) ((uintptr_t) c | ev->instance);
++        ee.data.ptr = (void *) ((u_char *) c + ev->instance);
+ 
+     } else {
+         op = EPOLL_CTL_DEL;
+@@ -703,7 +703,7 @@
+     struct epoll_event  ee;
+ 
+     ee.events = EPOLLIN|EPOLLOUT|EPOLLET|EPOLLRDHUP;
+-    ee.data.ptr = (void *) ((uintptr_t) c | c->read->instance);
++    ee.data.ptr = (void *) ((u_char *) c + c->read->instance);
+ 
+     ngx_log_debug2(NGX_LOG_DEBUG_EVENT, c->log, 0,
+                    "epoll add connection: fd:%d ev:%08XD", c->fd, ee.events);
+@@ -837,7 +837,7 @@
+         c = event_list[i].data.ptr;
+ 
+         instance = (uintptr_t) c & 1;
+-        c = (ngx_connection_t *) ((uintptr_t) c & (uintptr_t) ~1);
++        c = (ngx_connection_t *) ((u_char *) c - instance);
+ 
+         rev = c->read;
+ 
+--- a/src/http/modules/ngx_http_upstream_zone_module.c
++++ b/src/http/modules/ngx_http_upstream_zone_module.c
+@@ -761,11 +761,11 @@
+     ((uintptr_t) (addr)->sockaddr & 1)
+ 
+ #define ngx_http_upstream_zone_mark_addr(addr)                                \
+-    (addr)->sockaddr = (struct sockaddr *) ((uintptr_t) (addr)->sockaddr | 1)
++    (addr)->sockaddr = (struct sockaddr *) ((u_char *) (addr)->sockaddr + (1 - ((uintptr_t) (addr)->sockaddr & 1)))
+ 
+ #define ngx_http_upstream_zone_unmark_addr(addr)                              \
+     (addr)->sockaddr =                                                        \
+-        (struct sockaddr *) ((uintptr_t) (addr)->sockaddr & ~((uintptr_t) 1))
++        (struct sockaddr *) ((u_char *) (addr)->sockaddr - ((uintptr_t) (addr)->sockaddr & 1))
+ 
+ static void
+ ngx_http_upstream_zone_resolve_handler(ngx_resolver_ctx_t *ctx)
+--- a/src/stream/ngx_stream_upstream_zone_module.c
++++ b/src/stream/ngx_stream_upstream_zone_module.c
+@@ -736,11 +736,11 @@
+     ((uintptr_t) (addr)->sockaddr & 1)
+ 
+ #define ngx_stream_upstream_zone_mark_addr(addr)                              \
+-    (addr)->sockaddr = (struct sockaddr *) ((uintptr_t) (addr)->sockaddr | 1)
++    (addr)->sockaddr = (struct sockaddr *) ((u_char *) (addr)->sockaddr + (1 - ((uintptr_t) (addr)->sockaddr & 1)))
+ 
+ #define ngx_stream_upstream_zone_unmark_addr(addr)                            \
+     (addr)->sockaddr =                                                        \
+-        (struct sockaddr *) ((uintptr_t) (addr)->sockaddr & ~((uintptr_t) 1))
++        (struct sockaddr *) ((u_char *) (addr)->sockaddr - ((uintptr_t) (addr)->sockaddr & 1))
+ 
+ static void
+ ngx_stream_upstream_zone_resolve_handler(ngx_resolver_ctx_t *ctx)

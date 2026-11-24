@@ -47,7 +47,10 @@ for req in \
   setup.sh \
   bin/clang \
   bin/clang++ \
-  bin/ld.lld; do
+  bin/ld.lld \
+  bin/llvm-ar \
+  bin/llvm-ranlib \
+  bin/llvm-nm; do
   if [[ ! -s "$ROOT_DIR/$req" ]]; then
     echo "error: missing or empty archive file: $req" >&2
     exit 1

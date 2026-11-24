@@ -411,10 +411,11 @@ FN_TC="$TMP_DIR/fn-toolchain"
 FAKE_BIN="$TMP_DIR/fake-bin"
 mkdir -p "$FN_DIR/fn-ok" "$FN_DIR/fn-pkg-fail" "$FN_TC/build/bin" "$FN_TC/pizfix/lib" "$FN_TC/pizfix/bin" "$FAKE_BIN"
 
-# Fake clang/clang++ binaries
-printf '#!/usr/bin/env bash\nexit 0\n' > "$FN_TC/build/bin/clang"
-printf '#!/usr/bin/env bash\nexit 0\n' > "$FN_TC/build/bin/clang++"
-chmod +x "$FN_TC/build/bin/clang" "$FN_TC/build/bin/clang++"
+# Fake clang/clang++/llvm-ar/llvm-ranlib/llvm-nm binaries
+for tb in clang clang++ llvm-ar llvm-ranlib llvm-nm; do
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$FN_TC/build/bin/$tb"
+  chmod +x "$FN_TC/build/bin/$tb"
+done
 
 # Strict GNU-like mock 'timeout' binary that rejects non-executable shell function names with rc=127
 cat > "$FAKE_BIN/timeout" <<'EOF'
@@ -632,6 +633,31 @@ if grep -Fq "ac_cv_dummy_120" "$AC_ERR"; then
   exit 1
 fi
 echo "HOST_TOOLS & AUTOCONF CONFIG.LOG EXCERPT TESTS OK"
+
+echo "=== 6c. Hard failure when llvm-ar, llvm-ranlib, or llvm-nm is missing (no host fallback) ==="
+for MISSING_TOOL in llvm-ar llvm-ranlib llvm-nm; do
+  MT_TC="$TMP_DIR/missing-${MISSING_TOOL}-tc"
+  MT_WORK="$TMP_DIR/missing-${MISSING_TOOL}-work"
+  mkdir -p "$MT_TC/build/bin" "$MT_TC/pizfix/lib" "$MT_TC/pizfix/bin"
+  for tb in clang clang++ llvm-ar llvm-ranlib llvm-nm; do
+    [[ "$tb" == "$MISSING_TOOL" ]] && continue
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$MT_TC/build/bin/$tb"
+    chmod +x "$MT_TC/build/bin/$tb"
+  done
+  MT_ERR="$TMP_DIR/missing-${MISSING_TOOL}.err"
+  if FILC_PORTS_DIR="$FN_DIR" FILC_TOOLCHAIN_ROOT="$MT_TC" \
+      "$REPO_ROOT/scripts/build-port" fn-ok "$MT_WORK" >"$TMP_DIR/missing-${MISSING_TOOL}.out" 2>"$MT_ERR"; then
+    echo "FAIL: build-port must fail hard when ${MISSING_TOOL} is missing (no host fallback)" >&2
+    exit 1
+  fi
+  assert_grep -Fq "'${MISSING_TOOL}' not found" "$MT_ERR" "missing ${MISSING_TOOL} diagnostic"
+  python3 - "$MT_WORK/ports-state/fn-ok.json" "$MISSING_TOOL" <<'PY'
+import json, sys
+rec = json.load(open(sys.argv[1]))
+assert rec["status"] == "failed" and rec["failed_stage"] == "toolchain" and rec["failed_kind"] == "runner", (sys.argv[2], rec)
+PY
+done
+echo "NO-HOST-FALLBACK TOOLCHAIN BINARY CHECKS OK (llvm-ar, llvm-ranlib, llvm-nm)"
 
 echo "=== 7. --ports and FILC_PORTS subset selection test (openssh -> 8 ports) ==="
 SUB_WORK_CLI="$TMP_DIR/sub-work-cli"

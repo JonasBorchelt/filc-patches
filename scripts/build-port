@@ -495,10 +495,19 @@ fi
 
 # 5. Prepare Fil-C toolchain environment
 CURRENT_STAGE="toolchain"
-if [[ ! -x "$CLANG_BIN" ]]; then
-  echo "error: Fil-C clang not found at $CLANG_BIN (set FILC_TOOLCHAIN_ROOT)" >&2
-  exit 1
-fi
+for tool_spec in \
+  "clang:$CLANG_BIN" \
+  "clang++:$CLANGXX_BIN" \
+  "llvm-ar:$LLVM_AR" \
+  "llvm-ranlib:$LLVM_RANLIB" \
+  "llvm-nm:$LLVM_NM"; do
+  tool_label="${tool_spec%%:*}"
+  tool_path="${tool_spec#*:}"
+  if [[ ! -x "$tool_path" ]]; then
+    echo "error: Fil-C toolchain binary '$tool_label' not found or not executable at $tool_path (set FILC_TOOLCHAIN_ROOT)" >&2
+    exit 1
+  fi
+done
 if [[ ! -d "$PIZFIX" ]]; then
   echo "error: Fil-C sysroot (pizfix) not found at $PIZFIX" >&2
   exit 1
@@ -506,21 +515,9 @@ fi
 
 export CC="$CLANG_BIN"
 export CXX="$CLANGXX_BIN"
-if [[ -x "$LLVM_AR" ]]; then
-  export AR="$LLVM_AR"
-else
-  export AR="${AR:-ar}"
-fi
-if [[ -x "$LLVM_RANLIB" ]]; then
-  export RANLIB="$LLVM_RANLIB"
-else
-  export RANLIB="${RANLIB:-ranlib}"
-fi
-if [[ -x "$LLVM_NM" ]]; then
-  export NM="$LLVM_NM"
-else
-  export NM="${NM:-nm}"
-fi
+export AR="$LLVM_AR"
+export RANLIB="$LLVM_RANLIB"
+export NM="$LLVM_NM"
 # Provide a capability/ABI-aware libtool global_symbol_pipe centrally so
 # autotools/libtool ports using -export-symbols-regex work unmodified under
 # Fil-C's pizlonated_ symbol prefix (paired with Clang driver version-script
@@ -555,6 +552,9 @@ else
         -DCMAKE_INSTALL_PREFIX="$PIZFIX" \
         -DCMAKE_C_COMPILER="$CC" \
         -DCMAKE_CXX_COMPILER="$CXX" \
+        -DCMAKE_AR="$AR" \
+        -DCMAKE_RANLIB="$RANLIB" \
+        -DCMAKE_NM="$NM" \
         -DCMAKE_BUILD_TYPE=RelWithDebInfo \
         $CMAKE_ARGS
       ;;

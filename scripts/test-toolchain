@@ -26,10 +26,19 @@ PIZFIX="$WORK_ROOT/pizfix"
 CLANG="$BUILD_DIR/bin/clang"
 CLANGXX="$BUILD_DIR/bin/clang++"
 LLD="$BUILD_DIR/bin/ld.lld"
+LLVM_AR="$BUILD_DIR/bin/llvm-ar"
+LLVM_RANLIB="$BUILD_DIR/bin/llvm-ranlib"
+LLVM_NM="$BUILD_DIR/bin/llvm-nm"
 TEST_DIR="$WORK_ROOT/e2e-tests"
 
-if [[ ! -x "$CLANG" || ! -x "$CLANGXX" || ! -d "$PIZFIX/lib" ]]; then
-  echo "error: built Fil-C toolchain not found under $WORK_ROOT (run scripts/build-toolchain first)" >&2
+for req_bin in "$CLANG" "$CLANGXX" "$LLD" "$LLVM_AR" "$LLVM_RANLIB" "$LLVM_NM"; do
+  if [[ ! -x "$req_bin" ]]; then
+    echo "error: built Fil-C toolchain binary missing or not executable: $req_bin (run scripts/build-toolchain first)" >&2
+    exit 1
+  fi
+done
+if [[ ! -d "$PIZFIX/lib" ]]; then
+  echo "error: built Fil-C sysroot not found under $WORK_ROOT (run scripts/build-toolchain first)" >&2
   exit 1
 fi
 
@@ -299,21 +308,28 @@ RC_VER_EQ="$(cat "$TEST_DIR/vertest_eq.rc")"
 RC_VER_COMMA="$(cat "$TEST_DIR/vertest_comma.rc")"
 NM_OK=1
 : > "$TEST_DIR/vertest.nm"
-if command -v nm >/dev/null 2>&1; then
-  for so in "$TEST_DIR/libvertest_eq.so" "$TEST_DIR/libvertest_comma.so"; do
-    echo "=== nm -D --defined-only $(basename "$so") ===" >> "$TEST_DIR/vertest.nm"
-    nm -D --defined-only "$so" >> "$TEST_DIR/vertest.nm" 2>&1 || true
-    if ! nm -D --defined-only "$so" | grep -Eq ' [A-Za-z] pizlonated_vertest_add@@VERTEST_1\.0$'; then
-      echo "error: expected versioned export pizlonated_vertest_add@@VERTEST_1.0 in $so" >&2
-      nm -D --defined-only "$so" >&2 || true
-      NM_OK=0
-    fi
-    if nm -D --defined-only "$so" | grep -q 'vertest_secret'; then
-      echo "error: expected vertest_secret to stay local in $so" >&2
-      nm -D --defined-only "$so" >&2 || true
-      NM_OK=0
-    fi
-  done
+for so in "$TEST_DIR/libvertest_eq.so" "$TEST_DIR/libvertest_comma.so"; do
+  echo "=== llvm-nm -D --defined-only $(basename "$so") ===" >> "$TEST_DIR/vertest.nm"
+  "$LLVM_NM" -D --defined-only "$so" >> "$TEST_DIR/vertest.nm" 2>&1 || true
+  if ! "$LLVM_NM" -D --defined-only "$so" | grep -Eq ' [A-Za-z] pizlonated_vertest_add@@VERTEST_1\.0$'; then
+    echo "error: expected versioned export pizlonated_vertest_add@@VERTEST_1.0 in $so" >&2
+    "$LLVM_NM" -D --defined-only "$so" >&2 || true
+    NM_OK=0
+  fi
+  if "$LLVM_NM" -D --defined-only "$so" | grep -q 'vertest_secret'; then
+    echo "error: expected vertest_secret to stay local in $so" >&2
+    "$LLVM_NM" -D --defined-only "$so" >&2 || true
+    NM_OK=0
+  fi
+done
+"$CLANG" -O2 -c "$TEST_DIR/vertest.c" -o "$TEST_DIR/vertest.o"
+rm -f "$TEST_DIR/libvertest_static.a"
+"$LLVM_AR" rcs "$TEST_DIR/libvertest_static.a" "$TEST_DIR/vertest.o"
+"$LLVM_RANLIB" "$TEST_DIR/libvertest_static.a"
+if ! "$LLVM_NM" "$TEST_DIR/libvertest_static.a" | grep -Eq ' [A-Za-z] pizlonated_vertest_add$'; then
+  echo "error: expected pizlonated_vertest_add in llvm-ar static archive" >&2
+  "$LLVM_NM" "$TEST_DIR/libvertest_static.a" >&2 || true
+  NM_OK=0
 fi
 if [[ "$RC_VER_EQ" -eq 0 && "$RC_VER_COMMA" -eq 0 && "$NM_OK" -eq 1 ]] \
   && grep -Fxq "VERTEST_OK: 42" "$TEST_DIR/vertest_eq.stdout" \

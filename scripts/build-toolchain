@@ -293,11 +293,14 @@ echo "FILC_PHASE configure success $(( $(date +%s) - T_CFG ))"
 
 T_LLVM_BUILD="$(date +%s)"
 echo "FILC_PHASE llvm-build running"
-ninja -C "$BUILD_DIR" -j"$COMPILE_JOBS" clang lld
+ninja -C "$BUILD_DIR" -j"$COMPILE_JOBS" clang lld llvm-ar llvm-ranlib llvm-nm
 
 test -x "$BUILD_DIR/bin/clang"
 test -x "$BUILD_DIR/bin/clang++"
 test -x "$BUILD_DIR/bin/ld.lld"
+test -x "$BUILD_DIR/bin/llvm-ar"
+test -x "$BUILD_DIR/bin/llvm-ranlib"
+test -x "$BUILD_DIR/bin/llvm-nm"
 echo "FILC_PHASE llvm-build success $(( $(date +%s) - T_LLVM_BUILD ))"
 echo "STAGE1_LLVM_SECONDS=$(( $(date +%s) - T_S1 ))"
 
@@ -404,7 +407,7 @@ mv "$PIZFIX/yolo/lib/crtn.o" "$PIZFIX/lib/"
 mv "$PIZFIX/yolo/lib/rcrt1.o" "$PIZFIX/lib/"
 mv "$PIZFIX/yolo/lib/Scrt1.o" "$PIZFIX/lib/"
 rm -f "$PIZFIX/lib/libyolom.a"
-ar cr "$PIZFIX/lib/libyolom.a"
+"$BUILD_DIR/bin/llvm-ar" cr "$PIZFIX/lib/libyolom.a"
 ln -fs libyoloc.so "$PIZFIX/lib/ld-fil1-${ARCH}.so"
 rm -rf "$PIZFIX/yolo-include"
 mv "$PIZFIX/yolo/include" "$PIZFIX/yolo-include"
@@ -533,6 +536,9 @@ for f in \
   "$BUILD_DIR/bin/clang" \
   "$BUILD_DIR/bin/clang++" \
   "$BUILD_DIR/bin/ld.lld" \
+  "$BUILD_DIR/bin/llvm-ar" \
+  "$BUILD_DIR/bin/llvm-ranlib" \
+  "$BUILD_DIR/bin/llvm-nm" \
   "$PIZFIX/lib/crtbegin.o" \
   "$PIZFIX/lib/crtend.o" \
   "$PIZFIX/lib/libyolort.a" \

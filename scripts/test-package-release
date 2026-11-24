@@ -109,6 +109,8 @@ int filc_mock_sym(void) { return 42; }
 EOF
     "$HOST_CC" -O2 -g "$TMP_DIR/mock_clang.c" -o "$work/build/bin/clang-23"
     "$HOST_CC" -O2 -g "$TMP_DIR/mock_lld.c" -o "$work/build/bin/lld"
+    "$HOST_CC" -O2 -g "$TMP_DIR/mock_lld.c" -o "$work/build/bin/llvm-ar"
+    "$HOST_CC" -O2 -g "$TMP_DIR/mock_lld.c" -o "$work/build/bin/llvm-nm"
     for f in libyoloc.so libpizlo.so libc.so libc++.so.1.0 libc++abi.so.1.0; do
       "$HOST_CC" -shared -fPIC -O2 -g "$TMP_DIR/mock_lib.c" -o "$work/pizfix/lib/$f"
     done
@@ -135,6 +137,13 @@ EOF
 echo "MOCK_LLD:$0:$*"
 EOF
     chmod 0755 "$work/build/bin/lld"
+    for tb in llvm-ar llvm-nm; do
+      cat > "$work/build/bin/$tb" <<'EOF'
+#!/bin/sh
+echo "MOCK_BINUTIL:$0:$*"
+EOF
+      chmod 0755 "$work/build/bin/$tb"
+    done
     for f in libyoloc.so libpizlo.so libc.so libc++.so.1.0 libc++abi.so.1.0 crt1.o libyolort.a; do
       printf 'MOCK_LIB_%s\n' "$f" > "$work/pizfix/lib/$f"
     done
@@ -146,6 +155,7 @@ EOF
   ln -s clang-23 "$work/build/bin/clang"
   ln -s clang "$work/build/bin/clang++"
   ln -s lld "$work/build/bin/ld.lld"
+  ln -s llvm-ar "$work/build/bin/llvm-ranlib"
 
   echo "/* stddef */" > "$work/build/lib/clang/23/include/stddef.h"
   echo "// iostream" > "$work/build/include/c++/v1/iostream"
@@ -198,10 +208,16 @@ for req in \
   bin/clang \
   bin/clang++ \
   bin/ld.lld \
+  bin/llvm-ar \
+  bin/llvm-ranlib \
+  bin/llvm-nm \
   build/bin/clang \
   build/bin/clang-23 \
   build/bin/lld \
-  build/bin/ld.lld; do
+  build/bin/ld.lld \
+  build/bin/llvm-ar \
+  build/bin/llvm-ranlib \
+  build/bin/llvm-nm; do
   test -e "$ROOT_DIR/$req" || { echo "FAIL: missing $req in extracted archive" >&2; exit 1; }
 done
 

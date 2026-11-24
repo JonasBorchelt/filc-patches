@@ -69,6 +69,9 @@ for req in \
   "$BUILD_DIR/bin/clang" \
   "$BUILD_DIR/bin/clang++" \
   "$BUILD_DIR/bin/ld.lld" \
+  "$BUILD_DIR/bin/llvm-ar" \
+  "$BUILD_DIR/bin/llvm-ranlib" \
+  "$BUILD_DIR/bin/llvm-nm" \
   "$PIZFIX/lib/libyoloc.so" \
   "$PIZFIX/lib/libpizlo.so" \
   "$PIZFIX/lib/libc.so" \
@@ -94,6 +97,10 @@ CLANG_REAL="$(readlink -f "$BUILD_DIR/bin/clang")"
 CLANG_BASENAME="$(basename "$CLANG_REAL")"
 LLD_REAL="$(readlink -f "$BUILD_DIR/bin/ld.lld")"
 LLD_BASENAME="$(basename "$LLD_REAL")"
+LLVM_AR_REAL="$(readlink -f "$BUILD_DIR/bin/llvm-ar")"
+LLVM_AR_BASENAME="$(basename "$LLVM_AR_REAL")"
+LLVM_NM_REAL="$(readlink -f "$BUILD_DIR/bin/llvm-nm")"
+LLVM_NM_BASENAME="$(basename "$LLVM_NM_REAL")"
 TRIPLE="$("$BUILD_DIR/bin/clang" -print-target-triple)"
 CLANG_MAJOR="$(basename "$(find "$BUILD_DIR/lib/clang" -mindepth 1 -maxdepth 1 -type d | head -n 1)")"
 
@@ -125,7 +132,13 @@ is_elf_or_ar_file() {
 
 cp "$CLANG_REAL" "$STAGE/build/bin/$CLANG_BASENAME"
 cp "$LLD_REAL" "$STAGE/build/bin/$LLD_BASENAME"
-for bin in "$STAGE/build/bin/$CLANG_BASENAME" "$STAGE/build/bin/$LLD_BASENAME"; do
+cp "$LLVM_AR_REAL" "$STAGE/build/bin/$LLVM_AR_BASENAME"
+cp "$LLVM_NM_REAL" "$STAGE/build/bin/$LLVM_NM_BASENAME"
+for bin in \
+  "$STAGE/build/bin/$CLANG_BASENAME" \
+  "$STAGE/build/bin/$LLD_BASENAME" \
+  "$STAGE/build/bin/$LLVM_AR_BASENAME" \
+  "$STAGE/build/bin/$LLVM_NM_BASENAME"; do
   if is_elf_file "$bin"; then
     strip --strip-all "$bin"
     patchelf --remove-rpath "$bin" || true
@@ -144,11 +157,19 @@ done
       ln -s "$LLD_BASENAME" "$alias"
     fi
   done
+  for alias in llvm-ar llvm-ranlib; do
+    if [[ "$alias" != "$LLVM_AR_BASENAME" && ! -e "$alias" && ! -L "$alias" ]]; then
+      ln -s "$LLVM_AR_BASENAME" "$alias"
+    fi
+  done
+  if [[ "llvm-nm" != "$LLVM_NM_BASENAME" && ! -e "llvm-nm" && ! -L "llvm-nm" ]]; then
+    ln -s "$LLVM_NM_BASENAME" llvm-nm
+  fi
 )
 
 # Relative POSIX-sh wrappers in top-level bin/ so users can add <root>/bin to PATH
 # while preserving <root>/build/bin/clang argv[0] for Driver::PizfixRoot discovery.
-for tool in clang clang++ filcc fil++ ld.lld; do
+for tool in clang clang++ filcc fil++ ld.lld llvm-ar llvm-ranlib llvm-nm; do
   cat > "$STAGE/bin/$tool" <<EOF
 #!/bin/sh
 ROOT="\$(CDPATH= cd -- "\$(dirname -- "\$0")/.." && pwd)"
@@ -330,8 +351,8 @@ Fil-C Toolchain (${VERSION}, ${ARCH}-linux)
 ===========================================
 
 Contents:
-  bin/         Relocatable entrypoints (clang, clang++, filcc, fil++, ld.lld)
-  build/       Clang ${CLANG_MAJOR}, LLD, builtin headers, and libc++ headers
+  bin/         Relocatable entrypoints (clang, clang++, filcc, fil++, ld.lld, llvm-ar, llvm-ranlib, llvm-nm)
+  build/       Clang ${CLANG_MAJOR}, LLD, LLVM binutils, builtin headers, and libc++ headers
   pizfix/      Fil-C runtime (libpizlo), musl sysroot, libc++, and CRT objects
   LICENSES/    Original upstream license texts (LLVM, Fil-C runtime, musl)
   NOTICE       Component license and attribution summary

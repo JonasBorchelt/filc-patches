@@ -451,6 +451,28 @@ def format_failed_port_log(log_lines, tail_count: 80, log_file: nil)
     sections << ["FAILURE DIAGNOSTICS", blk]
   end
 
+  # 4b. Configure failure summary (configure: error: + pre-Cache-variables config.log excerpt)
+  cfg_err_idx = norm.rindex { |l| /\bconfigure:\s*error:/i.match?(l) }
+  cfg_log_idx = norm.rindex { |l| /\A--- CONFIGURE LOG \(/.match?(l) }
+  if cfg_err_idx || cfg_log_idx
+    cfg_blk = []
+    if cfg_err_idx
+      err_stop = [norm.length - 1, cfg_err_idx + 5].min
+      (cfg_err_idx..err_stop).each do |i|
+        break if i > cfg_err_idx && /\A(?:STAGE_|FILC_PORT |--- |##\s)/.match?(norm[i])
+        cfg_blk << norm[i]
+      end
+    end
+    if cfg_log_idx
+      log_stop = [norm.length - 1, cfg_log_idx + 120].min
+      (cfg_log_idx..log_stop).each do |i|
+        break if i > cfg_log_idx && /\A(?:FILC_PORT |=== |##\s*(?:Cache|Output)\s+variables\.\s*##)/.match?(norm[i])
+        cfg_blk << norm[i] unless cfg_blk.last == norm[i]
+      end
+    end
+    sections << ["CONFIGURE FAILURE", cfg_blk] unless cfg_blk.empty?
+  end
+
   # 5. Folded Fil-C panic summary (when no structured diagnostic block already folded panics)
   if diag_start.nil?
     panic_lines = fold_filc_panic_lines(norm, max_frames: 20)

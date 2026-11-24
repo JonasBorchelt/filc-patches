@@ -234,8 +234,30 @@ dump_configure_logs() {
   [[ -n "${SRC_DIR:-}" && -d "${SRC_DIR:-}" ]] || return 0
   local logf
   while IFS= read -r logf; do
-    echo "--- CONFIGURE LOG ($logf, last 80 lines) ---" >&2
-    tail -n 80 "$logf" >&2 || true
+    echo "--- CONFIGURE LOG ($logf) ---" >&2
+    ruby - "$logf" >&2 <<'RB' || tail -n 80 "$logf" >&2 || true
+path = ARGV[0]
+lines = File.binread(path).force_encoding("UTF-8").encode("UTF-8", invalid: :replace, undef: :replace).lines.map { |l| l.chomp("\n").chomp("\r") }
+var_idx = lines.index { |l| /\A##\s*(?:Cache|Output)\s+variables\.\s*##\z/.match?(l) }
+err_idx = lines.rindex { |l| /\bconfigure:\s*error:/i.match?(l) }
+if err_idx
+  err_stop = [lines.length - 1, err_idx + 5].min
+  err_block = []
+  (err_idx..err_stop).each do |i|
+    break if i > err_idx && /\A(?:##\s|configure:\d+:|See\s+`config\.log')/.match?(lines[i])
+    err_block << lines[i]
+  end
+  puts "CONFIGURE_ERROR:"
+  puts err_block
+end
+if var_idx
+  start_i = [0, var_idx - 45].max
+  puts "--- CONFIGURE TEST EXCERPT (lines #{start_i + 1}..#{var_idx} before Cache variables) ---"
+  puts lines[start_i...var_idx]
+else
+  puts lines.last(80)
+end
+RB
   done < <(find "$SRC_DIR" -maxdepth 3 \( -name 'config.log' -o -name 'CMakeError.log' \) -type f 2>/dev/null)
 }
 

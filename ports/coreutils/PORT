@@ -19,6 +19,11 @@ POLICY_CLASS="P2-Package"
 POLICY_RATIONALE="Audited down from Fil-C coreutils.projeny (11 files, +6063/-4978) to 2 files (+44/-49): drops the 9-file Fedora/RedHat multibyte i18n patch (src/sort.c +5410/-4885, src/pr.c +400/-43, 7 i18n tests +209/-1; 0 Fil-C hunks) and keeps only capability-preserving zmkptr() alignment and single-object-per-chunk allocation in gnulib lib/obstack.c and lib/obstack.in.h."
 FILC_ORIGIN_REF="cede3de02b42:projects/coreutils.projeny"
 
+# Note: GNU coreutils 9.12+ changed `env` (src/env.c) to shell-quote values
+# unconditionally when QUOTING_STYLE is unset, including on non-TTY pipes.
+# Downstream test suites that clear %ENV and parse `env` output (e.g. Perl's
+# t/op/magic.t) may need QUOTING_STYLE=literal or host /usr/bin/env on PATH.
+
 port_configure() {
   FORCE_UNSAFE_CONFIGURE=1 \
     CPPFLAGS="-I$PIZFIX/include" \

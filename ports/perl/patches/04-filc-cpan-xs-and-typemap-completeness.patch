@@ -1,6 +1,6 @@
-Subject: Route remaining Perl 5.40.5 XS typemaps, B overlay, Encode generators, Digest::SHA, and Compress::Raw::Bzip2 through Perl_xsub_ptrtable
+Subject: Fix remaining Perl 5.40.5 CPAN/XS ptrtable boundaries and ExtUtils::MM_Unix pizlonated_boot_ detection
 Policy-Class: P4-Audit
-Rationale: Project-authored completeness patch separated from the adopted Fil-C commits for P4 auditability. A central perl.h replacement of INT2PTR/PTR2IV is semantically invalid because Perl defines PTR2IV/PTR2UV via INT2PTR(IV/UV,p) and intentionally stores non-pointer integers in pointer slots (e.g. B.xs OP_ARGELEM op_aux, Storable.xs classnum/tagnum). This patch covers all remaining XS/CPAN pointer-via-IV boundaries in Perl 5.40.5: (1) lib/ExtUtils/typemap T_REF_IV_REF, T_REF_IV_PTR, T_PTRDESC, T_REFREF, T_REFOBJ decodes matching sv_setref_pv; (2) ext/B/B.xs get_overlay_object key encoding matching B::Deparse $$op; (3) cpan/Encode/bin/enc2xs plus all 8 hardcoded Encode_XSEncoding generators in Byte/CN/EBCDIC/JP/KR/Symbol/TW Makefile.PL and Encode/Makefile_PL.e2x using Perl_xsub_ptrtable to match Encode.xs; (4) cpan/Digest-SHA/SHA.xs getSHA decode matching sv_setref_pv; (5) cpan/Compress-Raw-Bzip2/typemap T_PTROBJ_AV decode.
+Rationale: Project-authored completeness patch separated from the adopted Fil-C commits for P4 auditability. A central perl.h replacement of INT2PTR/PTR2IV is semantically invalid because Perl defines PTR2IV/PTR2UV via INT2PTR(IV/UV,p) and intentionally stores non-pointer integers in pointer slots (e.g. B.xs OP_ARGELEM op_aux, Storable.xs classnum/tagnum). This patch covers all remaining XS/CPAN Fil-C boundaries in Perl 5.40.5: (1) lib/ExtUtils/typemap T_REF_IV_REF, T_REF_IV_PTR, T_PTRDESC, T_REFREF, T_REFOBJ decodes matching sv_setref_pv; (2) ext/B/B.xs get_overlay_object key encoding matching B::Deparse $$op; (3) cpan/Encode/bin/enc2xs plus all 8 hardcoded Encode_XSEncoding generators in Byte/CN/EBCDIC/JP/KR/Symbol/TW Makefile.PL and Encode/Makefile_PL.e2x using Perl_xsub_ptrtable to match Encode.xs; (4) cpan/Digest-SHA/SHA.xs getSHA decode matching sv_setref_pv; (5) cpan/Compress-Raw-Bzip2/typemap T_PTROBJ_AV decode; (6) cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Unix.pm xs_static_lib_is_xs recognizing Fil-C's pizlonated_boot_* ELF symbols from FilPizlonator so static multi-XS and subdir builds link XS::Other into perlmain.c (fixes 03-xsstatic.t tests 29 and 35).
 Upstream-Status: Fil-C-Specific
 Fil-C-Origin-Commits: none
 
@@ -183,3 +183,14 @@ Fil-C-Origin-Commits: none
          }
          else
              croak(\"$var is not of type ${ntype}\")
+--- a/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Unix.pm
++++ b/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Unix.pm
+@@ -2841,7 +2841,7 @@
+ sub xs_static_lib_is_xs {
+     my ($self, $libfile) = @_;
+     my $devnull = File::Spec->devnull;
+-    return `nm $libfile 2>$devnull` =~ /\b_?boot_/;
++    return `nm $libfile 2>$devnull` =~ /\b(?:pizlonated_|_)?boot_/;
+ }
+ 
+ =item makefile (o)

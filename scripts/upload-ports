@@ -92,9 +92,12 @@ module PortsUploader
     raise "index.json packages must be non-empty" unless parsed["packages"].is_a?(Hash) && !parsed["packages"].empty?
 
     uploads = { "src" => [], "recipes" => [], "bin" => [] }
+    packages = []
     seen = {}
 
-    parsed["packages"].each do |pkg_name, entry|
+    parsed["packages"].keys.sort.each do |pkg_name|
+      entry = parsed["packages"][pkg_name]
+      pkg_items = []
       %w[source recipe binary].each do |kind|
         art = entry[kind]
         raise "package #{pkg_name} missing #{kind} entry" unless art.is_a?(Hash) && art["path"].is_a?(String) && SHA256_RE.match?(art["sha256"].to_s)
@@ -107,11 +110,14 @@ module PortsUploader
         actual = file_sha256(full)
         raise "SHA-256 mismatch for #{rel} (index=#{art['sha256']}, disk=#{actual})" unless actual == art["sha256"]
 
+        item = { rel: rel, full: full, sha256: actual, size: File.size(full), bucket: bucket }
+        pkg_items << item
         next if seen[rel]
 
         seen[rel] = true
-        uploads[bucket] << { rel: rel, full: full, sha256: actual, size: File.size(full) }
+        uploads[bucket] << item
       end
+      packages << { name: pkg_name, items: pkg_items }
     end
 
     {
@@ -120,6 +126,7 @@ module PortsUploader
       sums_raw: sums_raw,
       sums_sig: sums_sig,
       uploads: uploads,
+      packages: packages,
       package_count: parsed["packages"].size
     }
   end
@@ -190,7 +197,8 @@ module PortsUploader
       token_env: "FILC_PORTS_UPLOAD_TOKEN",
       pubkey_path: default_pub.empty? ? nil : default_pub,
       verify_sig: true,
-      dry_run: false
+      dry_run: false,
+      parallel: 4
     }
 
     parser = OptionParser.new do |o|
@@ -203,6 +211,7 @@ module PortsUploader
       o.on("--pubkey PATH", "Minisign public key file to verify channel signatures (default: ports/ports-pubkey.pub)") { |v| opts[:pubkey_path] = File.expand_path(v) }
       o.on("--allow-unsigned-test", "Skip cryptographic minisign verification (unit tests only)") { opts[:verify_sig] = false }
       o.on("--dry-run", "Verify locally without uploading") { opts[:dry_run] = true }
+      o.on("-j", "--parallel N", Integer, "Concurrent package upload workers (1..8, default: 4)") { |v| opts[:parallel] = v.clamp(1, 8) }
     end
     parser.parse!(argv)
 
@@ -224,20 +233,74 @@ module PortsUploader
     raise ArgumentError, "--base-url or FILC_PORTS_UPLOAD_URL is required" if opts[:base_url].empty?
 
     base_uri = URI.parse(opts[:base_url])
+    packages = verified[:packages]
+    total_pkgs = packages.length
+    workers = [opts[:parallel], total_pkgs].min
+    workers = 1 if workers < 1
+
+    queue = Queue.new
+    packages.each { |pkg| queue << pkg }
+    workers.times { queue << nil }
+
+    mu = Mutex.new
+    uploaded_rel = {}
     uploaded = 0
     skipped = 0
+    done_pkgs = 0
+    first_error = nil
 
-    %w[src recipes bin].each do |bucket|
-      verified[:uploads][bucket].each do |item|
-        st = upload_artifact(base_uri, opts[:channel], opts[:arch], item, token)
-        if st == :uploaded
-          uploaded += 1
-        else
-          skipped += 1
+    threads = Array.new(workers) do
+      Thread.new do
+        while (pkg = queue.pop)
+          break if mu.synchronize { !first_error.nil? }
+
+          pkg_name = pkg[:name]
+          mu.synchronize do
+            $stdout.puts("FILC_PORT #{pkg_name} uploading stage=upload")
+            $stdout.flush
+          end
+
+          begin
+            # Strictly preserve per-package src -> recipes -> bin upload order
+            pkg[:items].each do |item|
+              rel = item[:rel]
+              already = mu.synchronize do
+                if uploaded_rel.key?(rel)
+                  true
+                else
+                  uploaded_rel[rel] = :in_flight
+                  false
+                end
+              end
+              next if already
+
+              st = upload_artifact(base_uri, opts[:channel], opts[:arch], item, token)
+              mu.synchronize do
+                uploaded_rel[rel] = st
+                if st == :uploaded
+                  uploaded += 1
+                else
+                  skipped += 1
+                end
+              end
+            end
+
+            mu.synchronize do
+              done_pkgs += 1
+              $stdout.puts("FILC_PORT #{pkg_name} uploaded stage=upload")
+              $stdout.puts("FILC_STAGE_PROGRESS upload #{done_pkgs}/#{total_pkgs} #{pkg_name}")
+              $stdout.flush
+            end
+          rescue StandardError => e
+            mu.synchronize { first_error ||= e }
+          end
         end
       end
     end
+    threads.each(&:join)
+    raise first_error if first_error
 
+    # Atomic publish boundary: commit-index is ONLY invoked once 100% of packages succeeded.
     result = commit_index(base_uri, opts[:channel], opts[:arch], verified, token)
     puts "UPLOAD_PORTS: OK channel=#{opts[:channel]} arch=#{opts[:arch]} packages=#{result['packages']} uploaded=#{uploaded} skipped=#{skipped}"
     0

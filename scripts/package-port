@@ -676,6 +676,8 @@ module PortPackager
       leak_report: nil,
       pubkey_file: nil,
       sign_only: false,
+      parallel: 1,
+      watch_done_file: nil,
       ci_run: ENV["CI_PIPELINE_NUMBER"] ? Integer(ENV["CI_PIPELINE_NUMBER"], 10) : nil,
       source_date_epoch: Integer(ENV.fetch("SOURCE_DATE_EPOCH", "1700000000"), 10)
     }
@@ -693,6 +695,8 @@ module PortPackager
       o.on("--arch ARCH", "Target arch (default: x86_64-linux)") { |v| opts[:arch] = v }
       o.on("--revision N", Integer, "Package revision number (default: 1)") { |v| opts[:revision] = v }
       o.on("--ports LIST", "Comma-separated subset of ports to package") { |v| opts[:ports_filter] = v.split(",").map(&:strip).reject(&:empty?) }
+      o.on("-j", "--parallel N", Integer, "Concurrent packaging workers (1..8, default: 1)") { |v| opts[:parallel] = v.clamp(1, 8) }
+      o.on("--watch-done-file PATH", "Continuously package green ports as manifests appear until PATH exists") { |v| opts[:watch_done_file] = File.expand_path(v) }
       o.on("--exact-tokens-env VAR", "Env var containing newline-separated exact infra tokens (default: FILC_LEAK_EXACT_TOKENS)") { |v| opts[:exact_tokens_env] = v }
       o.on("--leak-report PATH", "Optional path to write JSON leak-gate provenance report") { |v| opts[:leak_report] = File.expand_path(v) }
       o.on("--sign-key-file PATH", "Optional minisign secret key file (CI only)") { |v| opts[:sign_key_file] = v }
@@ -716,6 +720,16 @@ module PortPackager
       if opts[:pubkey_file] && File.file?(opts[:pubkey_file])
         FileUtils.cp(opts[:pubkey_file], File.join(channel_dir, "pubkey.pub"))
       end
+
+      parsed_idx = JSON.parse(File.read(index_path, encoding: "UTF-8"))
+      pkg_map = parsed_idx["packages"].is_a?(Hash) ? parsed_idx["packages"] : {}
+      pkg_names = pkg_map.keys.sort
+      sums_map = {}
+      File.foreach(sums_path, encoding: "UTF-8") do |ln|
+        m = /\A([0-9a-f]{64})\s+(.+)\z/.match(ln.strip)
+        sums_map[m[2]] = m[1] if m
+      end
+
       s1 = sign_with_minisign!(
         index_path, "#{index_path}.minisig",
         trusted_comment: "channel:#{opts[:channel]} arch:#{opts[:arch]} file:index.json",
@@ -728,7 +742,26 @@ module PortPackager
       )
       raise "signing key missing for --sign-only" unless s1 && s2
 
-      puts "PACKAGE_PORT: SIGNED channel=#{opts[:channel]} arch=#{opts[:arch]}"
+      total_pkgs = pkg_names.length
+      pkg_names.each_with_index do |pkg_name, idx|
+        $stdout.puts("FILC_PORT #{pkg_name} signing stage=sign")
+        $stdout.flush
+        entry = pkg_map[pkg_name]
+        %w[source recipe binary].each do |kind|
+          art = entry[kind]
+          rel = art && art["path"]
+          expected = art && art["sha256"]
+          full = rel ? File.join(channel_dir, rel) : nil
+          unless full && File.file?(full) && sums_map[rel] == expected && file_sha256(full) == expected
+            raise "signed checksum verification failed for #{pkg_name} (#{kind})"
+          end
+        end
+        $stdout.puts("FILC_PORT #{pkg_name} signed stage=sign")
+        $stdout.puts("FILC_STAGE_PROGRESS sign #{idx + 1}/#{total_pkgs} #{pkg_name}")
+        $stdout.flush
+      end
+
+      puts "PACKAGE_PORT: SIGNED channel=#{opts[:channel]} arch=#{opts[:arch]} packages=#{total_pkgs}"
       return 0
     end
 
@@ -751,13 +784,6 @@ module PortPackager
       neutral_build_dir: opts[:neutral_build_dir]
     )
 
-    selected_names = if opts[:ports_filter] && !opts[:ports_filter].empty?
-                       opts[:ports_filter]
-                     else
-                       Dir.glob(File.join(state_dir, "*.manifest.json")).map { |p| File.basename(p, ".manifest.json") }.sort
-                     end
-    raise "no built port manifests found in #{state_dir}" if selected_names.empty?
-
     channel_dir = File.join(opts[:out_dir], opts[:channel], opts[:arch])
     FileUtils.mkdir_p(File.join(channel_dir, "bin"))
     FileUtils.mkdir_p(File.join(channel_dir, "src"))
@@ -773,8 +799,25 @@ module PortPackager
     all_leaks = {}
     all_provenance_allowed = {}
     created_archives = []
+    mu = Mutex.new
+    packaged_done = 0
+    planned_total = 0
 
-    selected_names.sort.each do |name|
+    read_planned_total = lambda do |fallback|
+      plan_path = File.join(state_dir, "ports-plan.json")
+      if File.file?(plan_path)
+        begin
+          plan = JSON.parse(File.read(plan_path, encoding: "UTF-8"))
+          t = plan["total"].to_i
+          return t if t > 0
+        rescue StandardError
+          nil
+        end
+      end
+      fallback
+    end
+
+    process_port = lambda do |name|
       meta = all_ports.fetch(name) { raise "unknown port: #{name}" }
       manifest_file = File.join(state_dir, "#{name}.manifest.json")
       raise "missing install manifest: #{manifest_file}" unless File.file?(manifest_file)
@@ -782,6 +825,11 @@ module PortPackager
       manifest = JSON.parse(File.read(manifest_file, encoding: "UTF-8"))
       files = Array(manifest["files"]).uniq.sort
       raise "empty install manifest for #{name}" if files.empty?
+
+      mu.synchronize do
+        $stdout.puts("FILC_PORT #{name} packaging policy=#{meta['policy_class']} stage=package")
+        $stdout.flush
+      end
 
       tdeps = transitive_deps_topo(all_ports, name)
       pcount, added, removed = count_patches(meta["port_dir"])
@@ -796,6 +844,7 @@ module PortPackager
 
       # 1. Stage binary package, strip .la files, relocate, leak-gate, and pack
       bin_leaks = []
+      bin_allowed = []
       Dir.mktmpdir("filc-pkg-bin-") do |td|
         prefix_stage = File.join(td, "prefix")
         FileUtils.mkdir_p(prefix_stage)
@@ -857,12 +906,8 @@ module PortPackager
           upstream_tarball: cached_src,
           scan_elf_strings: true
         )
-        all_provenance_allowed[name] = bin_allowed unless bin_allowed.empty?
         if bin_leaks.empty?
           create_deterministic_tar_xz(td, bin_out, opts[:source_date_epoch])
-          created_archives << bin_out
-        else
-          all_leaks[name] = bin_leaks
         end
       end
 
@@ -870,7 +915,9 @@ module PortPackager
       src_rel = "src/#{src_fname}"
       src_out = File.join(channel_dir, src_rel)
       if bin_leaks.empty?
-        FileUtils.cp(cached_src, src_out) unless File.file?(src_out) && file_sha256(src_out) == src_sha
+        mu.synchronize do
+          FileUtils.cp(cached_src, src_out) unless File.file?(src_out) && file_sha256(src_out) == src_sha
+        end
       end
 
       # 3. Package recipe + patches + provenance + license metadata
@@ -879,6 +926,7 @@ module PortPackager
       rec_out = File.join(channel_dir, rec_rel)
 
       rec_leaks = []
+      rec_allowed = []
       Dir.mktmpdir("filc-pkg-rec-") do |td|
         FileUtils.cp(File.join(meta["port_dir"], "PORT"), File.join(td, "PORT"))
         patches_dir = File.join(meta["port_dir"], "patches")
@@ -906,55 +954,151 @@ module PortPackager
           upstream_tarball: cached_src,
           scan_elf_strings: false
         )
-        all_provenance_allowed["#{name} (recipe)"] = rec_allowed unless rec_allowed.empty?
         if rec_leaks.empty? && bin_leaks.empty?
           create_deterministic_tar_xz(td, rec_out, opts[:source_date_epoch])
-          created_archives << rec_out
-        elsif !rec_leaks.empty?
-          all_leaks["#{name} (recipe)"] = rec_leaks
         end
       end
 
-      next unless bin_leaks.empty? && rec_leaks.empty?
+      bin_sha = bin_leaks.empty? ? file_sha256(bin_out) : nil
+      rec_sha = (bin_leaks.empty? && rec_leaks.empty?) ? file_sha256(rec_out) : nil
 
-      bin_sha = file_sha256(bin_out)
-      rec_sha = file_sha256(rec_out)
-      sums_entries[bin_rel] = bin_sha
-      sums_entries[src_rel] = src_sha
-      sums_entries[rec_rel] = rec_sha
+      mu.synchronize do
+        all_provenance_allowed[name] = bin_allowed unless bin_allowed.empty?
+        all_provenance_allowed["#{name} (recipe)"] = rec_allowed unless rec_allowed.empty?
+        all_leaks[name] = bin_leaks unless bin_leaks.empty?
+        all_leaks["#{name} (recipe)"] = rec_leaks unless rec_leaks.empty?
+        created_archives << bin_out if bin_leaks.empty?
+        created_archives << rec_out if bin_leaks.empty? && rec_leaks.empty?
 
-      pkg_entry = {
-        "version" => meta["version"],
-        "revision" => opts[:revision],
-        "tier" => meta["tier"],
-        "policy_class" => meta["policy_class"],
-        "license" => meta["license"],
-        "deps" => meta["deps"],
-        "transitive_deps" => tdeps,
-        "binary" => {
-          "path" => bin_rel,
-          "size_bytes" => File.size(bin_out),
-          "sha256" => bin_sha
-        },
-        "source" => {
-          "path" => src_rel,
-          "upstream_url" => meta["upstream_url"],
-          "size_bytes" => File.size(src_out),
-          "sha256" => src_sha
-        },
-        "recipe" => {
-          "path" => rec_rel,
-          "patch_count" => pcount,
-          "added_lines" => added,
-          "removed_lines" => removed,
-          "size_bytes" => File.size(rec_out),
-          "sha256" => rec_sha
-        },
-        "built_at" => Time.now.utc.iso8601
-      }
-      pkg_entry["ci_run"] = opts[:ci_run] if opts[:ci_run]
-      pkg_entry["repo_commit"] = repo_commit if repo_commit
-      packages_index[name] = pkg_entry
+        packaged_done += 1
+        eff_total = [read_planned_total.call(planned_total), packaged_done].max
+        if bin_leaks.empty? && rec_leaks.empty?
+          sums_entries[bin_rel] = bin_sha
+          sums_entries[src_rel] = src_sha
+          sums_entries[rec_rel] = rec_sha
+          pkg_entry = {
+            "version" => meta["version"],
+            "revision" => opts[:revision],
+            "tier" => meta["tier"],
+            "policy_class" => meta["policy_class"],
+            "license" => meta["license"],
+            "deps" => meta["deps"],
+            "transitive_deps" => tdeps,
+            "binary" => {
+              "path" => bin_rel,
+              "size_bytes" => File.size(bin_out),
+              "sha256" => bin_sha
+            },
+            "source" => {
+              "path" => src_rel,
+              "upstream_url" => meta["upstream_url"],
+              "size_bytes" => File.size(src_out),
+              "sha256" => src_sha
+            },
+            "recipe" => {
+              "path" => rec_rel,
+              "patch_count" => pcount,
+              "added_lines" => added,
+              "removed_lines" => removed,
+              "size_bytes" => File.size(rec_out),
+              "sha256" => rec_sha
+            },
+            "built_at" => Time.now.utc.iso8601
+          }
+          pkg_entry["ci_run"] = opts[:ci_run] if opts[:ci_run]
+          pkg_entry["repo_commit"] = repo_commit if repo_commit
+          packages_index[name] = pkg_entry
+          $stdout.puts("FILC_PORT #{name} packaged policy=#{meta['policy_class']} stage=package")
+        else
+          $stdout.puts("FILC_PORT #{name} failed:package policy=#{meta['policy_class']} stage=package")
+        end
+        $stdout.puts("FILC_STAGE_PROGRESS package #{packaged_done}/#{eff_total} #{name}")
+        $stdout.flush
+      end
+    end
+
+    worker_error = nil
+    work_q = Queue.new
+    workers = Array.new(opts[:parallel]) do
+      Thread.new do
+        while (pname = work_q.pop)
+          next if mu.synchronize { !worker_error.nil? }
+
+          begin
+            process_port.call(pname)
+          rescue StandardError => e
+            mu.synchronize { worker_error ||= e }
+          end
+        end
+      end
+    end
+
+    if opts[:watch_done_file]
+      seen_enqueued = Set.new
+      filter_set = opts[:ports_filter] && !opts[:ports_filter].empty? ? Set.new(opts[:ports_filter]) : nil
+      loop do
+        planned_total = read_planned_total.call(planned_total)
+        Dir.glob(File.join(state_dir, "*.manifest.json")).sort.each do |mpath|
+          pname = File.basename(mpath, ".manifest.json")
+          next if seen_enqueued.include?(pname)
+          next if filter_set && !filter_set.include?(pname)
+
+          # Only package a port once its build+test state JSON confirms tested/built
+          st_file = File.join(state_dir, "#{pname}.json")
+          next unless File.file?(st_file)
+
+          st_obj = begin
+            JSON.parse(File.read(st_file, encoding: "UTF-8"))
+          rescue StandardError
+            nil
+          end
+          next unless st_obj && %w[tested built].include?(st_obj["status"])
+
+          seen_enqueued.add(pname)
+          planned_total = [planned_total, seen_enqueued.size].max
+          work_q << pname
+        end
+        break if File.file?(opts[:watch_done_file]) || mu.synchronize { !worker_error.nil? }
+
+        sleep 0.4
+      end
+      # Final sweep after done-file appears
+      Dir.glob(File.join(state_dir, "*.manifest.json")).sort.each do |mpath|
+        pname = File.basename(mpath, ".manifest.json")
+        next if seen_enqueued.include?(pname)
+        next if filter_set && !filter_set.include?(pname)
+
+        st_file = File.join(state_dir, "#{pname}.json")
+        next unless File.file?(st_file)
+
+        st_obj = begin
+          JSON.parse(File.read(st_file, encoding: "UTF-8"))
+        rescue StandardError
+          nil
+        end
+        next unless st_obj && %w[tested built].include?(st_obj["status"])
+
+        seen_enqueued.add(pname)
+        planned_total = [planned_total, seen_enqueued.size].max
+        work_q << pname
+      end
+      opts[:parallel].times { work_q << nil }
+      workers.each(&:join)
+      raise worker_error if worker_error
+      raise "no built port manifests found in #{state_dir}" if seen_enqueued.empty?
+    else
+      selected_names = if opts[:ports_filter] && !opts[:ports_filter].empty?
+                         opts[:ports_filter]
+                       else
+                         Dir.glob(File.join(state_dir, "*.manifest.json")).map { |p| File.basename(p, ".manifest.json") }.sort
+                       end
+      raise "no built port manifests found in #{state_dir}" if selected_names.empty?
+
+      planned_total = selected_names.length
+      selected_names.sort.each { |n| work_q << n }
+      opts[:parallel].times { work_q << nil }
+      workers.each(&:join)
+      raise worker_error if worker_error
     end
 
     if opts[:leak_report]

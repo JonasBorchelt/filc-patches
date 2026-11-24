@@ -676,10 +676,12 @@ fi
 FINAL_STATUS="built"
 if declare -F port_test >/dev/null 2>&1; then
   CURRENT_STAGE="test"
+  echo "FILC_PORT $PORT_NAME testing policy=$POLICY_CLASS stage=test"
   run_stage_fn port_test
   FINAL_STATUS="tested"
 elif [[ -n "$TEST_CMD" ]]; then
   CURRENT_STAGE="test"
+  echo "FILC_PORT $PORT_NAME testing policy=$POLICY_CLASS stage=test"
   run_with_timeout bash -ceuxo pipefail "$TEST_CMD"
   FINAL_STATUS="tested"
 fi

@@ -727,6 +727,111 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
   # Secret token values must NOT be echoed in stderr output
   assert(!ngerr.include?(neg_ip), "stderr must not echo secret exact IP token")
   assert(!ngerr.include?("Internal-Forge-Org"), "stderr must not echo secret org token")
+
+  # 8. Overlapping --watch-done-file + --parallel 2 packaging AND parallel upload
+  #    with atomic commit-index abort when a single upload fails
+  ov_work = File.join(td, "ov-work")
+  ov_state = File.join(ov_work, "ports-state")
+  ov_out = File.join(td, "ov-out")
+  ov_done = File.join(ov_work, "build.done")
+  FileUtils.mkdir_p([ov_state, ov_out])
+  File.write(File.join(ov_state, "ports-plan.json"), JSON.generate("total" => 2, "ports" => %w[bison rsync]))
+
+  # Launch package-port in watch mode BEFORE manifests appear
+  pkg_out = +""
+  pkg_err = +""
+  pkg_status = nil
+  pkg_thr = Thread.new do
+    pkg_out, pkg_err, pkg_status = Open3.capture3(
+      p201_env,
+      "ruby", PACKAGE_SCRIPT,
+      "--repo-root", p201_repo,
+      "--work-dir", ov_work,
+      "--pizfix", p201_pizfix,
+      "--neutral-prefix", p201_pizfix,
+      "--ports-cache-dir", p201_cache,
+      "--out-dir", ov_out,
+      "--watch-done-file", ov_done,
+      "--parallel", "2",
+      "--channel", "0.1.4",
+      "--arch", "x86_64-linux"
+    )
+  end
+
+  # Simulate staggered port completions while package-port is watching
+  %w[bison rsync].each do |pname|
+    sleep 0.2
+    FileUtils.cp(File.join(p201_state, "#{pname}.manifest.json"), File.join(ov_state, "#{pname}.manifest.json"))
+    File.write(File.join(ov_state, "#{pname}.json"), JSON.generate("name" => pname, "status" => "tested"))
+  end
+  sleep 0.2
+  File.write(ov_done, "done\n")
+  pkg_thr.join(30)
+  assert(pkg_status&.success?, "watch-done-file packaging failed: #{pkg_out}\n#{pkg_err}")
+  assert(pkg_out.include?("FILC_PORT bison packaging") && pkg_out.include?("FILC_PORT bison packaged"),
+         "missing live packaging markers for bison: #{pkg_out}")
+  assert(pkg_out.include?("FILC_STAGE_PROGRESS package 2/2 "),
+         "missing package stage progress 2/2: #{pkg_out}")
+
+  # Atomic commit-index guard: fail one PUT in mock server and verify commit-index is NEVER called
+  ov_ch_dir = File.join(ov_out, "0.1.4", "x86_64-linux")
+  File.write(File.join(ov_ch_dir, "index.json.minisig"), "untrusted comment: test\nAA==\ntrusted comment: t\nAA==\n")
+  File.write(File.join(ov_ch_dir, "SHA256SUMS.minisig"), "untrusted comment: test\nAA==\ntrusted comment: t\nAA==\n")
+
+  commit_called = false
+  fail_srv = TCPServer.new("127.0.0.1", 0)
+  fail_port = fail_srv.addr[1]
+  fail_thr = Thread.new do
+    loop do
+      sock = begin
+        fail_srv.accept
+      rescue IOError
+        break
+      end
+      Thread.new(sock) do |s|
+        req_head = +""
+        while (line = s.gets)
+          req_head << line
+          break if line == "\r\n"
+        end
+        first = req_head.lines.first.to_s.strip
+        method, path, = first.split(" ", 3)
+        cl = req_head[/^Content-Length:\s*(\d+)/i, 1].to_i
+        s.read(cl) if cl > 0
+        if method == "HEAD"
+          s.write("HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+        elsif method == "PUT" && path.include?("/bin/rsync-")
+          s.write("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 4\r\nConnection: close\r\n\r\nfail")
+        elsif method == "PUT"
+          resp = JSON.generate("ok" => true)
+          s.write("HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: #{resp.bytesize}\r\nConnection: close\r\n\r\n#{resp}")
+        elsif method == "POST"
+          commit_called = true
+          resp = JSON.generate("ok" => true, "packages" => 2)
+          s.write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: #{resp.bytesize}\r\nConnection: close\r\n\r\n#{resp}")
+        end
+        s.close
+      end
+    end
+  end
+
+  begin
+    _fuo, _fue, fust = Open3.capture3(
+      { "FILC_PORTS_UPLOAD_TOKEN" => "ci-upload-secret" },
+      "ruby", UPLOAD_SCRIPT,
+      "--channel-dir", ov_ch_dir,
+      "--channel", "0.1.4",
+      "--arch", "x86_64-linux",
+      "--parallel", "2",
+      "--allow-unsigned-test",
+      "--base-url", "http://127.0.0.1:#{fail_port}"
+    )
+    assert(!fust.success?, "upload-ports must fail when one package PUT fails")
+    assert(!commit_called, "commit-index MUST NOT be called when any package upload failed")
+  ensure
+    fail_srv.close
+    fail_thr.join(2)
+  end
 end
 
-puts "TEST_PACKAGE_PORT: PASS (7/7)"
+puts "TEST_PACKAGE_PORT: PASS (8/8)"

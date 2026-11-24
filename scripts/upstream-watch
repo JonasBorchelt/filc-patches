@@ -1,0 +1,789 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Fil-C Upstream Watcher (FILC_WORKFLOW=upstream-watch)
+#
+# Checks upstream pizlonator/fil-c (branch FILC_BRANCH from UPSTREAM, default
+# "deluge" which is upstream HEAD) against the pinned FILC_COMMIT in UPSTREAM:
+#   - No new commits: exits 0 with "UPSTREAM_WATCH: UP TO DATE (<sha>)"
+#   - New commits:
+#       1. Creates branch auto/filc-<short-sha> (never touches/pushes main)
+#       2. Updates FILC_COMMIT in UPSTREAM and commits on the auto branch
+#       3. Strictly verifies runtime/filc/series against the new commit with
+#          zero fuzz (--fuzz=0) and zero line offset; stops immediately on any
+#          failing patch with an explicit list of failing patches
+#       4. Builds the toolchain (scripts/build-toolchain), runs
+#          scripts/test-toolchain, and runs all 54 ports (scripts/build-ports)
+#       5. Emits a structured text + JSON report listing new upstream commits,
+#          touched subsystems, any failing patches, and any broken/blocked ports
+#       6. Optionally pushes auto/filc-<short-sha> if FILC_WATCH_PUSH_TOKEN is
+#          configured (hard guard: refuses any ref outside auto/filc-[0-9a-f]+)
+
+require "fileutils"
+require "json"
+require "open3"
+require "optparse"
+require "time"
+require "tmpdir"
+require "uri"
+
+module UpstreamWatch
+  AUTO_BRANCH_RE = /\Aauto\/filc-[0-9a-f]{7,12}\z/
+  HEX40_RE = /\A[0-9a-f]{40}\z/
+  RUNTIME_SPARSE_PATHS = %w[
+    libpas
+    filc/include
+    filc/src
+    filc/main
+    yolounwind
+    projects/zegarmistrz/include
+  ].freeze
+
+  module_function
+
+  def parse_upstream(path)
+    vars = {}
+    File.foreach(path, encoding: "UTF-8") do |raw|
+      line = raw.strip
+      next if line.empty? || line.start_with?("#")
+
+      m = /\A([A-Z0-9_]+)=(.*)\z/.match(line)
+      next unless m
+
+      val = m[2].strip
+      if val.length >= 2 && ((val.start_with?('"') && val.end_with?('"')) ||
+                             (val.start_with?("'") && val.end_with?("'")))
+        val = val[1..-2]
+      end
+      vars[m[1]] = val
+    end
+    vars
+  end
+
+  def update_upstream_pin(path, new_commit)
+    raise ArgumentError, "invalid commit sha: #{new_commit}" unless HEX40_RE.match?(new_commit)
+
+    content = File.read(path, encoding: "UTF-8")
+    replaced = false
+    updated = content.lines.map do |line|
+      if line.start_with?("FILC_COMMIT=")
+        replaced = true
+        "FILC_COMMIT=#{new_commit}\n"
+      else
+        line
+      end
+    end.join
+    raise "FILC_COMMIT= line not found in #{path}" unless replaced
+
+    File.write(path, updated, encoding: "UTF-8")
+  end
+
+  def assert_safe_auto_branch!(branch)
+    raise SecurityError, "refusing unsafe branch name: #{branch.inspect}" unless AUTO_BRANCH_RE.match?(branch.to_s)
+    raise SecurityError, "refusing to target main" if branch.to_s == "main" || branch.to_s == "master"
+
+    branch
+  end
+
+  def run_cmd(*cmd, chdir: nil, env: {})
+    opts = {}
+    opts[:chdir] = chdir if chdir
+    out, err, st = Open3.capture3(env, *cmd, **opts)
+    [out.force_encoding("UTF-8").encode("UTF-8", invalid: :replace, undef: :replace),
+     err.force_encoding("UTF-8").encode("UTF-8", invalid: :replace, undef: :replace),
+     st]
+  end
+
+  def run_streaming(*cmd, chdir: nil, env: {}, log_file: nil)
+    opts = {}
+    opts[:chdir] = chdir if chdir
+    rc = nil
+    log_io = log_file ? File.open(log_file, "a", encoding: "UTF-8") : nil
+    begin
+      Open3.popen2e(env, *cmd, **opts) do |stdin, out_err, wait_thr|
+        stdin.close
+        out_err.each_line do |line|
+          clean = line.force_encoding("UTF-8").encode("UTF-8", invalid: :replace, undef: :replace)
+          $stdout.write(clean)
+          $stdout.flush
+          if log_io
+            log_io.write(clean)
+            log_io.flush
+          end
+        end
+        rc = wait_thr.value.exitstatus
+      end
+    ensure
+      log_io&.close
+    end
+    rc
+  end
+
+  def resolve_upstream_commit(repo_url, branch)
+    out, err, st = run_cmd("git", "ls-remote", repo_url, "refs/heads/#{branch}")
+    raise "git ls-remote failed for #{repo_url} (#{branch}): #{err.strip}" unless st.success?
+
+    line = out.lines.map(&:strip).find { |l| !l.empty? }
+    raise "branch refs/heads/#{branch} not found on #{repo_url}" unless line
+
+    sha = line.split(/\s+/, 2).first
+    raise "unexpected ls-remote sha: #{sha.inspect}" unless HEX40_RE.match?(sha)
+
+    sha
+  end
+
+  def ensure_filc_bare_mirror(repo_url, bare_dir, branch, pinned_commit, target_commit)
+    FileUtils.mkdir_p(File.dirname(bare_dir))
+    unless File.directory?(bare_dir) && File.file?(File.join(bare_dir, "HEAD"))
+      FileUtils.rm_rf(bare_dir)
+      _out, err, st = run_cmd("git", "init", "--bare", bare_dir)
+      raise "git init --bare failed: #{err.strip}" unless st.success?
+
+      _out, err, st = run_cmd("git", "-C", bare_dir, "remote", "add", "origin", repo_url)
+      raise "git remote add failed: #{err.strip}" unless st.success?
+    end
+
+    # Fetch branch tip plus pinned commit so commit range inspection works
+    # even on shallow or newly populated caches.
+    _out, err, st = run_cmd(
+      "git", "-C", bare_dir, "fetch", "--no-tags", "--filter=blob:none",
+      "origin", "+refs/heads/#{branch}:refs/heads/#{branch}"
+    )
+    raise "git fetch branch #{branch} failed: #{err.strip}" unless st.success?
+
+    [pinned_commit, target_commit].uniq.each do |sha|
+      _o, _e, check = run_cmd("git", "-C", bare_dir, "cat-file", "-e", "#{sha}^{commit}")
+      next if check.success?
+
+      _fo, fe, fst = run_cmd(
+        "git", "-C", bare_dir, "fetch", "--no-tags", "--filter=blob:none", "origin", sha
+      )
+      raise "git fetch commit #{sha} failed: #{fe.strip}" unless fst.success?
+    end
+  end
+
+  def collect_new_commits(bare_dir, old_commit, new_commit)
+    out, _err, st = run_cmd(
+      "git", "-C", bare_dir, "log", "--no-merges", "--format=%h %s",
+      "#{old_commit}..#{new_commit}"
+    )
+    commits = st.success? ? out.lines.map(&:strip).reject(&:empty?) : []
+
+    diff_out, _derr, dst = run_cmd(
+      "git", "-C", bare_dir, "diff", "--name-only", "#{old_commit}..#{new_commit}"
+    )
+    changed_files = dst.success? ? diff_out.lines.map(&:strip).reject(&:empty?) : []
+
+    subsystems = {
+      "runtime" => 0,
+      "compiler" => 0,
+      "musl" => 0,
+      "ports" => 0,
+      "other" => 0
+    }
+    changed_files.each do |path|
+      if path.start_with?("libpas/", "filc/", "yolounwind/", "projects/zegarmistrz/")
+        subsystems["runtime"] += 1
+      elsif path.start_with?("llvm/", "clang/", "lld/", "libcxx/", "libcxxabi/", "compiler-rt/")
+        subsystems["compiler"] += 1
+      elsif path.start_with?("projects/usermusl/", "projects/yolomusl/")
+        subsystems["musl"] += 1
+      elsif path.start_with?("projects/")
+        subsystems["ports"] += 1
+      else
+        subsystems["other"] += 1
+      end
+    end
+
+    [commits, subsystems]
+  end
+
+  def read_series(series_file)
+    return [] unless File.file?(series_file)
+
+    patches = []
+    dir = File.dirname(series_file)
+    File.foreach(series_file, encoding: "UTF-8") do |raw|
+      name = raw.split("#", 2).first.to_s.strip
+      patches << File.join(dir, name) unless name.empty?
+    end
+    patches
+  end
+
+  def strip_eol(line)
+    line.sub(/\r?\n\z/, "")
+  end
+
+  def read_lines_lossy(path)
+    File.binread(path).force_encoding("UTF-8").encode("UTF-8", invalid: :replace, undef: :replace).lines
+  end
+
+  def verify_exact_hunks(src_dir, patch_file)
+    pname = File.basename(patch_file)
+    lines = read_lines_lossy(patch_file)
+    i = 0
+    cur_file = nil
+    cur_lines = nil
+
+    while i < lines.length
+      ln = lines[i]
+      if ln.start_with?("--- ")
+        path = ln[4..].split("\t", 2).first.to_s.strip
+        if path == "/dev/null"
+          cur_file = nil
+          cur_lines = nil
+        else
+          path = path[2..] if path.start_with?("a/")
+          cur_file = path
+          full = File.join(src_dir, path)
+          raise "#{pname}: target file missing: #{path}" unless File.file?(full)
+
+          cur_lines = read_lines_lossy(full).map { |l| strip_eol(l) }
+        end
+        i += 1
+        next
+      end
+
+      if ln.start_with?("@@ ")
+        m = /\A@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.match(ln)
+        raise "#{pname}: malformed hunk header: #{ln.strip}" unless m
+
+        old_start = m[1].to_i
+        old_count = m[2].nil? ? 1 : m[2].to_i
+        i += 1
+        if cur_file.nil? || cur_lines.nil?
+          i += 1 while i < lines.length && !lines[i].start_with?("@@ ", "--- ", "diff --git ")
+          next
+        end
+
+        expected_old = []
+        while i < lines.length && expected_old.length < old_count
+          hl = lines[i]
+          if hl.start_with?("\\ No newline")
+            i += 1
+            next
+          end
+          if hl.start_with?(" ", "-")
+            expected_old << strip_eol(hl[1..])
+            i += 1
+          elsif hl.start_with?("+")
+            i += 1
+          else
+            break
+          end
+        end
+
+        idx0 = old_start - 1
+        actual_old = if expected_old.empty?
+                       []
+                     elsif idx0 < 0 || idx0 >= cur_lines.length
+                       nil
+                     else
+                       cur_lines[idx0, expected_old.length]
+                     end
+        if actual_old != expected_old
+          raise "#{pname}: #{cur_file} hunk at line #{old_start} does not match verbatim (offset or fuzz required)"
+        end
+        next
+      end
+
+      i += 1
+    end
+  end
+
+  # Strictly checks every patch in runtime/filc/series against target_commit
+  # with zero fuzz and zero line offset. Returns [passed_names, failed_entries].
+  def check_runtime_patches_strict(repo_root, bare_dir, target_commit)
+    series_file = File.join(repo_root, "runtime", "filc", "series")
+    patches = read_series(series_file)
+    return [[], []] if patches.empty?
+
+    passed = []
+    failed = []
+
+    Dir.mktmpdir("filc-watch-rt-") do |td|
+      _o, err, st = run_cmd("git", "init", "-q", td)
+      raise "git init failed: #{err.strip}" unless st.success?
+
+      _o, err, st = run_cmd("git", "-C", td, "remote", "add", "origin", bare_dir)
+      raise "git remote add failed: #{err.strip}" unless st.success?
+
+      _o, err, st = run_cmd("git", "-C", td, "sparse-checkout", "init", "--cone")
+      raise "sparse-checkout init failed: #{err.strip}" unless st.success?
+
+      _o, err, st = run_cmd("git", "-C", td, "sparse-checkout", "set", *RUNTIME_SPARSE_PATHS)
+      raise "sparse-checkout set failed: #{err.strip}" unless st.success?
+
+      _o, err, st = run_cmd("git", "-C", td, "fetch", "--depth=1", "--no-tags", "origin", target_commit)
+      raise "fetch runtime commit failed: #{err.strip}" unless st.success?
+
+      _o, err, st = run_cmd("git", "-C", td, "checkout", "-q", "--force", "--detach", target_commit)
+      raise "checkout runtime commit failed: #{err.strip}" unless st.success?
+
+      patches.each do |pfile|
+        rel = pfile.sub("#{repo_root}/", "")
+        begin
+          verify_exact_hunks(td, pfile)
+          patch_bytes = File.binread(pfile)
+          out, perr, pst = Open3.capture3(
+            "patch", "-d", td, "-p1", "--batch", "--forward", "--fuzz=0",
+            stdin_data: patch_bytes,
+            binmode: true
+          )
+          combined = [
+            out.force_encoding("UTF-8").encode("UTF-8", invalid: :replace, undef: :replace),
+            perr.force_encoding("UTF-8").encode("UTF-8", invalid: :replace, undef: :replace)
+          ].join("\n").strip
+          raise "patch failed (rc=#{pst.exitstatus}): #{combined.lines.first(5).join(' | ').strip}" unless pst.success?
+          raise "patch applied with fuzz or offset: #{combined.lines.first(3).join(' | ').strip}" if combined.match?(/\b(offset|fuzz)\b/i)
+
+          passed << rel
+        rescue StandardError => e
+          failed << { "patch" => rel, "reason" => e.message }
+        end
+      end
+    end
+
+    [passed, failed]
+  end
+
+  def create_auto_branch_and_commit(repo_root, branch, old_commit, new_commit, new_commits)
+    assert_safe_auto_branch!(branch)
+
+    _o, err, st = run_cmd("git", "-C", repo_root, "checkout", "-B", branch)
+    raise "git checkout -B #{branch} failed: #{err.strip}" unless st.success?
+
+    update_upstream_pin(File.join(repo_root, "UPSTREAM"), new_commit)
+
+    _o, err, st = run_cmd("git", "-C", repo_root, "add", "UPSTREAM")
+    raise "git add UPSTREAM failed: #{err.strip}" unless st.success?
+
+    summary_lines = new_commits.first(20).map { |c| "  - #{c}" }
+    summary_lines << "  - ... (#{new_commits.length - 20} more commits)" if new_commits.length > 20
+    msg = +<<~MSG
+      upstream-watch: bump FILC_COMMIT to #{new_commit[0, 12]}
+
+      Automated upstream watch candidate moving UPSTREAM FILC_COMMIT from
+      #{old_commit[0, 12]} to #{new_commit[0, 12]} (#{new_commits.length} new commits).
+
+      New upstream commits:
+      #{summary_lines.empty? ? '  (commit range not linearly reachable)' : summary_lines.join("\n")}
+
+      Signed-off-by: Jonas Borchelt <git.jb@connected.link>
+    MSG
+
+    git_env = {
+      "GIT_AUTHOR_NAME" => ENV.fetch("FILC_WATCH_AUTHOR_NAME", "Fil-C Upstream Watch"),
+      "GIT_AUTHOR_EMAIL" => ENV.fetch("FILC_WATCH_AUTHOR_EMAIL", "ports@example.invalid"),
+      "GIT_COMMITTER_NAME" => ENV.fetch("FILC_WATCH_AUTHOR_NAME", "Fil-C Upstream Watch"),
+      "GIT_COMMITTER_EMAIL" => ENV.fetch("FILC_WATCH_AUTHOR_EMAIL", "ports@example.invalid")
+    }
+    _o, err, st = run_cmd("git", "-C", repo_root, "commit", "-m", msg, env: git_env)
+    raise "git commit on #{branch} failed: #{err.strip}" unless st.success?
+
+    out, err, st = run_cmd("git", "-C", repo_root, "rev-parse", "HEAD")
+    raise "git rev-parse HEAD failed: #{err.strip}" unless st.success?
+
+    out.strip
+  end
+
+  def remote_identity(url)
+    raw = url.to_s.strip
+    raise SecurityError, "empty remote URL" if raw.empty?
+
+    if raw.start_with?("https://", "http://")
+      uri = URI.parse(raw)
+      raise SecurityError, "refusing credentials in remote URL" if uri.userinfo && !uri.userinfo.empty?
+      raise SecurityError, "missing host in remote URL: #{raw}" if uri.host.nil? || uri.host.empty?
+
+      host = uri.host.downcase
+      return [:http, host, uri.port]
+    end
+
+    if raw.start_with?("file://")
+      path = File.expand_path(raw.sub(%r{\Afile://}, ""))
+      return [:local, path, nil]
+    end
+
+    if raw.start_with?("ssh://")
+      uri = URI.parse(raw)
+      raise SecurityError, "missing host in ssh URL: #{raw}" if uri.host.nil? || uri.host.empty?
+
+      return [:ssh, uri.host.downcase, uri.port]
+    end
+
+    if raw.match?(%r{\A[^/\s:]+@([^/\s:]+):})
+      host = Regexp.last_match(1).downcase
+      return [:ssh, host, nil]
+    end
+
+    [:local, File.expand_path(raw), nil]
+  end
+
+  def github_host?(host)
+    h = host.to_s.downcase
+    h == "github.com" || h.end_with?(".github.com")
+  end
+
+  def assert_safe_push_remote!(repo_root, push_remote)
+    target_kind, target_host, target_port = remote_identity(push_remote)
+    raise SecurityError, "refusing to push to GitHub host: #{target_host}" if target_kind != :local && github_host?(target_host)
+
+    origin_out, err, st = run_cmd("git", "-C", repo_root, "remote", "get-url", "origin")
+    raise SecurityError, "unable to inspect origin remote: #{err.strip}" unless st.success?
+
+    origin_kind, origin_host, origin_port = remote_identity(origin_out.strip)
+    raise SecurityError, "refusing push because origin is GitHub: #{origin_host}" if origin_kind != :local && github_host?(origin_host)
+
+    if target_kind != origin_kind || target_host != origin_host || target_port != origin_port
+      raise SecurityError,
+            "refusing push to remote outside clone origin host (#{target_host} != #{origin_host})"
+    end
+
+    push_remote
+  end
+
+  def build_push_env(push_token)
+    return {} if push_token.nil? || push_token.empty?
+
+    {
+      "GIT_CONFIG_COUNT" => "1",
+      "GIT_CONFIG_KEY_0" => "http.extraHeader",
+      "GIT_CONFIG_VALUE_0" => "Authorization: token #{push_token}"
+    }
+  end
+
+  def maybe_push_auto_branch(repo_root, branch, push_remote:, push_token:, dry_run:)
+    assert_safe_auto_branch!(branch)
+    return "skipped (dry-run)" if dry_run
+    return "skipped (no push remote configured)" if push_remote.nil? || push_remote.empty?
+
+    assert_safe_push_remote!(repo_root, push_remote)
+
+    if push_token && !push_token.empty?
+      push_env = build_push_env(push_token)
+      _o, err, st = run_cmd(
+        "git", "-C", repo_root, "push", "--force-with-lease",
+        push_remote, "refs/heads/#{branch}:refs/heads/#{branch}",
+        env: push_env
+      )
+      unless st.success?
+        sanitized = err.gsub(push_token, "***")
+        return "failed (#{sanitized.lines.first.to_s.strip})"
+      end
+      return "pushed (#{branch})"
+    end
+
+    # Support local path / file:// remotes for automated tests without tokens.
+    if File.directory?(push_remote) || push_remote.start_with?("file://")
+      _o, err, st = run_cmd("git", "-C", repo_root, "push", "--force-with-lease", push_remote, "refs/heads/#{branch}:refs/heads/#{branch}")
+      return st.success? ? "pushed (#{branch})" : "failed (#{err.lines.first.to_s.strip})"
+    end
+
+    "skipped (FILC_WATCH_PUSH_TOKEN not set; branch created locally)"
+  end
+
+  def parse_ports_report(ports_json_path)
+    return { "total" => 0, "tested" => 0, "failed" => [], "blocked" => [] } unless File.file?(ports_json_path)
+
+    data = JSON.parse(File.read(ports_json_path, encoding: "UTF-8"))
+    ports = Array(data["ports"])
+    failed = ports.select { |p| p["status"].to_s.start_with?("failed") }.map do |p|
+      {
+        "name" => p["name"],
+        "version" => p["version"],
+        "status" => p["status"],
+        "failed_stage" => p["failed_stage"],
+        "failed_kind" => p["failed_kind"]
+      }
+    end
+    blocked = ports.select { |p| p["status"] == "blocked" }.map do |p|
+      { "name" => p["name"], "blocked_by" => Array(p["blocked_by"]) }
+    end
+    tested = ports.count { |p| %w[tested built].include?(p["status"]) }
+    {
+      "total" => ports.length,
+      "tested" => tested,
+      "failed" => failed,
+      "blocked" => blocked
+    }
+  rescue StandardError => e
+    { "total" => 0, "tested" => 0, "failed" => [{ "name" => "_report_parse_error", "status" => e.message }], "blocked" => [] }
+  end
+
+  def write_reports(report_txt_path, report_json_path, report, archive_dir: nil)
+    FileUtils.mkdir_p(File.dirname(report_txt_path))
+    FileUtils.mkdir_p(File.dirname(report_json_path))
+
+    lines = []
+    lines << "================================================================================"
+    lines << "FIL-C UPSTREAM WATCH REPORT"
+    lines << "================================================================================"
+    lines << "TIMESTAMP_UTC:        #{report['timestamp_utc']}"
+    lines << "STATUS:               #{report['status']}"
+    lines << "UPSTREAM_REPO:        #{report['upstream_repo']}"
+    lines << "UPSTREAM_BRANCH:      #{report['upstream_branch']}"
+    lines << "PINNED_FILC_COMMIT:   #{report['pinned_commit']}"
+    lines << "TARGET_FILC_COMMIT:   #{report['target_commit']}"
+    lines << "AUTO_BRANCH:          #{report['auto_branch'] || 'none'}"
+    lines << "AUTO_BRANCH_COMMIT:   #{report['auto_branch_commit'] || 'none'}"
+    lines << "PUSH_STATUS:          #{report['push_status']}"
+    lines << "NEW_COMMITS_COUNT:    #{report['new_commits'].length}"
+    lines << "RUNTIME_PATCHES_OK:   #{report['runtime_patches_passed'].length}"
+    lines << "RUNTIME_PATCHES_FAIL: #{report['runtime_patches_failed'].length}"
+    lines << "TOOLCHAIN_STATUS:     #{report['toolchain_status']}"
+    lines << "PORTS_STATUS:         #{report['ports_status']}"
+    lines << "DURATION_SECONDS:     #{report['duration_seconds']}"
+
+    subs = report["touched_subsystems"] || {}
+    if subs.values.any? { |v| v.to_i > 0 }
+      lines << ""
+      lines << "--- TOUCHED UPSTREAM SUBSYSTEMS ---"
+      subs.each { |k, v| lines << "  #{k}: #{v} files" if v.to_i > 0 }
+      if subs["compiler"].to_i > 0 || subs["musl"].to_i > 0
+        lines << "  NOTE: Upstream touched compiler/musl paths; llvm/ and libc/musl/ patch series may need manual rebase review."
+      end
+    end
+
+    unless report["new_commits"].empty?
+      lines << ""
+      lines << "--- NEW UPSTREAM COMMITS (#{report['new_commits'].length}) ---"
+      report["new_commits"].each { |c| lines << "  #{c}" }
+    end
+
+    unless report["runtime_patches_failed"].empty?
+      lines << ""
+      lines << "--- FAILED PATCHES (0-FUZZ / 0-OFFSET) ---"
+      report["runtime_patches_failed"].each do |fp|
+        lines << "  FAIL #{fp['patch']}: #{fp['reason']}"
+      end
+    end
+
+    ps = report["ports_summary"] || {}
+    if ps["total"].to_i > 0 || !Array(ps["failed"]).empty?
+      lines << ""
+      lines << "--- PORTS SUMMARY (tested=#{ps['tested']}/#{ps['total']}, failed=#{Array(ps['failed']).length}, blocked=#{Array(ps['blocked']).length}) ---"
+      Array(ps["failed"]).each do |fp|
+        lines << "  FAILED_PORT #{fp['name']} #{fp['version']} status=#{fp['status']} stage=#{fp['failed_stage']} kind=#{fp['failed_kind']}"
+      end
+      Array(ps["blocked"]).each do |bp|
+        lines << "  BLOCKED_PORT #{bp['name']} blocked_by=#{Array(bp['blocked_by']).join(',')}"
+      end
+    end
+
+    lines << "================================================================================"
+    txt = lines.join("\n") + "\n"
+
+    File.write(report_txt_path, txt, encoding: "UTF-8")
+    File.write(report_json_path, JSON.pretty_generate(report) + "\n", encoding: "UTF-8")
+
+    puts txt
+
+    if archive_dir && !archive_dir.empty? && Dir.exist?(archive_dir) && File.writable?(archive_dir)
+      stamp = Time.now.utc.strftime("%Y%m%dT%H%M%SZ")
+      short = report["target_commit"].to_s[0, 8]
+      FileUtils.cp(report_txt_path, File.join(archive_dir, "upstream-watch-#{stamp}-#{short}.txt"))
+      FileUtils.cp(report_json_path, File.join(archive_dir, "upstream-watch-#{stamp}-#{short}.json"))
+    end
+  end
+
+  def main(argv)
+    repo_root = File.expand_path("..", __dir__)
+    opts = {
+      repo_root: repo_root,
+      work_dir: File.join(repo_root, ".work", "upstream-watch"),
+      cache_dir: ENV.fetch("FILC_SRC_CACHE_DIR", File.join(repo_root, ".work", "upstream-watch", "src-cache")),
+      ports_cache_dir: ENV.fetch("FILC_PORTS_CACHE_DIR", File.join(repo_root, ".work", "upstream-watch", "ports-cache")),
+      archive_dir: ENV.fetch("FILC_REPORT_ARCHIVE_DIR", ""),
+      branch_override: ENV.fetch("FILC_WATCH_BRANCH", ""),
+      target_override: ENV.fetch("FILC_WATCH_TARGET_COMMIT", ""),
+      push_remote: ENV.fetch("FILC_WATCH_PUSH_REMOTE", ""),
+      push_token: ENV.fetch("FILC_WATCH_PUSH_TOKEN", ""),
+      dry_run: ENV.fetch("FILC_WATCH_DRY_RUN", "0") == "1",
+      skip_build: false,
+      build_toolchain_cmd: nil,
+      test_toolchain_cmd: nil,
+      build_ports_cmd: nil
+    }
+
+    parser = OptionParser.new do |o|
+      o.banner = "Usage: scripts/upstream-watch [options]"
+      o.on("--repo-root DIR", "Repository root (default: parent of scripts/)") { |v| opts[:repo_root] = File.expand_path(v) }
+      o.on("--work-dir DIR", "Working directory") { |v| opts[:work_dir] = File.expand_path(v) }
+      o.on("--cache-dir DIR", "Git bare cache directory") { |v| opts[:cache_dir] = File.expand_path(v) }
+      o.on("--ports-cache-dir DIR", "Ports tarball cache directory") { |v| opts[:ports_cache_dir] = File.expand_path(v) }
+      o.on("--archive-dir DIR", "Optional report archive directory") { |v| opts[:archive_dir] = v }
+      o.on("--branch NAME", "Override upstream Fil-C branch") { |v| opts[:branch_override] = v }
+      o.on("--target-commit SHA", "Override target upstream commit SHA") { |v| opts[:target_override] = v }
+      o.on("--push-remote URL_OR_PATH", "Optional push target for auto/filc-<sha> branch") { |v| opts[:push_remote] = v }
+      o.on("--dry-run", "Do not push branch") { opts[:dry_run] = true }
+      o.on("--skip-build", "Skip toolchain and ports builds after patch check") { opts[:skip_build] = true }
+      o.on("--build-toolchain-cmd PATH", "Override build-toolchain executable (testing)") { |v| opts[:build_toolchain_cmd] = v }
+      o.on("--test-toolchain-cmd PATH", "Override test-toolchain executable (testing)") { |v| opts[:test_toolchain_cmd] = v }
+      o.on("--build-ports-cmd PATH", "Override build-ports executable (testing)") { |v| opts[:build_ports_cmd] = v }
+    end
+    parser.parse!(argv)
+
+    t0 = Time.now
+    repo_root = opts[:repo_root]
+    upstream = parse_upstream(File.join(repo_root, "UPSTREAM"))
+    filc_repo = upstream.fetch("FILC_REPO")
+    filc_branch = opts[:branch_override].empty? ? upstream.fetch("FILC_BRANCH", "deluge") : opts[:branch_override]
+    pinned_commit = upstream.fetch("FILC_COMMIT")
+
+    target_commit = if !opts[:target_override].empty?
+                      opts[:target_override]
+                    else
+                      resolve_upstream_commit(filc_repo, filc_branch)
+                    end
+    raise "invalid target commit: #{target_commit.inspect}" unless HEX40_RE.match?(target_commit)
+
+    FileUtils.mkdir_p(opts[:work_dir])
+    report_txt = File.join(opts[:work_dir], "upstream-watch-report.txt")
+    report_json = File.join(opts[:work_dir], "upstream-watch-report.json")
+
+    report = {
+      "timestamp_utc" => Time.now.utc.iso8601,
+      "status" => "UNKNOWN",
+      "upstream_repo" => filc_repo,
+      "upstream_branch" => filc_branch,
+      "pinned_commit" => pinned_commit,
+      "target_commit" => target_commit,
+      "auto_branch" => nil,
+      "auto_branch_commit" => nil,
+      "push_status" => "none",
+      "new_commits" => [],
+      "touched_subsystems" => {},
+      "runtime_patches_passed" => [],
+      "runtime_patches_failed" => [],
+      "toolchain_status" => "SKIP",
+      "ports_status" => "SKIP",
+      "ports_summary" => {},
+      "duration_seconds" => 0
+    }
+
+    if target_commit == pinned_commit
+      report["status"] = "UP_TO_DATE"
+      report["duration_seconds"] = (Time.now - t0).round
+      write_reports(report_txt, report_json, report, archive_dir: opts[:archive_dir])
+      puts "UPSTREAM_WATCH: UP TO DATE (#{pinned_commit[0, 12]})"
+      return 0
+    end
+
+    bare_dir = File.join(opts[:cache_dir], "fil-c.git")
+    ensure_filc_bare_mirror(filc_repo, bare_dir, filc_branch, pinned_commit, target_commit)
+    new_commits, subsystems = collect_new_commits(bare_dir, pinned_commit, target_commit)
+    report["new_commits"] = new_commits
+    report["touched_subsystems"] = subsystems
+
+    short_sha = target_commit[0, 8]
+    auto_branch = assert_safe_auto_branch!("auto/filc-#{short_sha}")
+    report["auto_branch"] = auto_branch
+
+    branch_commit = create_auto_branch_and_commit(repo_root, auto_branch, pinned_commit, target_commit, new_commits)
+    report["auto_branch_commit"] = branch_commit
+
+    passed_patches, failed_patches = check_runtime_patches_strict(repo_root, bare_dir, target_commit)
+    report["runtime_patches_passed"] = passed_patches
+    report["runtime_patches_failed"] = failed_patches
+
+    unless failed_patches.empty?
+      report["status"] = "PATCH_CONFLICT"
+      report["push_status"] = maybe_push_auto_branch(
+        repo_root, auto_branch,
+        push_remote: opts[:push_remote],
+        push_token: opts[:push_token],
+        dry_run: opts[:dry_run]
+      )
+      report["duration_seconds"] = (Time.now - t0).round
+      write_reports(report_txt, report_json, report, archive_dir: opts[:archive_dir])
+      warn "UPSTREAM_WATCH: PATCH_CONFLICT (#{failed_patches.length} runtime patch(es) failed 0-fuzz/0-offset check)"
+      return 1
+    end
+
+    if opts[:skip_build]
+      report["status"] = "PATCHES_OK_SKIP_BUILD"
+      report["push_status"] = maybe_push_auto_branch(
+        repo_root, auto_branch,
+        push_remote: opts[:push_remote],
+        push_token: opts[:push_token],
+        dry_run: opts[:dry_run]
+      )
+      report["duration_seconds"] = (Time.now - t0).round
+      write_reports(report_txt, report_json, report, archive_dir: opts[:archive_dir])
+      return 0
+    end
+
+    toolchain_dir = File.join(opts[:work_dir], "toolchain")
+    toolchain_report = File.join(opts[:work_dir], "toolchain-report.txt")
+    ports_dir = File.join(opts[:work_dir], "ports")
+    build_cmd = opts[:build_toolchain_cmd] || File.join(repo_root, "scripts", "build-toolchain")
+    test_cmd = opts[:test_toolchain_cmd] || File.join(repo_root, "scripts", "test-toolchain")
+    ports_cmd = opts[:build_ports_cmd] || File.join(repo_root, "scripts", "build-ports")
+
+    build_env = {
+      "FILC_SRC_CACHE_DIR" => opts[:cache_dir],
+      "FILC_RUNTIME_REFERENCE" => bare_dir,
+      "FILC_PORTS_CACHE_DIR" => opts[:ports_cache_dir],
+      "FILC_TOOLCHAIN_ROOT" => toolchain_dir,
+      "FILC_PORTS" => "",
+      "FILC_PORTS_PARALLEL" => ENV.fetch("FILC_PORTS_PARALLEL", "4")
+    }
+
+    tc_rc = run_streaming(build_cmd, toolchain_dir, chdir: repo_root, env: build_env)
+    if tc_rc != 0
+      report["toolchain_status"] = "FAIL (build rc=#{tc_rc})"
+      report["status"] = "TOOLCHAIN_FAILED"
+      report["push_status"] = maybe_push_auto_branch(
+        repo_root, auto_branch,
+        push_remote: opts[:push_remote],
+        push_token: opts[:push_token],
+        dry_run: opts[:dry_run]
+      )
+      report["duration_seconds"] = (Time.now - t0).round
+      write_reports(report_txt, report_json, report, archive_dir: opts[:archive_dir])
+      return 1
+    end
+
+    tt_rc = run_streaming(test_cmd, toolchain_dir, toolchain_report, chdir: repo_root, env: build_env)
+    if tt_rc != 0
+      report["toolchain_status"] = "FAIL (test rc=#{tt_rc})"
+      report["status"] = "TOOLCHAIN_FAILED"
+      report["push_status"] = maybe_push_auto_branch(
+        repo_root, auto_branch,
+        push_remote: opts[:push_remote],
+        push_token: opts[:push_token],
+        dry_run: opts[:dry_run]
+      )
+      report["duration_seconds"] = (Time.now - t0).round
+      write_reports(report_txt, report_json, report, archive_dir: opts[:archive_dir])
+      return 1
+    end
+    report["toolchain_status"] = "PASS"
+
+    ports_rc = run_streaming(ports_cmd, ports_dir, chdir: repo_root, env: build_env)
+    ports_summary = parse_ports_report(File.join(ports_dir, "ports-report.json"))
+    report["ports_summary"] = ports_summary
+
+    if ports_rc != 0 || !Array(ports_summary["failed"]).empty?
+      report["ports_status"] = "FAIL (rc=#{ports_rc}, failed=#{Array(ports_summary['failed']).length})"
+      report["status"] = "PORTS_FAILED"
+    else
+      report["ports_status"] = "PASS (#{ports_summary['tested']}/#{ports_summary['total']})"
+      report["status"] = "PASS"
+    end
+
+    report["push_status"] = maybe_push_auto_branch(
+      repo_root, auto_branch,
+      push_remote: opts[:push_remote],
+      push_token: opts[:push_token],
+      dry_run: opts[:dry_run]
+    )
+    report["duration_seconds"] = (Time.now - t0).round
+    write_reports(report_txt, report_json, report, archive_dir: opts[:archive_dir])
+
+    report["status"] == "PASS" ? 0 : 1
+  end
+end
+
+exit(UpstreamWatch.main(ARGV)) if $PROGRAM_NAME == __FILE__

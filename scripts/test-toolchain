@@ -760,6 +760,247 @@ else
   FAILURES=$((FAILURES + 1))
 fi
 
+echo "=== Running (j) Fiber Context (<ucontext.h>) GC Stress & Stack Overflow Trap ==="
+cat > "$TEST_DIR/fiber_gc_test.c" <<'EOF'
+#define _GNU_SOURCE
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ucontext.h>
+
+#define NUM_FIBERS 6
+#define NUM_NODES  1500
+#define ROUNDS     4
+
+typedef struct node {
+    struct node *next;
+    char *label;
+} node_t;
+
+typedef struct {
+    ucontext_t ctx;
+    bool done;
+} fiber_slot_t;
+
+static ucontext_t main_ctx;
+static fiber_slot_t fibers[NUM_FIBERS];
+static int cur_fiber = 0;
+static int switch_ticks = 0;
+
+static void switch_next(void) {
+    int prev = cur_fiber;
+    for (int step = 1; step < NUM_FIBERS; ++step) {
+        int cand = (prev + step) % NUM_FIBERS;
+        if (!fibers[cand].done) {
+            cur_fiber = cand;
+            if (swapcontext(&fibers[prev].ctx, &fibers[cand].ctx) != 0)
+                abort();
+            if (cur_fiber != prev)
+                abort();
+            return;
+        }
+    }
+    if (!fibers[prev].done)
+        return;
+    setcontext(&main_ctx);
+    abort();
+}
+
+static void maybe_switch(void) {
+    if (++switch_ticks >= 31) {
+        switch_ticks = 0;
+        switch_next();
+    }
+}
+
+static void add_node(node_t **head) {
+    node_t *n = (node_t *)malloc(sizeof(node_t));
+    if (!n)
+        abort();
+    n->next = *head;
+    maybe_switch();
+    char *lbl = (char *)malloc(48);
+    if (!lbl)
+        abort();
+    snprintf(lbl, 48, "node=%p", (void *)n);
+    n->label = lbl;
+    *head = n;
+}
+
+static void verify_list(node_t *head) {
+    char expect[48];
+    for (node_t *n = head; n; n = n->next) {
+        snprintf(expect, sizeof(expect), "node=%p", (void *)n);
+        maybe_switch();
+        if (strcmp(n->label, expect) != 0) {
+            fprintf(stderr, "fiber GC label mismatch: got '%s', want '%s'\n", n->label, expect);
+            abort();
+        }
+    }
+}
+
+static void remove_half(node_t **head) {
+    node_t **pp = head;
+    int idx = 0;
+    while (*pp) {
+        maybe_switch();
+        if ((idx & 1) != 0) {
+            pp = &(*pp)->next;
+        } else {
+            *pp = (*pp)->next;
+        }
+        ++idx;
+    }
+}
+
+static void fiber_worker(void) {
+    node_t *head = NULL;
+    for (int i = 0; i < NUM_NODES; ++i)
+        add_node(&head);
+    verify_list(head);
+    for (int r = 0; r < ROUNDS; ++r) {
+        remove_half(&head);
+        verify_list(head);
+        for (int i = 0; i < NUM_NODES / 2; ++i)
+            add_node(&head);
+        verify_list(head);
+    }
+    fibers[cur_fiber].done = true;
+    switch_next();
+    abort();
+}
+
+static ucontext_t link_parent_ctx;
+static ucontext_t link_child_ctx;
+static int link_arg_sum = 0;
+
+static void link_child(int a, int b) {
+    link_arg_sum = a + b;
+}
+
+int main(void) {
+    /* 1. Multi-fiber swapcontext under allocation/GC load */
+    for (int i = 0; i < NUM_FIBERS; ++i) {
+        fibers[i].done = false;
+        if (getcontext(&fibers[i].ctx) != 0)
+            return 1;
+        fibers[i].ctx.uc_stack.ss_size = 65536;
+        fibers[i].ctx.uc_link = NULL;
+        makecontext(&fibers[i].ctx, fiber_worker, 0);
+    }
+    cur_fiber = 0;
+    if (swapcontext(&main_ctx, &fibers[0].ctx) != 0)
+        return 2;
+    for (int i = 0; i < NUM_FIBERS; ++i) {
+        if (!fibers[i].done)
+            return 3;
+    }
+
+    /* 2. makecontext argument passing + uc_link return */
+    if (getcontext(&link_child_ctx) != 0)
+        return 4;
+    link_child_ctx.uc_stack.ss_size = 32768;
+    link_child_ctx.uc_link = &link_parent_ctx;
+    makecontext(&link_child_ctx, (void (*)())link_child, 2, 19, 23);
+    if (swapcontext(&link_parent_ctx, &link_child_ctx) != 0)
+        return 5;
+    if (link_arg_sum != 42)
+        return 6;
+
+    printf("FIBER_GC_OK\n");
+    return 0;
+}
+EOF
+
+cat > "$TEST_DIR/trap_fiber_stack_overflow.c" <<'EOF'
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/wait.h>
+#include <ucontext.h>
+#include <unistd.h>
+
+static ucontext_t parent_ctx;
+static ucontext_t child_ctx;
+
+__attribute__((noinline))
+static int overflow_recurse(volatile int depth) {
+    volatile char buf[1024];
+    buf[0] = (char)depth;
+    buf[1023] = (char)(depth + 1);
+    if (depth > 2000)
+        return buf[0] + buf[1023];
+    return overflow_recurse(depth + 1) + buf[0];
+}
+
+static void overflow_fiber(void) {
+    int v = overflow_recurse(1);
+    printf("UNEXPECTED_FIBER_OVERFLOW_SURVIVED=%d\n", v);
+    fflush(stdout);
+    setcontext(&parent_ctx);
+}
+
+int main(void) {
+    fflush(NULL);
+    pid_t pid = fork();
+    if (pid < 0)
+        return 1;
+    if (pid == 0) {
+        if (getcontext(&child_ctx) != 0)
+            _exit(10);
+        child_ctx.uc_stack.ss_size = 16384;
+        child_ctx.uc_link = &parent_ctx;
+        makecontext(&child_ctx, overflow_fiber, 0);
+        swapcontext(&parent_ctx, &child_ctx);
+        printf("UNEXPECTED_FIBER_OVERFLOW_RETURNED\n");
+        fflush(stdout);
+        _exit(0);
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0)
+        return 2;
+    if (!WIFSIGNALED(status)) {
+        fprintf(stderr, "fiber overflow child did not trap by signal (status=0x%x)\n", status);
+        return 3;
+    }
+    printf("FIBER_STACK_OVERFLOW_TRAPPED_OK\n");
+    return 0;
+}
+EOF
+
+FIBER_OK=1
+"$CLANG" -O2 -Wall -Wextra -Werror "$TEST_DIR/fiber_gc_test.c" -o "$TEST_DIR/fiber_gc_test"
+run_and_capture fiber_gc_test "$TEST_DIR/fiber_gc_test"
+RC_FIBER_GC="$(cat "$TEST_DIR/fiber_gc_test.rc")"
+if [[ "$RC_FIBER_GC" -ne 0 ]] || ! grep -Fxq "FIBER_GC_OK" "$TEST_DIR/fiber_gc_test.stdout"; then
+  echo "error: fiber_gc_test failed (rc=$RC_FIBER_GC)" >&2
+  cat "$TEST_DIR/fiber_gc_test.stdout" >&2
+  cat "$TEST_DIR/fiber_gc_test.stderr" >&2
+  FIBER_OK=0
+fi
+
+"$CLANG" -O2 -Wall -Wextra -Werror "$TEST_DIR/trap_fiber_stack_overflow.c" -o "$TEST_DIR/trap_fiber_stack_overflow"
+run_and_capture trap_fiber_stack_overflow "$TEST_DIR/trap_fiber_stack_overflow"
+RC_FIBER_OVF="$(cat "$TEST_DIR/trap_fiber_stack_overflow.rc")"
+if [[ "$RC_FIBER_OVF" -ne 0 ]] \
+  || grep -q "UNEXPECTED_FIBER_OVERFLOW" "$TEST_DIR/trap_fiber_stack_overflow.stdout" \
+  || ! grep -Fxq "FIBER_STACK_OVERFLOW_TRAPPED_OK" "$TEST_DIR/trap_fiber_stack_overflow.stdout" \
+  || ! grep -qi "filc safety error" "$TEST_DIR/trap_fiber_stack_overflow.stderr" \
+  || ! grep -qi "stack overflow" "$TEST_DIR/trap_fiber_stack_overflow.stderr"; then
+  echo "error: trap_fiber_stack_overflow did not safely trap (rc=$RC_FIBER_OVF)" >&2
+  cat "$TEST_DIR/trap_fiber_stack_overflow.stdout" >&2
+  cat "$TEST_DIR/trap_fiber_stack_overflow.stderr" >&2
+  FIBER_OK=0
+fi
+
+if [[ "$FIBER_OK" -eq 1 ]]; then
+  STATUS_FIBER="PASS"
+else
+  STATUS_FIBER="FAIL"
+  FAILURES=$((FAILURES + 1))
+fi
+
 OVERALL_STATUS="PASS"
 if (( FAILURES > 0 )); then
   OVERALL_STATUS="FAIL"
@@ -874,6 +1115,9 @@ ARCH="$(uname -m)"
   echo ""
   echo "--- TEST (i) RUNTIME SEMCTL(GETALL/SETALL) & PRCTL TGID COMM [$STATUS_SEMCTL_PRCTL] ---"
   echo "EXIT_CODE: $RC_SEMCTL_PRCTL  OOB_TRAP_RC: $RC_SEMCTL_OOB"
+  echo ""
+  echo "--- TEST (j) FIBER CONTEXT (<ucontext.h>) GC & STACK OVERFLOW [$STATUS_FIBER] ---"
+  echo "GC_EXIT_CODE: $RC_FIBER_GC  OVERFLOW_TRAP_RC: $RC_FIBER_OVF"
   echo "================================================================================"
 } > "$REPORT_FILE"
 

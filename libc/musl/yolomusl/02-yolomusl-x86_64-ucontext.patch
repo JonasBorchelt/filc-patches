@@ -1,0 +1,291 @@
+Subject: Implement x86_64 ucontext (getcontext, setcontext, makecontext, swapcontext) in yolomusl
+Policy-Class: P1-Toolchain
+Rationale: musl intentionally omits the legacy POSIX ucontext API, which previously forced Fil-C's libpizlo runtime to disable FILC_HAS_FIBER_CONTEXT on musl builds and prevented userland programs such as PHP (with --disable-fiber-asm) from using memory-safe fibers. Provide a minimal, self-contained x86_64 SysV ABI implementation of getcontext, setcontext, swapcontext, and makecontext in yolomusl with compile-time offset assertions against musl's ucontext_t layout so libpizlo's native fiber runtime works on Linux x86_64 musl.
+Upstream-Status: Upstream-Candidate (Fil-C)
+Fil-C-Origin-Commits: none
+
+diff --git a/src/ucontext/x86_64/ucontext.s b/src/ucontext/x86_64/ucontext.s
+new file mode 100644
+--- /dev/null
++++ b/src/ucontext/x86_64/ucontext.s
+@@ -0,0 +1,191 @@
++/* x86_64 Linux ucontext implementation for yolomusl.
++ *
++ * Field offsets match arch/x86_64/bits/signal.h (verified at compile time
++ * in src/ucontext/x86_64/makecontext.c):
++ *   gregs[REG_R8..REG_RIP]: 40..168
++ *   uc_mcontext.fpregs:     224
++ *   uc_sigmask:             296
++ *   __fpregs_mem:           424
++ *   __fpregs_mem.mxcsr:     448
++ */
++
++.text
++
++.global getcontext
++.type getcontext,@function
++getcontext:
++	movq %rbx, 128(%rdi)
++	movq %rbp, 120(%rdi)
++	movq %r12, 72(%rdi)
++	movq %r13, 80(%rdi)
++	movq %r14, 88(%rdi)
++	movq %r15, 96(%rdi)
++	movq %rdi, 104(%rdi)
++	movq %rsi, 112(%rdi)
++	movq %rdx, 136(%rdi)
++	movq %rcx, 152(%rdi)
++	movq %r8,  40(%rdi)
++	movq %r9,  48(%rdi)
++
++	movq (%rsp), %rcx
++	movq %rcx, 168(%rdi)
++	leaq 8(%rsp), %rcx
++	movq %rcx, 160(%rdi)
++
++	leaq 424(%rdi), %rcx
++	movq %rcx, 224(%rdi)
++	fnstenv (%rcx)
++	fldenv (%rcx)
++	stmxcsr 448(%rdi)
++
++	/* rt_sigprocmask(SIG_BLOCK=0, NULL, &ucp->uc_sigmask, 8) */
++	leaq 296(%rdi), %rdx
++	xorl %esi, %esi
++	xorl %edi, %edi
++	movl $8, %r10d
++	movl $14, %eax
++	syscall
++	cmpq $-4095, %rax
++	jae 1f
++	xorl %eax, %eax
++	ret
++1:
++	movq $-1, %rax
++	ret
++.size getcontext,.-getcontext
++
++.global setcontext
++.type setcontext,@function
++setcontext:
++	pushq %rdi
++
++	/* rt_sigprocmask(SIG_SETMASK=2, &ucp->uc_sigmask, NULL, 8) */
++	leaq 296(%rdi), %rsi
++	xorl %edx, %edx
++	movl $2, %edi
++	movl $8, %r10d
++	movl $14, %eax
++	syscall
++	popq %rdx
++	cmpq $-4095, %rax
++	jae 1f
++
++	movq 224(%rdx), %rcx
++	fldenv (%rcx)
++	ldmxcsr 448(%rdx)
++
++	movq 160(%rdx), %rsp
++	movq 128(%rdx), %rbx
++	movq 120(%rdx), %rbp
++	movq 72(%rdx),  %r12
++	movq 80(%rdx),  %r13
++	movq 88(%rdx),  %r14
++	movq 96(%rdx),  %r15
++
++	movq 168(%rdx), %rcx
++	pushq %rcx
++
++	movq 112(%rdx), %rsi
++	movq 104(%rdx), %rdi
++	movq 152(%rdx), %rcx
++	movq 40(%rdx),  %r8
++	movq 48(%rdx),  %r9
++	movq 136(%rdx), %rdx
++
++	xorl %eax, %eax
++	ret
++1:
++	movq $-1, %rax
++	ret
++.size setcontext,.-setcontext
++
++.global swapcontext
++.type swapcontext,@function
++swapcontext:
++	movq %rbx, 128(%rdi)
++	movq %rbp, 120(%rdi)
++	movq %r12, 72(%rdi)
++	movq %r13, 80(%rdi)
++	movq %r14, 88(%rdi)
++	movq %r15, 96(%rdi)
++	movq %rdi, 104(%rdi)
++	movq %rsi, 112(%rdi)
++	movq %rdx, 136(%rdi)
++	movq %rcx, 152(%rdi)
++	movq %r8,  40(%rdi)
++	movq %r9,  48(%rdi)
++
++	movq (%rsp), %rcx
++	movq %rcx, 168(%rdi)
++	leaq 8(%rsp), %rcx
++	movq %rcx, 160(%rdi)
++
++	leaq 424(%rdi), %rcx
++	movq %rcx, 224(%rdi)
++	fnstenv (%rcx)
++	stmxcsr 448(%rdi)
++
++	movq %rsi, %r12
++	movq %rdi, %r13
++
++	/* rt_sigprocmask(SIG_SETMASK=2, &ucp->uc_sigmask, &oucp->uc_sigmask, 8) */
++	leaq 296(%rdi), %rdx
++	leaq 296(%rsi), %rsi
++	movl $2, %edi
++	movl $8, %r10d
++	movl $14, %eax
++	syscall
++	cmpq $-4095, %rax
++	jae 1f
++
++	movq %r12, %rdx
++
++	movq 224(%rdx), %rcx
++	fldenv (%rcx)
++	ldmxcsr 448(%rdx)
++
++	movq 160(%rdx), %rsp
++	movq 128(%rdx), %rbx
++	movq 120(%rdx), %rbp
++	movq 72(%rdx),  %r12
++	movq 80(%rdx),  %r13
++	movq 88(%rdx),  %r14
++	movq 96(%rdx),  %r15
++
++	movq 168(%rdx), %rcx
++	pushq %rcx
++
++	movq 112(%rdx), %rsi
++	movq 104(%rdx), %rdi
++	movq 152(%rdx), %rcx
++	movq 40(%rdx),  %r8
++	movq 48(%rdx),  %r9
++	movq 136(%rdx), %rdx
++
++	xorl %eax, %eax
++	ret
++1:
++	movq 72(%r13), %r12
++	movq 80(%r13), %r13
++	movq $-1, %rax
++	ret
++.size swapcontext,.-swapcontext
++
++.hidden __yolomusl_start_context
++.global __yolomusl_start_context
++.type __yolomusl_start_context,@function
++__yolomusl_start_context:
++	movq (%rbx), %rdi
++	movq %rbx, %rsp
++	andq $-16, %rsp
++	testq %rdi, %rdi
++	je 1f
++	call setcontext
++1:
++	xorl %edi, %edi
++	movl $231, %eax
++	syscall
++	hlt
++.size __yolomusl_start_context,.-__yolomusl_start_context
++
++.section .note.GNU-stack,"",@progbits
+diff --git a/src/ucontext/x86_64/makecontext.c b/src/ucontext/x86_64/makecontext.c
+new file mode 100644
+--- /dev/null
++++ b/src/ucontext/x86_64/makecontext.c
+@@ -0,0 +1,84 @@
++#define _GNU_SOURCE
++#include <signal.h>
++#include <stdarg.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <ucontext.h>
++
++/* Compile-time verification of every offset used in ucontext.s (pure C99). */
++#define UCONTEXT_ASSERT(name, cond) typedef char ucontext_assert_##name[(cond) ? 1 : -1]
++
++UCONTEXT_ASSERT(off_r8,      offsetof(ucontext_t, uc_mcontext.gregs[REG_R8])  == 40);
++UCONTEXT_ASSERT(off_r9,      offsetof(ucontext_t, uc_mcontext.gregs[REG_R9])  == 48);
++UCONTEXT_ASSERT(off_r12,     offsetof(ucontext_t, uc_mcontext.gregs[REG_R12]) == 72);
++UCONTEXT_ASSERT(off_r13,     offsetof(ucontext_t, uc_mcontext.gregs[REG_R13]) == 80);
++UCONTEXT_ASSERT(off_r14,     offsetof(ucontext_t, uc_mcontext.gregs[REG_R14]) == 88);
++UCONTEXT_ASSERT(off_r15,     offsetof(ucontext_t, uc_mcontext.gregs[REG_R15]) == 96);
++UCONTEXT_ASSERT(off_rdi,     offsetof(ucontext_t, uc_mcontext.gregs[REG_RDI]) == 104);
++UCONTEXT_ASSERT(off_rsi,     offsetof(ucontext_t, uc_mcontext.gregs[REG_RSI]) == 112);
++UCONTEXT_ASSERT(off_rbp,     offsetof(ucontext_t, uc_mcontext.gregs[REG_RBP]) == 120);
++UCONTEXT_ASSERT(off_rbx,     offsetof(ucontext_t, uc_mcontext.gregs[REG_RBX]) == 128);
++UCONTEXT_ASSERT(off_rdx,     offsetof(ucontext_t, uc_mcontext.gregs[REG_RDX]) == 136);
++UCONTEXT_ASSERT(off_rcx,     offsetof(ucontext_t, uc_mcontext.gregs[REG_RCX]) == 152);
++UCONTEXT_ASSERT(off_rsp,     offsetof(ucontext_t, uc_mcontext.gregs[REG_RSP]) == 160);
++UCONTEXT_ASSERT(off_rip,     offsetof(ucontext_t, uc_mcontext.gregs[REG_RIP]) == 168);
++UCONTEXT_ASSERT(off_fpregs,  offsetof(ucontext_t, uc_mcontext.fpregs)         == 224);
++UCONTEXT_ASSERT(off_sigmask, offsetof(ucontext_t, uc_sigmask)                 == 296);
++UCONTEXT_ASSERT(off_fpmem,   offsetof(ucontext_t, __fpregs_mem)               == 424);
++UCONTEXT_ASSERT(off_mxcsr,   offsetof(ucontext_t, __fpregs_mem) + offsetof(struct _fpstate, mxcsr) == 448);
++UCONTEXT_ASSERT(sig_block,   SIG_BLOCK == 0);
++UCONTEXT_ASSERT(sig_setmask, SIG_SETMASK == 2);
++
++extern void __yolomusl_start_context(void);
++
++void makecontext(ucontext_t *ucp, void (*func)(), int argc, ...)
++{
++	uintptr_t *sp;
++	va_list ap;
++	int i;
++	int extra = argc > 6 ? argc - 6 : 0;
++	int slots = 1 + extra + 1;
++
++	/* Ensure %rsp % 16 == 8 on entry to func per System V AMD64 ABI. */
++	if ((slots & 1) == 0)
++		slots += 1;
++
++	sp = (uintptr_t *)(((uintptr_t)ucp->uc_stack.ss_sp + ucp->uc_stack.ss_size) & ~(uintptr_t)15);
++	sp -= slots;
++
++	sp[0] = (uintptr_t)&__yolomusl_start_context;
++	sp[1 + extra] = (uintptr_t)ucp->uc_link;
++
++	ucp->uc_mcontext.gregs[REG_RIP] = (greg_t)(uintptr_t)func;
++	ucp->uc_mcontext.gregs[REG_RSP] = (greg_t)(uintptr_t)sp;
++	ucp->uc_mcontext.gregs[REG_RBX] = (greg_t)(uintptr_t)&sp[1 + extra];
++
++	va_start(ap, argc);
++	for (i = 0; i < argc; i++) {
++		greg_t val = va_arg(ap, greg_t);
++		switch (i) {
++		case 0:
++			ucp->uc_mcontext.gregs[REG_RDI] = val;
++			break;
++		case 1:
++			ucp->uc_mcontext.gregs[REG_RSI] = val;
++			break;
++		case 2:
++			ucp->uc_mcontext.gregs[REG_RDX] = val;
++			break;
++		case 3:
++			ucp->uc_mcontext.gregs[REG_RCX] = val;
++			break;
++		case 4:
++			ucp->uc_mcontext.gregs[REG_R8] = val;
++			break;
++		case 5:
++			ucp->uc_mcontext.gregs[REG_R9] = val;
++			break;
++		default:
++			sp[1 + (i - 6)] = (uintptr_t)val;
++			break;
++		}
++	}
++	va_end(ap);
++}

@@ -104,21 +104,15 @@ int main(int argc, char **argv) {
     return 2;
   }
 
-  /* Bytea escape / unescape binary round-trip including NUL bytes */
+  /* Verify PQunescapeBytea on PostgreSQL hex wire format (\x...) and octal format */
   const unsigned char raw[] = { 0x00, 0x01, 0x27, 0x5c, 0x7f, 0x80, 0xff };
-  size_t esc_len = 0, unesc_len = 0;
-  unsigned char *esc = PQescapeBytea(raw, sizeof(raw), &esc_len);
-  if (!esc || esc_len == 0) {
-    fprintf(stderr, "PQescapeBytea failed\n");
+  size_t unesc_len = 0;
+  unsigned char *unesc_hex = PQunescapeBytea((const unsigned char *)"\\x0001275c7f80ff", &unesc_len);
+  if (!unesc_hex || unesc_len != sizeof(raw) || memcmp(raw, unesc_hex, sizeof(raw)) != 0) {
+    fprintf(stderr, "PQunescapeBytea(hex) mismatch (len=%zu)\n", unesc_len);
     return 3;
   }
-  unsigned char *unesc = PQunescapeBytea(esc, &unesc_len);
-  PQfreemem(esc);
-  if (!unesc || unesc_len != sizeof(raw) || memcmp(raw, unesc, sizeof(raw)) != 0) {
-    fprintf(stderr, "PQunescapeBytea round-trip mismatch\n");
-    return 4;
-  }
-  PQfreemem(unesc);
+  PQfreemem(unesc_hex);
 
   /* Live PostgreSQL v3 wire-protocol round-trip against loopback mock server */
   if (argc != 2) {
@@ -141,6 +135,26 @@ int main(int argc, char **argv) {
     PQfinish(conn);
     return 7;
   }
+
+  /* With standard_conforming_strings=on and server_version >= 9.0, PQescapeByteaConn
+     emits single-backslash hex (\x...) which round-trips cleanly through PQunescapeBytea */
+  size_t esc_len = 0;
+  unsigned char *esc = PQescapeByteaConn(conn, raw, sizeof(raw), &esc_len);
+  if (!esc || strcmp((const char *)esc, "\\x0001275c7f80ff") != 0) {
+    fprintf(stderr, "PQescapeByteaConn mismatch: got '%s'\n", esc ? (const char *)esc : "(null)");
+    if (esc) PQfreemem(esc);
+    PQfinish(conn);
+    return 4;
+  }
+  unsigned char *unesc = PQunescapeBytea(esc, &unesc_len);
+  PQfreemem(esc);
+  if (!unesc || unesc_len != sizeof(raw) || memcmp(raw, unesc, sizeof(raw)) != 0) {
+    fprintf(stderr, "PQunescapeBytea(PQescapeByteaConn) round-trip mismatch (len=%zu)\n", unesc_len);
+    if (unesc) PQfreemem(unesc);
+    PQfinish(conn);
+    return 4;
+  }
+  PQfreemem(unesc);
 
   /* Exercise SCRAM-SHA-256 password hashing (OpenSSL crypto path in libpq) */
   char *scram = PQencryptPasswordConn(conn, "s3cr3t", "filctest", "scram-sha-256");
@@ -204,6 +218,7 @@ loop do
 
     send_msg(sock, "R", [0].pack("N"))
     send_msg(sock, "S", "server_version\018.7\0")
+    send_msg(sock, "S", "standard_conforming_strings\0on\0")
     send_msg(sock, "S", "client_encoding\0UTF8\0")
     send_msg(sock, "S", "server_encoding\0UTF8\0")
     send_msg(sock, "K", [12345, 67890].pack("NN"))

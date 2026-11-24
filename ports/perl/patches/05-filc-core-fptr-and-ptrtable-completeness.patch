@@ -1,6 +1,6 @@
-Subject: Preserve Fil-C capabilities across DPTR2FPTR/FPTR2DPTR and remaining Perl core ptrtable pairs
+Subject: Preserve Fil-C capabilities across DPTR2FPTR/FPTR2DPTR, core ptrtable pairs, and zsetproctitle
 Policy-Class: P4-Audit
-Rationale: Project-authored core capability completeness patch covering 6 Perl 5.40.5 core locations where pointers were round-tripped through integers without preserving Fil-C capabilities: (1) perl.h:2536-2537 DPTR2FPTR/FPTR2DPTR previously cast via PTR2nat(p) (unsigned long), stripping function-pointer capabilities in op.c:14756,14847 (cv_get/set_call_checker_flags used by XS::APItest, Devel::Peek, IO, File::DosGlob, POSIX), sv.c:15368-15377 (thread destructor dup), and toke.c (source filters); replaced with direct ((t)(p)) casts; (2) op.c:15326,15406,15480 Perl_custom_op_register/get_field/free XOP* storage in PL_custom_ops routed via Perl_xsub_ptrtable; (3) op.c:4670 and op.h:858-860 Perl_blockhook_register/CALL_BLOCK_HOOKS BHK* storage routed via Perl_xsub_ptrtable; (4) mro_core.c:127,140 Perl_mro_register/get_from_name struct mro_alg* storage routed via Perl_xsub_ptrtable; (5) scope.c:1950,1977 Perl_mortal_svfunc_x/S_call_freedestruct SVFUNC_t storage routed via Perl_xsub_ptrtable; (6) op.c:1373,8714 and mg.c:2337 debugger breakpoint dbline COP* storage routed via Perl_xsub_ptrtable.
+Rationale: Project-authored core capability completeness patch covering 7 Perl 5.40.5 core locations: (1) perl.h:2536-2537 DPTR2FPTR/FPTR2DPTR replaced with direct ((t)(p)) casts (no PTR2nat integer round-trip) preserving function-pointer capabilities in op.c:14756,14847 (cv_get/set_call_checker_flags), sv.c:15368-15377, and toke.c; (2) op.c:15326,15406,15480 Perl_custom_op_register/get_field/free XOP* via Perl_xsub_ptrtable; (3) op.c:4670 and op.h:858-860 Perl_blockhook_register/CALL_BLOCK_HOOKS BHK* via Perl_xsub_ptrtable; (4) mro_core.c:127,140 Perl_mro_register/get_from_name struct mro_alg* via Perl_xsub_ptrtable; (5) scope.c:1950,1977 Perl_mortal_svfunc_x/S_call_freedestruct SVFUNC_t via Perl_xsub_ptrtable; (6) op.c:1373,8714 and mg.c:2337 dbline COP* breakpoints via Perl_xsub_ptrtable; (7) mg.c:2966 S_set_dollarzero calls zsetproctitle(s) (<stdfil.h:897>) so assigning $0 updates the real kernel /proc/self/cmdline buffer rather than only Fil-C's GC heap copy of argv[0].
 Upstream-Status: Fil-C-Specific
 Fil-C-Origin-Commits: none
 
@@ -98,6 +98,14 @@ Fil-C-Origin-Commits: none
          if (o) {
  #ifdef PERL_DEBUG_READONLY_OPS
              Slab_to_rw(OpSLAB(o));
+@@ -2964,6 +2964,7 @@
+         I32 i;
+         /* PL_origalen is set in perl_parse(). */
+         s = SvPV_force(sv,len);
++        zsetproctitle(s);
+         if (len >= (STRLEN)PL_origalen-1) {
+             /* Longer than original, will be truncated. We assume that
+              * PL_origalen bytes are available. */
 --- a/mro_core.c
 +++ b/mro_core.c
 @@ -124,7 +124,7 @@

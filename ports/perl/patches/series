@@ -3,3 +3,5 @@
 03-filc-doio-dir-and-mg-prctl.patch
 04-filc-cpan-xs-and-typemap-completeness.patch
 05-filc-core-fptr-and-ptrtable-completeness.patch
+06-filc-test-platform-limits.patch
+07-preserve-errno-in-fpu-post-exec.patch

@@ -1,0 +1,17 @@
+Subject: Preserve errno across PERL_FPU_POST_EXEC rsignal_restore(SIGFPE)
+Policy-Class: P2-Package
+Rationale: In doio.c (do_aexec5/do_exec3), PERL_FPU_POST_EXEC executes rsignal_restore(SIGFPE, &xfpe) -> sigaction(SIGFPE, ...) immediately after a failed execvp() or SETERRNO(ENOENT) and before S_exec_failed() reads errno. On platforms where sigaction(SIGFPE, ...) fails (under Fil-C, SIGFPE is a safety-critical signal and returns ENOSYS per filc_runtime.c:534), rsignal_restore clobbers errno with ENOSYS, breaking op/exec.t tests 17, 35, and 37. Saving and restoring errno around rsignal_restore in perl.h:3539 is minimal, portable, and upstreamable.
+Upstream-Status: Upstreamable
+Fil-C-Origin-Commits: none
+
+--- a/perl.h
++++ b/perl.h
+@@ -3538,7 +3538,7 @@
+ #  elif defined(SIGFPE) && defined(SIG_IGN)
+ #    define PERL_FPU_INIT       PL_sigfpe_saved = (Sighandler_t) signal(SIGFPE, SIG_IGN)
+ #    define PERL_FPU_PRE_EXEC   { Sigsave_t xfpe; rsignal_save(SIGFPE, PL_sigfpe_saved, &xfpe);
+-#    define PERL_FPU_POST_EXEC    rsignal_restore(SIGFPE, &xfpe); }
++#    define PERL_FPU_POST_EXEC    { int saved_errno = errno; rsignal_restore(SIGFPE, &xfpe); errno = saved_errno; } }
+ #  else
+ #    define PERL_FPU_INIT
+ #  endif

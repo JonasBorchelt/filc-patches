@@ -172,13 +172,19 @@ EOF
   echo "MIT musl copyright" > "$work/usermusl/COPYRIGHT"
 }
 
-echo "=== [1/2] Clean mock toolchain packaging & archive integrity (host=$HOST_OS, real_elf=$USE_REAL_ELF) ==="
+echo "=== [1/4] Clean mock toolchain packaging & archive integrity (host=$HOST_OS, real_elf=$USE_REAL_ELF) ==="
 MOCK_WORK="$TMP_DIR/mock-tc"
 OUT_DIR="$TMP_DIR/out"
 make_mock_toolchain "$MOCK_WORK" 0
 
+MOCK_HIGHLIGHTS="$TMP_DIR/mock-highlights.md"
+cat > "$MOCK_HIGHLIGHTS" <<'EOF'
+- **Mock highlight 0.0.0-mock:** verified versioned release-notes injection.
+EOF
+
 MOCK_PUBLIC_SHA="0123456789abcdef0123456789abcdef01234567"
 FILC_RELEASE_PUBLIC_COMMIT="$MOCK_PUBLIC_SHA" \
+FILC_RELEASE_HIGHLIGHTS_FILE="$MOCK_HIGHLIGHTS" \
   "$REPO_ROOT/scripts/package-release" "$MOCK_WORK" "$OUT_DIR" "0.0.0-mock"
 
 (cd "$OUT_DIR" && sha256sum -c SHA256SUMS)
@@ -189,6 +195,9 @@ test -s "$OUT_DIR/MANIFEST"
 test -s "$OUT_DIR/RELEASE_NOTES.md"
 grep -Fxq "FILC_PATCHES_COMMIT=$MOCK_PUBLIC_SHA" "$OUT_DIR/PROVENANCE"
 grep -Fq "$MOCK_PUBLIC_SHA" "$OUT_DIR/RELEASE_NOTES.md"
+grep -Fq "Mock highlight 0.0.0-mock" "$OUT_DIR/RELEASE_NOTES.md"
+grep -Fq "### Release archive verification" "$OUT_DIR/RELEASE_NOTES.md"
+grep -Fq "### Toolchain self-test" "$OUT_DIR/RELEASE_NOTES.md"
 
 EXTRACT="$TMP_DIR/extract"
 mkdir -p "$EXTRACT"
@@ -228,21 +237,65 @@ if [[ "$USE_REAL_ELF" == "1" ]]; then
 fi
 echo "CLEAN PACKAGING & MANIFEST OK"
 
-echo "=== [2/2] Leak-Gate negative test ==="
+echo "=== [2/4] Default versioned release-notes/0.1.4.md lookup ==="
+OUT_014="$TMP_DIR/out-014"
+FILC_RELEASE_PUBLIC_COMMIT="$MOCK_PUBLIC_SHA" \
+  "$REPO_ROOT/scripts/package-release" "$MOCK_WORK" "$OUT_014" "0.1.4"
+grep -Fq "8553fcd026b9" "$OUT_014/RELEASE_NOTES.md"
+grep -Fq "<fenv.h>" "$OUT_014/RELEASE_NOTES.md"
+grep -Fq "semctl" "$OUT_014/RELEASE_NOTES.md"
+grep -Fq "prctl(PR_SET_NAME)" "$OUT_014/RELEASE_NOTES.md"
+grep -Fq "zero platform exclusions" "$OUT_014/RELEASE_NOTES.md"
+grep -Fq "<ucontext.h>" "$OUT_014/RELEASE_NOTES.md"
+grep -Fq "provenance" "$OUT_014/RELEASE_NOTES.md"
+grep -Fq "54/54 verified userland ports" "$OUT_014/RELEASE_NOTES.md"
+echo "VERSIONED RELEASE NOTES 0.1.4 LOOKUP OK"
+
+echo "=== [3/4] Leak-Gate negative test ==="
 LEAK_WORK="$TMP_DIR/leak-tc"
 LEAK_OUT="$TMP_DIR/leak-out"
 make_mock_toolchain "$LEAK_WORK" 1
 
-if "$REPO_ROOT/scripts/package-release" "$LEAK_WORK" "$LEAK_OUT" "0.0.0-leak" 2>/dev/null; then
+LEAK_ERR="$TMP_DIR/leak.stderr"
+if FILC_RELEASE_HIGHLIGHTS_FILE="$MOCK_HIGHLIGHTS" \
+  "$REPO_ROOT/scripts/package-release" "$LEAK_WORK" "$LEAK_OUT" "0.0.0-leak" > /dev/null 2>"$LEAK_ERR"; then
   echo "FAIL: package-release Leak-Gate should have rejected local path in binary strings" >&2
   exit 1
 fi
+grep -Fq "LEAK_GATE: FAIL" "$LEAK_ERR" || {
+  echo "FAIL: expected LEAK_GATE: FAIL stderr, got:" >&2
+  cat "$LEAK_ERR" >&2
+  exit 1
+}
 echo "LEAK-GATE REJECTION OK"
 
+echo "=== [4/4] Invalid input & missing/empty release-notes negative tests ==="
+BAD_SHA_ERR="$TMP_DIR/badsha.stderr"
 if FILC_RELEASE_PUBLIC_COMMIT="not-a-valid-sha" \
-  "$REPO_ROOT/scripts/package-release" "$MOCK_WORK" "$TMP_DIR/bad-sha-out" "0.0.0-badsha" 2>/dev/null; then
+  FILC_RELEASE_HIGHLIGHTS_FILE="$MOCK_HIGHLIGHTS" \
+  "$REPO_ROOT/scripts/package-release" "$MOCK_WORK" "$TMP_DIR/bad-sha-out" "0.0.0-badsha" >/dev/null 2>"$BAD_SHA_ERR"; then
   echo "FAIL: package-release should have rejected invalid FILC_RELEASE_PUBLIC_COMMIT" >&2
   exit 1
 fi
+grep -Fq "invalid FILC_RELEASE_PUBLIC_COMMIT" "$BAD_SHA_ERR"
 echo "INVALID PUBLIC COMMIT REJECTION OK"
+
+MISSING_ERR="$TMP_DIR/missing.stderr"
+if "$REPO_ROOT/scripts/package-release" "$MOCK_WORK" "$TMP_DIR/missing-notes-out" "0.0.0-no-notes" >/dev/null 2>"$MISSING_ERR"; then
+  echo "FAIL: package-release should have failed when release-notes/<VERSION>.md is missing" >&2
+  exit 1
+fi
+grep -Fq "missing release highlights file" "$MISSING_ERR"
+echo "MISSING RELEASE NOTES REJECTION OK"
+
+EMPTY_NOTES="$TMP_DIR/empty-highlights.md"
+printf '   \n\n' > "$EMPTY_NOTES"
+EMPTY_ERR="$TMP_DIR/empty.stderr"
+if FILC_RELEASE_HIGHLIGHTS_FILE="$EMPTY_NOTES" \
+  "$REPO_ROOT/scripts/package-release" "$MOCK_WORK" "$TMP_DIR/empty-notes-out" "0.0.0-empty" >/dev/null 2>"$EMPTY_ERR"; then
+  echo "FAIL: package-release should have failed on empty release highlights file" >&2
+  exit 1
+fi
+grep -Fq "release highlights file is empty" "$EMPTY_ERR"
+echo "EMPTY RELEASE NOTES REJECTION OK"
 echo "ALL PACKAGE-RELEASE TESTS PASSED"

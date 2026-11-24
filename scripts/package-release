@@ -7,8 +7,12 @@ set -euo pipefail
 # Usage: scripts/package-release <WORK_ROOT> <OUT_DIR> [VERSION]
 #
 # Environment:
-#   SOURCE_DATE_EPOCH  Fixed UNIX timestamp for reproducible tar entries
-#                      (defaults to HEAD commit timestamp)
+#   SOURCE_DATE_EPOCH            Fixed UNIX timestamp for reproducible tar entries
+#                                (defaults to HEAD commit timestamp)
+#   FILC_RELEASE_HIGHLIGHTS_FILE Optional override path for per-version release
+#                                highlights markdown (defaults to
+#                                release-notes/<VERSION>.md; missing or empty
+#                                file aborts packaging)
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../UPSTREAM
@@ -61,6 +65,25 @@ if [[ -n "$PUBLIC_COMMIT" && ! "$PUBLIC_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
   echo "error: invalid FILC_RELEASE_PUBLIC_COMMIT (expected 40-char lowercase hex SHA): $PUBLIC_COMMIT" >&2
   exit 1
 fi
+
+HIGHLIGHTS_FILE="${FILC_RELEASE_HIGHLIGHTS_FILE:-$REPO_ROOT/release-notes/${VERSION}.md}"
+if [[ ! -f "$HIGHLIGHTS_FILE" ]]; then
+  echo "error: missing release highlights file: $HIGHLIGHTS_FILE (add release-notes/${VERSION}.md before packaging)" >&2
+  exit 1
+fi
+HIGHLIGHTS_CONTENT="$(python3 - "$HIGHLIGHTS_FILE" <<'PY'
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8").strip()
+if not text:
+    sys.exit(1)
+print(text)
+PY
+)" || {
+  echo "error: release highlights file is empty: $HIGHLIGHTS_FILE" >&2
+  exit 1
+}
 
 ARCHIVE_STEM="filc-${VERSION}-${ARCH}-linux"
 ARCHIVE_NAME="${ARCHIVE_STEM}.tar.xz"
@@ -502,23 +525,34 @@ ${PUBLIC_COMMIT:+- \`filc-patches\` commit: \`${PUBLIC_COMMIT}\`
 }
 ## Highlights
 
-- **\`usermusl\` \`errno\` preservation:** \`src/stdio/__stdout_write.c\` saves and restores \`errno\` around \`zsys_ioctl(f->fd, TIOCGWINSZ, &wsz)\`, preventing non-TTY \`stdout\` writes from clobbering \`errno\` with \`ENOTTY\`.
-- **Centralized \`libtool\` and linker version-script support:** Clang driver rewrites both \`-Wl,--version-script\` and \`-Wl,-version-script\` (joined and separated forms, including anonymous \`{ global: ...; local: *; };\` scripts) via \`PizlonateVersionScript()\`, paired with \`pizlonated_\`-aware \`lt_cv_sys_global_symbol_pipe\`.
-- **Self-contained LLVM binutils:** \`llvm-ar\`, \`llvm-ranlib\`, and \`llvm-nm\` are built alongside \`clang\` and \`lld\`, bundled in this archive under \`build/bin/\` with top-level \`bin/\` wrappers, and required by \`scripts/build-port\` with no host \`ar\`/\`ranlib\`/\`nm\` fallbacks.
-- **54 verified userland ports** (24 unmodified upstream packages, 30 patched packages, 36 patches total), adding 7 new ports: \`libsodium 1.0.22\`, \`oniguruma 6.9.10\` (archived upstream since 2025; dedicated CVE monitoring required), \`jq 1.8.2\`, \`less 710\`, \`perl 5.40.5\`, \`nginx 1.30.8\`, and \`postgresql-client 18.7\`.
+${HIGHLIGHTS_CONTENT}
 
 ## Verification
 
-Tested directly from the unpacked archive in a fresh temporary directory
-without access to the build tree, plus a full 54/54 userland port sweep:
+### Release archive verification (\`scripts/test-release-archive\`)
 
+Tested directly from the unpacked archive in a fresh temporary directory
+without access to the build tree:
+
+- Archive integrity (\`MANIFEST\` SHA-256 verification, \`LICENSES/\`, \`NOTICE\`, \`PROVENANCE\`, and top-level \`bin/\` wrappers for \`clang\`, \`clang++\`, \`ld.lld\`, \`llvm-ar\`, \`llvm-ranlib\`, and \`llvm-nm\`)
+- \`./setup.sh\` host Linux kernel header symlink initialization
 - C Hello World compilation and execution
 - C++20 Hello World with \`libc++\` and exception handling
-- Out-of-Bounds memory-safety trap
-- Use-After-Free memory-safety trap
-- Computed-goto (\`indirectbr\`) runtime verification at \`-O0\` and \`-O2\`
-- Bundled \`llvm-ar\`, \`llvm-ranlib\`, and \`llvm-nm\` archive/symbol verification
-- Upstream package build and test (\`zlib\` and \`lua\` 5.4.7 with jump table) using only bundled toolchain binaries
+- Out-of-Bounds and Use-After-Free memory-safety traps
+- Computed-goto (\`indirectbr\` / \`BlockAddress\`) runtime verification at \`-O0\` and \`-O2\`
+- Upstream package build and test (\`zlib\` and \`lua\` 5.4.7 with computed-goto jump table) using only bundled toolchain binaries
+
+### Toolchain self-test (\`scripts/test-toolchain\`) and 54/54 userland port sweep
+
+Verified by the toolchain end-to-end self-test and full userland port sweep:
+
+- Shared-library \`-Wl,--version-script\` export filtering and safe \`-Wa\` assembler flag filtering
+- Clean compile-time rejection of unsupported constructs (\`__builtin_setjmp\`, \`__builtin_longjmp\`, reserved \`setjmp\` redefinition, non-zero address spaces, invalid module inline assembly, and runtime trap for \`asm goto\`)
+- \`<fenv.h>\` x87 and SSE rounding-mode and exception-flag tests
+- \`semctl(GETALL/SETALL)\` roundtrip and out-of-bounds memory-safety trap
+- \`prctl(PR_SET_NAME)\` TGID leader \`/proc/self/comm\` synchronization
+- \`<ucontext.h>\` multi-fiber GC stress test and fiber stack-overflow memory-safety trap
+- Full 54/54 userland port sweep, including \`perl 5.40.5\` with zero platform exclusions
 
 ## Known limitations
 

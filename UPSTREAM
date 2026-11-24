@@ -6,7 +6,7 @@ LLVM_COMMIT=5b10d2d74929eae78912771222c9855af97496f4
 
 FILC_REPO=https://github.com/pizlonator/fil-c.git
 FILC_BRANCH=deluge
-FILC_COMMIT=cede3de02b42b58a14acc9ce39c9894ab952a915
+FILC_COMMIT=8553fcd026b96295aea73fea9dcbe78ec43dc248
 FILC_REBASE_COMMIT=d292f5dbb951d549fc9b053950d5a330d532b361
 
 MUSL_REPO=https://git.musl-libc.org/git/musl

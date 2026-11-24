@@ -22,7 +22,7 @@ diff --git a/filc/include/pizlonated_math.h b/filc/include/pizlonated_math.h
 diff --git a/libpas/src/libpas/filc_runtime.c b/libpas/src/libpas/filc_runtime.c
 --- a/libpas/src/libpas/filc_runtime.c
 +++ b/libpas/src/libpas/filc_runtime.c
-@@ -16024,6 +16024,40 @@
+@@ -16022,6 +16022,40 @@
      return fetestexcept(excepts);
  }
  

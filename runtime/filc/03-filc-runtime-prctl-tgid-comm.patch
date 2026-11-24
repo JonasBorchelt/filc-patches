@@ -22,7 +22,7 @@ Upstream-Status: Upstream-Candidate
      pas_fence();
      thread->has_initialized = true;
      thread->tlc_node = verse_heap_get_thread_local_cache_node();
-@@ -12386,7 +12389,30 @@
+@@ -12384,7 +12387,30 @@
      case PR_SET_NAME: {
          filc_ptr name_ptr = filc_cc_cursor_get_next_ptr(my_thread, args);
          char* name = filc_check_and_get_tmp_str(my_thread, name_ptr);

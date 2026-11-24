@@ -6,11 +6,17 @@ set -eu
 # Usage:
 #   scripts/filc-pkg --toolchain-root /path/to/filc-0.1.3-x86_64-linux [--channel 0.1.3] [--base-url https://filc.connected.link] [--pubkey /path/to/pubkey.pub] install <pkg> [pkg...]
 
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+DEFAULT_PUBKEY="$SCRIPT_DIR/../ports/ports-pubkey.pub"
+
 BASE_URL="${FILC_PORTS_BASE_URL:-https://filc.connected.link}"
 TOOLCHAIN_ROOT="${FILC_TOOLCHAIN_ROOT:-}"
 CHANNEL="${FILC_PORTS_CHANNEL:-}"
 ARCH="x86_64-linux"
 PUBKEY_PATH="${FILC_PORTS_PUBKEY:-}"
+if [ -z "$PUBKEY_PATH" ] && [ -f "$DEFAULT_PUBKEY" ]; then
+  PUBKEY_PATH="$DEFAULT_PUBKEY"
+fi
 SKIP_SIG=0
 
 usage() {

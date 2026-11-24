@@ -8,10 +8,12 @@
 require "digest/sha2"
 require "json"
 require "net/http"
+require "open3"
 require "optparse"
 require "uri"
 
 module PortsUploader
+  DEFAULT_PUBKEY = File.expand_path("../ports/ports-pubkey.pub", __dir__)
   SHA256_RE = /\A[0-9a-f]{64}\z/
   CHANNEL_RE = /\A\d+\.\d+\.\d+(?:-[a-z0-9.]+)?\z/
   ARCH_RE = /\A(?:x86_64|aarch64)-linux\z/
@@ -50,7 +52,18 @@ module PortsUploader
     end
   end
 
-  def verify_channel_before_upload!(channel_dir, channel, arch)
+  def verify_minisign!(file_path, sig_path, pubkey_path)
+    raise "refusing upload: minisign public key not found: #{pubkey_path}" unless pubkey_path && File.file?(pubkey_path)
+
+    out, err, st = Open3.capture3("minisign", "-Vm", file_path, "-p", pubkey_path, "-x", sig_path)
+    return if st.success?
+
+    raise "minisign verification failed for #{File.basename(file_path)}: #{err.strip} #{out.strip}".strip
+  rescue Errno::ENOENT
+    raise "refusing upload: minisign binary not found in PATH for signature verification"
+  end
+
+  def verify_channel_before_upload!(channel_dir, channel, arch, pubkey_path: nil, verify_sig: true)
     index_path = File.join(channel_dir, "index.json")
     index_sig_path = File.join(channel_dir, "index.json.minisig")
     sums_path = File.join(channel_dir, "SHA256SUMS")
@@ -58,6 +71,11 @@ module PortsUploader
 
     [index_path, index_sig_path, sums_path, sums_sig_path].each do |req|
       raise "refusing upload: missing required channel file #{req}" unless File.file?(req)
+    end
+
+    if verify_sig
+      verify_minisign!(index_path, index_sig_path, pubkey_path)
+      verify_minisign!(sums_path, sums_sig_path, pubkey_path)
     end
 
     index_raw = File.read(index_path, encoding: "UTF-8")
@@ -162,12 +180,16 @@ module PortsUploader
   end
 
   def main(argv)
+    default_pub = ENV["FILC_PORTS_PUBKEY"].to_s.strip
+    default_pub = DEFAULT_PUBKEY if default_pub.empty? && File.file?(DEFAULT_PUBKEY)
     opts = {
       channel_dir: nil,
       channel: nil,
       arch: "x86_64-linux",
       base_url: ENV["FILC_PORTS_UPLOAD_URL"].to_s.strip,
       token_env: "FILC_PORTS_UPLOAD_TOKEN",
+      pubkey_path: default_pub.empty? ? nil : default_pub,
+      verify_sig: true,
       dry_run: false
     }
 
@@ -178,6 +200,8 @@ module PortsUploader
       o.on("--arch ARCH", "Target architecture (default: x86_64-linux)") { |v| opts[:arch] = v }
       o.on("--base-url URL", "filc-live base URL") { |v| opts[:base_url] = v }
       o.on("--token-env VAR", "Env var containing upload token (default: FILC_PORTS_UPLOAD_TOKEN)") { |v| opts[:token_env] = v }
+      o.on("--pubkey PATH", "Minisign public key file to verify channel signatures (default: ports/ports-pubkey.pub)") { |v| opts[:pubkey_path] = File.expand_path(v) }
+      o.on("--allow-unsigned-test", "Skip cryptographic minisign verification (unit tests only)") { opts[:verify_sig] = false }
       o.on("--dry-run", "Verify locally without uploading") { opts[:dry_run] = true }
     end
     parser.parse!(argv)
@@ -186,7 +210,10 @@ module PortsUploader
     raise ArgumentError, "--channel invalid" unless CHANNEL_RE.match?(opts[:channel].to_s)
     raise ArgumentError, "--arch invalid" unless ARCH_RE.match?(opts[:arch].to_s)
 
-    verified = verify_channel_before_upload!(opts[:channel_dir], opts[:channel], opts[:arch])
+    verified = verify_channel_before_upload!(
+      opts[:channel_dir], opts[:channel], opts[:arch],
+      pubkey_path: opts[:pubkey_path], verify_sig: opts[:verify_sig]
+    )
     if opts[:dry_run]
       puts "UPLOAD_PORTS: DRY_RUN OK channel=#{opts[:channel]} arch=#{opts[:arch]} packages=#{verified[:package_count]}"
       return 0

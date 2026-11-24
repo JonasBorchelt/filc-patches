@@ -199,12 +199,18 @@ port = srv.addr[1]
 File.write(port_file, "#{port}\n")
 
 def send_msg(sock, tag, body)
-  sock.write(tag + [4 + body.bytesize].pack("N") + body)
+  b = body.b
+  sock.write(tag.b + [4 + b.bytesize].pack("N") + b)
+end
+
+def send_param(sock, name, value)
+  send_msg(sock, "S", [name, value, ""].join("\x00"))
 end
 
 loop do
   sock = srv.accept
   begin
+    sock.binmode
     hdr = sock.read(8)
     next unless hdr && hdr.bytesize == 8
     len, code = hdr.unpack("NN")
@@ -217,10 +223,10 @@ loop do
     sock.read(len - 8) if len > 8
 
     send_msg(sock, "R", [0].pack("N"))
-    send_msg(sock, "S", "server_version\018.7\0")
-    send_msg(sock, "S", "standard_conforming_strings\0on\0")
-    send_msg(sock, "S", "client_encoding\0UTF8\0")
-    send_msg(sock, "S", "server_encoding\0UTF8\0")
+    send_param(sock, "server_version", "18.7")
+    send_param(sock, "standard_conforming_strings", "on")
+    send_param(sock, "client_encoding", "UTF8")
+    send_param(sock, "server_encoding", "UTF8")
     send_msg(sock, "K", [12345, 67890].pack("NN"))
     send_msg(sock, "Z", "I")
 
@@ -231,10 +237,10 @@ loop do
       mlen = mlen_raw.unpack1("N")
       sock.read(mlen - 4) if mlen > 4
       if tag == "Q"
-        col = "answer\0" + [0, 0, 23, 4, -1, 0].pack("NnNs>l>n")
+        col = "answer\x00".b + [0, 0, 23, 4, -1, 0].pack("NnNs>l>n")
         send_msg(sock, "T", [1].pack("n") + col)
-        send_msg(sock, "D", [1, 2].pack("nN") + "42")
-        send_msg(sock, "C", "SELECT 1\0")
+        send_msg(sock, "D", [1, 2].pack("nN") + "42".b)
+        send_msg(sock, "C", "SELECT 1\x00".b)
         send_msg(sock, "Z", "I")
       end
     end

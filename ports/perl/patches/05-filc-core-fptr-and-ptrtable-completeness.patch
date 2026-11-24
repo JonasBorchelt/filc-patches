@@ -1,6 +1,6 @@
 Subject: Preserve Fil-C capabilities across DPTR2FPTR/FPTR2DPTR, core ptrtable pairs, and zsetproctitle
 Policy-Class: P4-Audit
-Rationale: Project-authored core capability completeness patch covering 7 Perl 5.40.5 core locations: (1) perl.h:2536-2537 DPTR2FPTR/FPTR2DPTR replaced with direct ((t)(p)) casts (no PTR2nat integer round-trip) preserving function-pointer capabilities in op.c:14756,14847 (cv_get/set_call_checker_flags), sv.c:15368-15377, and toke.c; (2) op.c:15326,15406,15480 Perl_custom_op_register/get_field/free XOP* via Perl_xsub_ptrtable; (3) op.c:4670 and op.h:858-860 Perl_blockhook_register/CALL_BLOCK_HOOKS BHK* via Perl_xsub_ptrtable; (4) mro_core.c:127,140 Perl_mro_register/get_from_name struct mro_alg* via Perl_xsub_ptrtable; (5) scope.c:1950,1977 Perl_mortal_svfunc_x/S_call_freedestruct SVFUNC_t via Perl_xsub_ptrtable; (6) op.c:1373,8714 and mg.c:2337 dbline COP* breakpoints via Perl_xsub_ptrtable; (7) mg.c:2966 S_set_dollarzero calls zsetproctitle(s) (<stdfil.h:897>) so assigning $0 updates the real kernel /proc/self/cmdline buffer rather than only Fil-C's GC heap copy of argv[0].
+Rationale: Project-authored core capability completeness patch covering 7 Perl 5.40.5 core locations: (1) perl.h:2536-2537 DPTR2FPTR/FPTR2DPTR replaced with direct ((t)(p)) casts (no PTR2nat integer round-trip) preserving function-pointer capabilities in op.c:14756,14847 (cv_get/set_call_checker_flags), sv.c:15368-15377, and toke.c; (2) op.c:15326,15406,15480 Perl_custom_op_register/get_field/free XOP* via zexact_ptrtable (preserving both capabilities and exact pointer-integer identity checked by ext/XS-APItest/t/customop.t); (3) op.c:4670 and op.h:858-860 Perl_blockhook_register/CALL_BLOCK_HOOKS BHK* via Perl_xsub_ptrtable; (4) mro_core.c:127,140 Perl_mro_register/get_from_name struct mro_alg* via Perl_xsub_ptrtable; (5) scope.c:1950,1977 Perl_mortal_svfunc_x/S_call_freedestruct SVFUNC_t via Perl_xsub_ptrtable; (6) op.c:1373,8714 and mg.c:2337 dbline COP* breakpoints via Perl_xsub_ptrtable; (7) mg.c:2966 S_set_dollarzero calls zsetproctitle(s) (<stdfil.h:897>) so assigning $0 updates the real kernel /proc/self/cmdline buffer rather than only Fil-C's GC heap copy of argv[0].
 Upstream-Status: Fil-C-Specific
 Fil-C-Origin-Commits: none
 
@@ -60,30 +60,45 @@ Fil-C-Origin-Commits: none
              }
          }
      }
-@@ -15323,7 +15323,7 @@
+@@ -15316,6 +15316,14 @@
+ 
+ /* use PERL_MAGIC_ext to call a function to free the xop structure when
+  * freeing PL_custom_ops */
++
++static zexact_ptrtable* custom_op_ptrtable;
++
++static void construct_custom_op_ptrtable(void) __attribute__((constructor));
++static void construct_custom_op_ptrtable(void)
++{
++    custom_op_ptrtable = zexact_ptrtable_new();
++}
+ 
+ static int
+ custom_op_register_free(pTHX_ SV *sv, MAGIC *mg)
+@@ -15323,7 +15331,7 @@
      XOP *xop;
  
      PERL_UNUSED_ARG(mg);
 -    xop = INT2PTR(XOP *, SvIV(sv));
-+    xop = (XOP *)zptrtable_decode(Perl_xsub_ptrtable, SvIV(sv));
++    xop = (XOP *)zexact_ptrtable_decode(custom_op_ptrtable, SvIV(sv));
      Safefree(xop->xop_name);
      Safefree(xop->xop_desc);
      Safefree(xop);
-@@ -15403,7 +15403,7 @@
+@@ -15403,7 +15411,7 @@
          if (!he)
              xop = (XOP *)&xop_null;
          else
 -            xop = INT2PTR(XOP *, SvIV(HeVAL(he)));
-+            xop = (XOP *)zptrtable_decode(Perl_xsub_ptrtable, SvIV(HeVAL(he)));
++            xop = (XOP *)zexact_ptrtable_decode(custom_op_ptrtable, SvIV(HeVAL(he)));
      }
  
      {
-@@ -15477,7 +15477,7 @@
+@@ -15477,7 +15485,7 @@
      if (!PL_custom_ops)
          PL_custom_ops = newHV();
  
 -    if (!hv_store_ent(PL_custom_ops, keysv, newSViv(PTR2IV(xop)), 0))
-+    if (!hv_store_ent(PL_custom_ops, keysv, newSViv(zptrtable_encode(Perl_xsub_ptrtable, (void*)xop)), 0))
++    if (!hv_store_ent(PL_custom_ops, keysv, newSViv(zexact_ptrtable_encode(custom_op_ptrtable, (void*)xop)), 0))
          Perl_croak(aTHX_ "panic: can't register custom OP %s", xop->xop_name);
  }
  

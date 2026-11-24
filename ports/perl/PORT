@@ -74,10 +74,14 @@ port_test() {
     die "encode" unless length($u) == 5;
     print "PERL_FILC_SMOKE_OK\n";
   ' | grep -Fxq 'PERL_FILC_SMOKE_OK'
+  # Prepend /usr/bin:/bin so t/op/magic.t's `env` uses standard host env rather
+  # than staged GNU coreutils 9.12 env (which defaults to shell-quoting values
+  # when QUOTING_STYLE is unset, even on pipes; magic.t clears %ENV first).
+  local test_path="/usr/bin:/bin:$PATH"
   local harness_log="$SRC_DIR/.filc-test-harness.log"
   local rc=0
   set +e
-  TEST_JOBS="$JOBS" make test_harness 2>&1 | tee "$harness_log"
+  PATH="$test_path" TEST_JOBS="$JOBS" make test_harness 2>&1 | tee "$harness_log"
   rc=${PIPESTATUS[0]}
   set -e
 
@@ -153,9 +157,8 @@ puts "=== PERL FAILURE DIAGNOSTICS ==="
 puts "failing_test_files=#{failed.length} unexpected_failures=#{unexpected.length} excluded_platform=#{excluded.length}"
 t_dir = File.join(src_dir, "t")
 unexpected.first(200).each do |tpath, wstat|
-  rel = File.exist?(File.join(t_dir, tpath)) ? tpath : "../#{tpath}"
-  cmd = ["timeout", "--foreground", "90", "./perl", "-I../lib", rel]
-  out, st = Open3.capture2e({ "PERL_CORE" => "1" }, *cmd, chdir: t_dir)
+  cmd = ["timeout", "--foreground", "120", "./perl", "harness", "-v", tpath]
+  out, st = Open3.capture2e({ "PERL_CORE" => "1", "PATH" => "/usr/bin:/bin:#{ENV['PATH']}" }, *cmd, chdir: t_dir)
   ol = out.force_encoding("UTF-8").encode("UTF-8", invalid: :replace, undef: :replace).lines.map(&:chomp)
   puts "DIAG #{tpath} wstat=#{wstat} rerun_rc=#{st.exitstatus}"
   hdr_i = ol.index { |l| /\bfilc\b[^\n]*\berror:/i.match?(l) }

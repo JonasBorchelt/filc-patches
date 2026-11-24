@@ -497,6 +497,7 @@ without access to the build tree:
 - **SysV IPC bulk semaphore operations:** \`semctl(GETALL)\` and \`semctl(SETALL)\` return \`ENOSYS\` in the pinned Fil-C runtime (\`filc_runtime.c\`).
 - **Process thread name (\`ps hc\` / \`prctl(PR_SET_NAME)\`):** Fil-C executes \`main()\` on a worker pthread while the Linux TGID leader stays parked in \`pause()\` (\`filc_start_program.c\`), so \`ps hc\` displays the TGID leader's \`comm\` name; \`/proc/self/cmdline\` (\`ps h\`) is updated via \`zsetproctitle()\`.
 - **Pointer serialization/synthesis (e.g. Perl \`pack\`/\`unpack\` \`p\`/\`P\` with byte-swapping, UTF-8 re-encoding, or integer pointer arithmetic):** Forging or byte-mangling pointers via raw integers/bytes strips Fil-C capabilities by design and traps under InvisiCaps.
+- **PostgreSQL (\`postgresql-client\`):** Client tools (\`psql\`, \`pg_dump\`, \`pg_restore\`, \`pg_isready\`, \`pg_config\`) and \`libpq\` only; the PostgreSQL server is not supported under Fil-C (\`Datum\` carries pointers as integers).
 
 ## Quickstart
 

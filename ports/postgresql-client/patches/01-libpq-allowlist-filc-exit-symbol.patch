@@ -1,0 +1,17 @@
+Subject: Allowlist filc_allocate_without_exiting in libpq-refs-stamp nm check
+Policy-Class: P2-Package
+Rationale: PostgreSQL's libpq-refs-stamp target runs `nm -A -u libpq.so | grep exit` to verify libpq does not call exit(), already allowlisting __cxa_atexit and __tsan_func_exit. Fil-C runtime emits undefined references to the allocator helper filc_allocate_without_exiting (which does not invoke exit), causing a false positive unless allowlisted.
+Upstream-Status: Upstreamable
+Fil-C-Origin-Commits: b9652937de5a
+
+--- a/src/interfaces/libpq/Makefile
++++ b/src/interfaces/libpq/Makefile
+@@ -144,7 +144,7 @@
+ libpq-refs-stamp: $(shlib)
+ ifneq ($(enable_coverage), yes)
+ ifeq (,$(filter solaris,$(PORTNAME)))
+-	@if nm -A -u $< 2>/dev/null | grep -v -e __cxa_atexit -e __tsan_func_exit | grep exit; then \
++	@if nm -A -u $< 2>/dev/null | grep -v -e __cxa_atexit -e __tsan_func_exit -e filc_allocate_without_exiting | grep exit; then \
+ 		echo 'libpq must not be calling any function which invokes exit'; exit 1; \
+ 	fi
+ endif

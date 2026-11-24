@@ -1,0 +1,263 @@
+NAME="postgresql-client"
+VERSION="18.7"
+LICENSE="PostgreSQL"
+UPSTREAM_URL="https://ftp.postgresql.org/pub/source/v18.7/postgresql-18.7.tar.bz2"
+UPSTREAM_SHA256="441dfae4280cae3e0425e5f876f80559fb0731c140f1aae22b3e5a54d0411bfd"
+UPSTREAM_SHA256_SOURCE="sha256:https://ftp.postgresql.org/pub/source/v18.7/postgresql-18.7.tar.bz2.sha256"
+EXTRACT_DIR="postgresql-18.7"
+TIER=4
+DEPS="libedit lz4 openssl pkgconf zlib zstd"
+BUILD_SYSTEM="custom"
+CONFIGURE_ARGS=""
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P2-Package"
+POLICY_RATIONALE="PostgreSQL 18.7 client tools and libpq only; the PostgreSQL server is not supported under Fil-C (Datum carries pointers as integers). Builds libpq, libpq.pc, headers, pg_config, psql, pg_dump, pg_restore, pg_dumpall, pg_isready, and frontend scripts against staged openssl, libedit, zlib, lz4, and zstd. Carries only the 1-line upstream Fil-C patch (b9652937de5a) allowing filc_allocate_without_exiting in libpq-refs-stamp's nm check, plus P3-BuildOpt configure cache variables disabling -fvisibility=hidden (so PizlonateVersionScript exports exports.list) and selecting portable C popcount and slicing-by-8 CRC32C."
+FILC_ORIGIN_REF="cede3de02b42:projects/postgresql.projeny"
+
+port_configure() {
+  CPPFLAGS="-I$PIZFIX/include -I$PIZFIX/include/ncursesw" \
+  LDFLAGS="-L$PIZFIX/lib" \
+  PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" \
+  pgac_cv_prog_CC_cflags__fvisibility_hidden=no \
+  pgac_cv_prog_CXX_cxxflags__fvisibility_hidden=no \
+  pgac_cv_have_x86_64_popcntq=no \
+  pgac_cv_avx512_popcnt_intrinsics=no \
+  pgac_cv_sse42_crc32_intrinsics=no \
+  ./configure \
+    --prefix="$PIZFIX" \
+    --with-ssl=openssl \
+    --with-readline \
+    --with-libedit-preferred \
+    --with-zlib \
+    --with-lz4 \
+    --with-zstd \
+    --without-icu \
+    --without-libxml
+}
+
+port_build() {
+  # src/port builds server variants of some files that depend on generated
+  # backend headers, so generate those headers first to avoid parallel races.
+  make -j"$JOBS" -C src/backend submake-generated-headers
+  make -j"$JOBS" -C src/port
+  make -j"$JOBS" -C src/common
+  make -j"$JOBS" -C src/fe_utils
+  make -j"$JOBS" -C src/interfaces/libpq
+  make -j"$JOBS" -C src/interfaces/libpq test-build
+  make -j"$JOBS" -C src/bin/pg_config
+  make -j"$JOBS" -C src/bin/psql
+  make -j"$JOBS" -C src/bin/pg_dump
+  make -j"$JOBS" -C src/bin/scripts
+}
+
+port_install() {
+  make -C src/include install
+  make -C src/interfaces/libpq install
+  make -C src/bin/pg_config install
+  make -C src/bin/psql install
+  make -C src/bin/pg_dump install
+  make -C src/bin/scripts install
+}
+
+port_test() {
+  local ver
+  ver="$("$PIZFIX/bin/pg_config" --version)"
+  echo "pg_config --version: $ver"
+  echo "$ver" | grep -q 'PostgreSQL 18\.7'
+  "$PIZFIX/bin/psql" --version | grep -q '18\.7'
+  "$PIZFIX/bin/pg_dump" --version | grep -q '18\.7'
+  "$PIZFIX/bin/pg_restore" --version | grep -q '18\.7'
+  "$PIZFIX/bin/pg_dumpall" --version | grep -q '18\.7'
+  "$PIZFIX/bin/pg_isready" --version | grep -q '18\.7'
+
+  # Upstream libpq test binaries: OpenSSL backend and URI parser regression
+  "$SRC_DIR/src/interfaces/libpq/test/libpq_testclient" --ssl | grep -Fxq 'OpenSSL'
+  local uri_out
+  uri_out="$("$SRC_DIR/src/interfaces/libpq/test/libpq_uri_regress" "postgresql://alice:secret@127.0.0.1:5432/appdb?sslmode=require&connect_timeout=5")"
+  echo "uri_regress: $uri_out"
+  echo "$uri_out" | grep -q "user='alice'"
+  echo "$uri_out" | grep -q "dbname='appdb'"
+  echo "$uri_out" | grep -q "sslmode='require'"
+  echo "$uri_out" | grep -q '(inet)'
+
+  # Compile and run a Fil-C C integration test linked via pkg-config libpq
+  local td
+  td="$(mktemp -d)"
+  cat > "$td/test_libpq.c" <<'EOF'
+#include <libpq-fe.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(int argc, char **argv) {
+  int ver = PQlibVersion();
+  if (ver < 180007) {
+    fprintf(stderr, "unexpected PQlibVersion: %d\n", ver);
+    return 1;
+  }
+  const char *ssllib = PQsslAttribute(NULL, "library");
+  if (!ssllib || strcmp(ssllib, "OpenSSL") != 0) {
+    fprintf(stderr, "unexpected PQsslAttribute(library): %s\n", ssllib ? ssllib : "(null)");
+    return 2;
+  }
+
+  /* Bytea escape / unescape binary round-trip including NUL bytes */
+  const unsigned char raw[] = { 0x00, 0x01, 0x27, 0x5c, 0x7f, 0x80, 0xff };
+  size_t esc_len = 0, unesc_len = 0;
+  unsigned char *esc = PQescapeBytea(raw, sizeof(raw), &esc_len);
+  if (!esc || esc_len == 0) {
+    fprintf(stderr, "PQescapeBytea failed\n");
+    return 3;
+  }
+  unsigned char *unesc = PQunescapeBytea(esc, &unesc_len);
+  PQfreemem(esc);
+  if (!unesc || unesc_len != sizeof(raw) || memcmp(raw, unesc, sizeof(raw)) != 0) {
+    fprintf(stderr, "PQunescapeBytea round-trip mismatch\n");
+    return 4;
+  }
+  PQfreemem(unesc);
+
+  /* Live PostgreSQL v3 wire-protocol round-trip against loopback mock server */
+  if (argc != 2) {
+    fprintf(stderr, "missing port argument\n");
+    return 5;
+  }
+  char conninfo[256];
+  snprintf(conninfo, sizeof(conninfo),
+           "host=127.0.0.1 port=%s user=filctest dbname=filcdb sslmode=prefer connect_timeout=5",
+           argv[1]);
+  PGconn *conn = PQconnectdb(conninfo);
+  if (!conn || PQstatus(conn) != CONNECTION_OK) {
+    fprintf(stderr, "PQconnectdb failed: %s\n", conn ? PQerrorMessage(conn) : "(null)");
+    if (conn) PQfinish(conn);
+    return 6;
+  }
+  if (PQserverVersion(conn) != 180007 || PQbackendPID(conn) != 12345) {
+    fprintf(stderr, "unexpected serverVersion=%d backendPID=%d\n",
+            PQserverVersion(conn), PQbackendPID(conn));
+    PQfinish(conn);
+    return 7;
+  }
+
+  /* Exercise SCRAM-SHA-256 password hashing (OpenSSL crypto path in libpq) */
+  char *scram = PQencryptPasswordConn(conn, "s3cr3t", "filctest", "scram-sha-256");
+  if (!scram || strncmp(scram, "SCRAM-SHA-256$4096:", 19) != 0) {
+    fprintf(stderr, "PQencryptPasswordConn(scram-sha-256) failed: %s\n", scram ? scram : "(null)");
+    if (scram) PQfreemem(scram);
+    PQfinish(conn);
+    return 8;
+  }
+  PQfreemem(scram);
+
+  PGresult *res = PQexec(conn, "SELECT 42 AS answer;");
+  if (!res || PQresultStatus(res) != PGRES_TUPLES_OK ||
+      PQntuples(res) != 1 || PQnfields(res) != 1 ||
+      strcmp(PQfname(res, 0), "answer") != 0 ||
+      strcmp(PQgetvalue(res, 0, 0), "42") != 0) {
+    fprintf(stderr, "PQexec query verification failed\n");
+    if (res) PQclear(res);
+    PQfinish(conn);
+    return 9;
+  }
+  PQclear(res);
+  PQfinish(conn);
+  puts("LIBPQ_FILC_LIVE_OK");
+  return 0;
+}
+EOF
+
+  local pc_cflags pc_libs
+  pc_cflags="$(PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" "$PIZFIX/bin/pkg-config" --cflags libpq)"
+  pc_libs="$(PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" "$PIZFIX/bin/pkg-config" --libs libpq)"
+  # shellcheck disable=SC2086
+  "$CC" -O2 $pc_cflags "$td/test_libpq.c" $pc_libs -Wl,-rpath,"$PIZFIX/lib" -o "$td/test_libpq"
+
+  # Launch a minimal PostgreSQL v3 wire-protocol loopback server for live tests
+  cat > "$td/mock_pg.rb" <<'RB'
+require "socket"
+
+port_file = ARGV[0]
+srv = TCPServer.new("127.0.0.1", 0)
+port = srv.addr[1]
+File.write(port_file, "#{port}\n")
+
+def send_msg(sock, tag, body)
+  sock.write(tag + [4 + body.bytesize].pack("N") + body)
+end
+
+loop do
+  sock = srv.accept
+  begin
+    hdr = sock.read(8)
+    next unless hdr && hdr.bytesize == 8
+    len, code = hdr.unpack("NN")
+    if len == 8 && code == 80877103
+      sock.write("N")
+      hdr = sock.read(8)
+      next unless hdr && hdr.bytesize == 8
+      len, code = hdr.unpack("NN")
+    end
+    sock.read(len - 8) if len > 8
+
+    send_msg(sock, "R", [0].pack("N"))
+    send_msg(sock, "S", "server_version\018.7\0")
+    send_msg(sock, "S", "client_encoding\0UTF8\0")
+    send_msg(sock, "S", "server_encoding\0UTF8\0")
+    send_msg(sock, "K", [12345, 67890].pack("NN"))
+    send_msg(sock, "Z", "I")
+
+    while (tag = sock.read(1))
+      break if tag == "X"
+      mlen_raw = sock.read(4)
+      break unless mlen_raw && mlen_raw.bytesize == 4
+      mlen = mlen_raw.unpack1("N")
+      sock.read(mlen - 4) if mlen > 4
+      if tag == "Q"
+        col = "answer\0" + [0, 0, 23, 4, -1, 0].pack("NnNs>l>n")
+        send_msg(sock, "T", [1].pack("n") + col)
+        send_msg(sock, "D", [1, 2].pack("nN") + "42")
+        send_msg(sock, "C", "SELECT 1\0")
+        send_msg(sock, "Z", "I")
+      end
+    end
+  rescue IOError, Errno::EPIPE, Errno::ECONNRESET
+    nil
+  ensure
+    sock.close unless sock.closed?
+  end
+end
+RB
+
+  ruby "$td/mock_pg.rb" "$td/port" &
+  local srv_pid=$!
+  local i port=""
+  for i in $(seq 1 50); do
+    if [ -s "$td/port" ]; then
+      port="$(tr -d ' \n' < "$td/port")"
+      break
+    fi
+    sleep 0.1
+  done
+  if [ -z "$port" ]; then
+    kill "$srv_pid" 2>/dev/null || true
+    rm -rf "$td"
+    echo "mock_pg server failed to start" >&2
+    return 1
+  fi
+
+  local rc=0
+  "$td/test_libpq" "$port" | grep -Fxq 'LIBPQ_FILC_LIVE_OK' || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    "$PIZFIX/bin/pg_isready" -h 127.0.0.1 -p "$port" || rc=$?
+  fi
+  if [ "$rc" -eq 0 ]; then
+    "$PIZFIX/bin/psql" -h 127.0.0.1 -p "$port" -U filctest -d filcdb -tA -c "SELECT 42 AS answer;" | grep -Fxq '42' || rc=$?
+  fi
+
+  kill "$srv_pid" 2>/dev/null || true
+  wait "$srv_pid" 2>/dev/null || true
+  rm -rf "$td"
+  return "$rc"
+}

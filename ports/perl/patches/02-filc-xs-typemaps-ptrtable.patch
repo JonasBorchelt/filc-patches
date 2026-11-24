@@ -1,6 +1,6 @@
 Subject: Use Perl_xsub_ptrtable in XS typemaps and core extensions for Fil-C capabilities
 Policy-Class: P4-Audit
-Rationale: Adopted and decomposed from pinned Fil-C (cede3de02b42:projects/perl-5.40.0). Standard XS typemaps and core extensions (Encode, Storable, threads, threads::shared, B, DynaLoader, re, Compress::Raw::Zlib) convert C pointers to Perl IVs via PTR2IV/INT2PTR. Routing these conversions through Perl_xsub_ptrtable (zptrtable_encode/zptrtable_decode) preserves Fil-C pointer capabilities across XS boundaries.
+Rationale: Adopted and decomposed from pinned Fil-C (cede3de02b42:projects/perl-5.40.0) and extended for Perl 5.40.5 test completeness. Standard XS typemaps (including T_REF_IV_REF, T_REF_IV_PTR, T_PTRDESC, T_REFREF, T_REFOBJ) and core extensions (Encode, Storable, threads, threads::shared, B, DynaLoader, re, Compress::Raw::Zlib) convert C pointers to Perl IVs via PTR2IV/INT2PTR. Routing pointer conversions through zptrtable_encode/zptrtable_decode preserves Fil-C capabilities across XS boundaries, while B.xs get_overlay_object matches encoded overlay keys and OP_ARGELEM preserves its integer op_aux index via PTR2IV.
 Upstream-Status: Fil-C-Specific
 Fil-C-Origin-Commits: b14fce6d8d8a
 
@@ -20,12 +20,57 @@ Fil-C-Origin-Commits: b14fce6d8d8a
  	}
  	else
  	    Perl_croak_nocontext(\"%s: %s is not a reference\",
+@@ -215,7 +215,7 @@
+ T_REF_IV_REF
+ 	if (sv_isa($arg, \"${ntype}\")) {
+ 	    IV tmp = SvIV((SV*)SvRV($arg));
+-	    $var = *INT2PTR($type *, tmp);
++	    $var = *(($type *)zptrtable_decode(Perl_xsub_ptrtable, tmp));
+ 	}
+ 	else {
+ 		const char* refstr = SvROK($arg) ? \"\" : SvOK($arg) ? \"scalar \" : \"undef\";
+@@ -228,7 +228,7 @@
+ T_REF_IV_PTR
+ 	if (sv_isa($arg, \"${ntype}\")) {
+ 	    IV tmp = SvIV((SV*)SvRV($arg));
+-	    $var = INT2PTR($type, tmp);
++	    $var = zptrtable_decode(Perl_xsub_ptrtable, tmp);
+ 	}
+ 	else {
+ 		const char* refstr = SvROK($arg) ? \"\" : SvOK($arg) ? \"scalar \" : \"undef\";
 @@ -241,7 +241,7 @@
  T_PTROBJ
  	if (SvROK($arg) && sv_derived_from($arg, \"${ntype}\")) {
  	    IV tmp = SvIV((SV*)SvRV($arg));
 -	    $var = INT2PTR($type,tmp);
 +	    $var = zptrtable_decode(Perl_xsub_ptrtable, tmp);
+ 	}
+ 	else {
+ 		const char* refstr = SvROK($arg) ? \"\" : SvOK($arg) ? \"scalar \" : \"undef\";
+@@ -254,7 +254,7 @@
+ T_PTRDESC
+ 	if (sv_isa($arg, \"${ntype}\")) {
+ 	    IV tmp = SvIV((SV*)SvRV($arg));
+-	    ${type}_desc = (\U${type}_DESC\E*) tmp;
++	    ${type}_desc = (\U${type}_DESC\E*) zptrtable_decode(Perl_xsub_ptrtable, tmp);
+ 	    $var = ${type}_desc->ptr;
+ 	}
+ 	else {
+@@ -268,7 +268,7 @@
+ T_REFREF
+ 	if (SvROK($arg)) {
+ 	    IV tmp = SvIV((SV*)SvRV($arg));
+-	    $var = *INT2PTR($type,tmp);
++	    $var = *(($type)zptrtable_decode(Perl_xsub_ptrtable, tmp));
+ 	}
+ 	else
+ 	    Perl_croak_nocontext(\"%s: %s is not a reference\",
+@@ -277,7 +277,7 @@
+ T_REFOBJ
+ 	if (sv_isa($arg, \"${ntype}\")) {
+ 	    IV tmp = SvIV((SV*)SvRV($arg));
+-	    $var = *INT2PTR($type,tmp);
++	    $var = *(($type)zptrtable_decode(Perl_xsub_ptrtable, tmp));
  	}
  	else {
  		const char* refstr = SvROK($arg) ? \"\" : SvOK($arg) ? \"scalar \" : \"undef\";
@@ -320,6 +365,15 @@ Fil-C-Origin-Commits: b14fce6d8d8a
      return opsv;
  }
  
+@@ -124,7 +124,7 @@
+     sv = SvRV(sv);
+     if (SvTYPE(sv) != SVt_PVHV)
+ 	return NULL;
+-    key = newSViv(PTR2IV(o));
++    key = newSViv(zptrtable_encode(Perl_xsub_ptrtable, (void*)o));
+     he = hv_fetch_ent((HV*)sv, key, 0, 0);
+     SvREFCNT_dec(key);
+     if (!he)
 @@ -159,7 +159,7 @@
      }
      if (!type) {
@@ -392,24 +446,6 @@ Fil-C-Origin-Commits: b14fce6d8d8a
  		break;
  	    case 52: /* B::OP::parent */
  #ifdef PERL_OP_PARENT
-@@ -1175,7 +1175,7 @@
- 
-         case OP_ARGELEM:
-             ret = sv_2mortal(Perl_newSVpvf(aTHX_ "%" IVdf,
--                            PTR2IV(aux)));
-+                                           zptrtable_encode(Perl_xsub_ptrtable, aux)));
-             break;
- 
-         case OP_ARGCHECK:
-@@ -1216,7 +1216,7 @@
-             XSRETURN(0); /* by default, an empty list */
- 
-         case OP_ARGELEM:
--            XPUSHs(sv_2mortal(newSViv(PTR2IV(aux))));
-+            XPUSHs(sv_2mortal(newSViv(zptrtable_encode(Perl_xsub_ptrtable, aux))));
-             XSRETURN(1);
-             break;
- 
 @@ -1643,7 +1643,7 @@
  		PUSHu(RX_COMPFLAGS(sv));
  	    else

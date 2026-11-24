@@ -13,7 +13,7 @@ MAKE_ARGS=""
 INSTALL_ARGS=""
 TEST_CMD=""
 POLICY_CLASS="P4-Audit"
-POLICY_RATIONALE="Adopted from pinned Fil-C (cede3de02b42:projects/perl-5.40.0 + build_perl.sh), refreshed cleanly to latest 5.40.x security release 5.40.5 (0 fuzz, 0 offset), and decomposed into 3 thematic patches (20 files, +153/-84): (01) core zptrtable/rxres/repeatcpy, (02) XS typemaps and core extensions ptrtable routing, (03) doio.c DIR ptrtable and mg.c prctl pointer preservation. Configures with -Uusenm (compile-probe libc checks instead of nm/ar scanning of libc.so) and drops Fil-C ad-hoc fil-tests/ scripts in favor of the upstream Perl test suite (make test_harness) plus core module smoke checks."
+POLICY_RATIONALE="Adopted from pinned Fil-C (cede3de02b42:projects/perl-5.40.0 + build_perl.sh), refreshed cleanly to latest 5.40.x security release 5.40.5 (0 fuzz, 0 offset), and decomposed into 3 thematic patches (20 files): (01) core zptrtable/rxres/repeatcpy, (02) XS typemaps (including T_REF_IV_REF/T_REF_IV_PTR/T_PTRDESC/T_REFREF/T_REFOBJ) and core extensions ptrtable routing (with B.xs get_overlay_object encoded and OP_ARGELEM integer op_aux preserved), (03) doio.c DIR ptrtable and mg.c prctl pointer preservation. Configures with -Uusenm (compile-probe libc checks instead of nm/ar scanning of libc.so) and runs the upstream Perl test suite (make test_harness) plus core module smoke checks."
 FILC_ORIGIN_REF="cede3de02b42:projects/perl-5.40.0"
 
 port_configure() {
@@ -74,5 +74,92 @@ port_test() {
     die "encode" unless length($u) == 5;
     print "PERL_FILC_SMOKE_OK\n";
   ' | grep -Fxq 'PERL_FILC_SMOKE_OK'
-  TEST_JOBS="$JOBS" make test_harness
+  local harness_log="$SRC_DIR/.filc-test-harness.log"
+  local rc=0
+  set +e
+  TEST_JOBS="$JOBS" make test_harness 2>&1 | tee "$harness_log"
+  rc=${PIPESTATUS[0]}
+  set -e
+  if [[ "$rc" -ne 0 ]]; then
+    ruby - "$SRC_DIR" "$harness_log" <<'RB' || true
+require "open3"
+
+src_dir, log_path = ARGV
+lines = File.binread(log_path).force_encoding("UTF-8").encode("UTF-8", invalid: :replace, undef: :replace).lines.map(&:chomp)
+sidx = lines.rindex { |l| /\ATest Summary Report\b/.match?(l) }
+failed = []
+if sidx
+  lines[(sidx + 1)..].each do |ln|
+    break if /\AFiles=\d+/.match?(ln)
+    if (m = /\A(\S+\.t)\s+\(Wstat:\s+(\d+)(?:[^)]*)\)/.match(ln))
+      failed << [m[1], m[2].to_i]
+    end
+  end
+end
+
+puts "=== PERL FAILURE DIAGNOSTICS ==="
+puts "failing_test_files=#{failed.length}"
+t_dir = File.join(src_dir, "t")
+failed.first(45).each do |tpath, wstat|
+  rel = File.exist?(File.join(t_dir, tpath)) ? tpath : "../#{tpath}"
+  cmd = ["timeout", "--foreground", "20", "./perl", "-I../lib", rel]
+  out, st = Open3.capture2e({ "PERL_CORE" => "1" }, *cmd, chdir: t_dir)
+  ol = out.force_encoding("UTF-8").encode("UTF-8", invalid: :replace, undef: :replace).lines.map(&:chomp)
+  puts "DIAG #{tpath} wstat=#{wstat} rerun_rc=#{st.exitstatus}"
+  hdr_i = ol.index { |l| /\bfilc\b[^\n]*\berror:/i.match?(l) }
+  if hdr_i
+    end_i = ol[hdr_i..].index { |l| /(?:\bfilc panic:|thwarted a futile attempt)/i.match?(l) }
+    stop_i = end_i ? [hdr_i + end_i, hdr_i + 2000].min : [ol.length - 1, hdr_i + 200].min
+    blk = ol[hdr_i..stop_i]
+    hdr = []
+    frames = []
+    in_fr = false
+    in_so = false
+    tail_m = nil
+    blk.each_with_index do |ln, idx|
+      if idx == blk.length - 1 && /(?:\bfilc panic:|thwarted a futile attempt)/i.match?(ln)
+        tail_m = ln
+        next
+      end
+      stp = ln.strip
+      if !in_fr
+        hdr << ln
+        if /\Asemantic origin:/i.match?(stp)
+          in_so = true
+        elsif /\Acheck scheduled at/i.match?(stp)
+          in_so = false
+          in_fr = true
+        elsif idx > 0 && !in_so && (ln.start_with?(" ", "\t")) && !/\Apointer:/i.match?(stp)
+          hdr.pop
+          in_fr = true
+          frames << ln
+        end
+      else
+        frames << ln
+      end
+    end
+    runs = []
+    frames.each do |ln|
+      if !runs.empty? && runs.last[0].strip == ln.strip
+        runs.last[1] += 1
+      else
+        runs << [ln, 1]
+      end
+    end
+    hdr.each { |l| puts "  #{l}" }
+    runs.first(8).each do |ln, cnt|
+      puts "  #{ln}"
+      puts "      ... #{cnt}x #{ln.strip.split(': ').last}" if cnt > 1
+    end
+    puts "  #{tail_m}" if tail_m
+  else
+    not_ok = ol.select { |l| /\A(?:not ok |#\s+(?:Failed|got:|expected:|Looks like|Bail out!)|Bail out!|Can't |Compilation failed|panic:)/.match?(l) }
+    sample = not_ok.empty? ? ol.last(6) : not_ok.first(8)
+    sample.each { |l| puts "  #{l}" }
+  end
+end
+puts "=== END PERL FAILURE DIAGNOSTICS ==="
+RB
+    return "$rc"
+  fi
 }

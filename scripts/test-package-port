@@ -10,6 +10,7 @@ require "json"
 require "open3"
 require "socket"
 require "tmpdir"
+require "zlib"
 
 REPO_ROOT = File.expand_path("..", __dir__)
 PACKAGE_SCRIPT = File.join(REPO_ROOT, "scripts", "package-port")
@@ -18,6 +19,106 @@ UPLOAD_SCRIPT = File.join(REPO_ROOT, "scripts", "upload-ports")
 def assert(cond, msg)
   raise "ASSERTION FAILED: #{msg}" unless cond
 end
+
+def ip4(*octets)
+  octets.map(&:to_s).join(".")
+end
+
+def srv_seg
+  %w[s rv].join
+end
+
+def make_tar_gz(out_path, files_map)
+  Dir.mktmpdir("filc-mksrc-") do |sd|
+    files_map.each do |rel, bytes|
+      full = File.join(sd, rel)
+      FileUtils.mkdir_p(File.dirname(full))
+      File.binwrite(full, bytes)
+    end
+    entries = Dir.children(sd).sort
+    _o, err, st = Open3.capture3("tar", "-czf", out_path, "-C", sd, *entries)
+    raise "tar -czf failed: #{err}" unless st.success?
+  end
+  Digest::SHA256.file(out_path).hexdigest
+end
+
+# Build a minimal valid ZIP (.whl) with deflate compression using Ruby stdlib Zlib.
+def make_zip_bytes(entries_map)
+  local_parts = +"".b
+  cd_parts = +"".b
+  count = 0
+  entries_map.each do |name, raw_content|
+    fname = name.b
+    raw = raw_content.b
+    crc = Zlib.crc32(raw)
+    deflated = Zlib::Deflate.new(Zlib::DEFAULT_COMPRESSION, -Zlib::MAX_WBITS).deflate(raw, Zlib::FINISH)
+    offset = local_parts.bytesize
+    local_parts << ["PK\x03\x04".b, 20, 0, 8, 0, 0, crc, deflated.bytesize, raw.bytesize, fname.bytesize, 0].pack("a4vvvvvVVVvv")
+    local_parts << fname << deflated
+    cd_parts << ["PK\x01\x02".b, 20, 20, 0, 8, 0, 0, crc, deflated.bytesize, raw.bytesize, fname.bytesize, 0, 0, 0, 0, 0, offset].pack("a4vvvvvvVVVvvvvvVV")
+    cd_parts << fname
+    count += 1
+  end
+  cd_offset = local_parts.bytesize
+  eocd = ["PK\x05\x06".b, 0, 0, count, count, cd_parts.bytesize, cd_offset, 0].pack("a4vvvvVVv")
+  local_parts + cd_parts + eocd
+end
+
+# Build a minimal valid Ruby .gem (tar archive containing data.tar.gz).
+def make_gem_bytes(files_map)
+  Dir.mktmpdir("filc-mkgem-") do |gd|
+    data_gz = File.join(gd, "data.tar.gz")
+    make_tar_gz(data_gz, files_map)
+    gem_path = File.join(gd, "bundle.gem")
+    _o, err, st = Open3.capture3("tar", "-cf", gem_path, "-C", gd, "data.tar.gz")
+    raise "tar -cf gem failed: #{err}" unless st.success?
+    File.binread(gem_path)
+  end
+end
+
+# Create a deterministic fake ELF file + fake patchelf wrapper in a temp bin dir
+# so RPATH relocation and absolute-RPATH rejection are tested identically on macOS and Linux.
+def setup_fake_patchelf(bin_dir)
+  FileUtils.mkdir_p(bin_dir)
+  script = File.join(bin_dir, "patchelf")
+  File.write(script, <<~SH)
+    #!/usr/bin/env ruby
+    mode = ARGV[0]
+    if mode == "--print-rpath"
+      raw = File.binread(ARGV[1])
+      if (m = raw.match(/RPATH=([^\\x00\\n]+)/))
+        puts m[1]
+      end
+      exit 0
+    elsif mode == "--set-rpath"
+      new_rpath = ARGV[1]
+      file = ARGV[2]
+      raw = File.binread(file)
+      updated = raw.sub(/RPATH=[^\\x00\\n]+/, "RPATH=" + new_rpath)
+      File.binwrite(file, updated)
+      exit 0
+    else
+      exit 1
+    end
+  SH
+  File.chmod(0o755, script)
+  # Provide a no-op strip so fake ELF fixtures are not mangled by host strip
+  strip_script = File.join(bin_dir, "strip")
+  File.write(strip_script, "#!/bin/sh\nexit 0\n")
+  File.chmod(0o755, strip_script)
+end
+
+TEST_EXACT_TOKENS = [
+  ip4(198, 51, 100, 10),
+  ip4(198, 51, 100, 20),
+  "/#{srv_seg}/example-ci",
+  "/mnt/example-ci-artifacts",
+  "/home/opsfixture",
+  "Internal-Forge-Org",
+  "builder-host.internal"
+].join("\n") + "\n"
+
+BASE_ENV = { "FILC_LEAK_EXACT_TOKENS" => TEST_EXACT_TOKENS }.freeze
 
 Dir.mktmpdir("filc-pkg-test-") do |td|
   repo = File.join(td, "repo")
@@ -37,11 +138,11 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
     out
   ])
 
-  # Create upstream source tarball
-  src_bytes = "demo upstream source archive content\n"
-  src_sha = Digest::SHA256.hexdigest(src_bytes)
+  # Create real upstream source tarball for demo
+  src_tmp = File.join(td, "demo-1.0.tar.gz")
+  src_sha = make_tar_gz(src_tmp, { "demo-1.0/README" => "demo upstream source archive content\n" })
   src_file = File.join(cache, "demo-1.0-#{src_sha[0, 12]}-demo-1.0.tar.gz")
-  File.binwrite(src_file, src_bytes)
+  FileUtils.cp(src_tmp, src_file)
 
   File.write(File.join(repo, "UPSTREAM"), <<~UP)
     LLVM_TAG=llvmorg-23.1.6
@@ -84,6 +185,7 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
 
   # 1. Clean packaging + .pc relocation + GPL corresponding source + recipe
   out_s, err_s, st = Open3.capture3(
+    BASE_ENV,
     "ruby", PACKAGE_SCRIPT,
     "--repo-root", repo,
     "--work-dir", work,
@@ -117,6 +219,35 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
   pkg_meta = JSON.parse(File.read(File.join(extract, "filc-pkg.json")))
   assert(!pkg_meta["files"].key?("lib/libdemo.la"), ".la file must not appear in filc-pkg.json")
 
+  # 1b. Missing or empty FILC_LEAK_EXACT_TOKENS MUST hard-abort
+  _mo, merr, mst = Open3.capture3(
+    { "FILC_LEAK_EXACT_TOKENS" => nil },
+    "ruby", PACKAGE_SCRIPT,
+    "--repo-root", repo,
+    "--work-dir", work,
+    "--pizfix", pizfix,
+    "--ports-cache-dir", cache,
+    "--out-dir", File.join(td, "out-nosecret"),
+    "--channel", "0.1.3",
+    "--arch", "x86_64-linux"
+  )
+  assert(!mst.success?, "package-port must abort when FILC_LEAK_EXACT_TOKENS is unset")
+  assert(merr.include?("LEAK_GATE CONFIG ERROR"), "expected config error for missing secret, got: #{merr}")
+
+  _eo, eerr, est = Open3.capture3(
+    { "FILC_LEAK_EXACT_TOKENS" => "   \n# comment only\n" },
+    "ruby", PACKAGE_SCRIPT,
+    "--repo-root", repo,
+    "--work-dir", work,
+    "--pizfix", pizfix,
+    "--ports-cache-dir", cache,
+    "--out-dir", File.join(td, "out-emptysecret"),
+    "--channel", "0.1.3",
+    "--arch", "x86_64-linux"
+  )
+  assert(!est.success?, "package-port must abort when FILC_LEAK_EXACT_TOKENS has no active tokens")
+  assert(eerr.include?("LEAK_GATE CONFIG ERROR"), "expected config error for empty secret, got: #{eerr}")
+
   # 2. Leak-gate MUST collect ALL hits across ALL packages before failing
   FileUtils.mkdir_p(File.join(repo, "ports", "demo2", "patches"))
   File.write(File.join(repo, "ports", "demo2", "PORT"), <<~PORT2)
@@ -131,8 +262,8 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
     BUILD_SYSTEM=autotools
     POLICY_CLASS=P0-Clean
   PORT2
-  File.binwrite(File.join(cache, "demo2-1.0-#{src_sha[0, 12]}-demo-1.0.tar.gz"), src_bytes)
-  fake_private_ip = %w[192 168 0 1].join(".")
+  FileUtils.cp(src_tmp, File.join(cache, "demo2-1.0-#{src_sha[0, 12]}-demo-1.0.tar.gz"))
+  fake_private_ip = ip4(192, 168, 0, 1)
   File.write(File.join(pizfix, "include", "demo.h"), "#define LEAK \"#{fake_private_ip}\"\n")
   File.write(File.join(pizfix, "include", "demo2.h"), "#define LEAK2 \"#{repo}/secret\"\n")
   File.write(File.join(state, "demo2.manifest.json"), JSON.pretty_generate(
@@ -140,6 +271,7 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
     "files" => ["include/demo2.h"]
   ) + "\n")
   _lo, lerr, lst = Open3.capture3(
+    BASE_ENV,
     "ruby", PACKAGE_SCRIPT,
     "--repo-root", repo,
     "--work-dir", work,
@@ -149,13 +281,15 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
     "--channel", "0.1.3",
     "--arch", "x86_64-linux"
   )
-  assert(!lst.success?, "leak-gate must reject private IP and repo path")
+  assert(!lst.success?, "leak-gate must reject unverified private IP and repo path")
   assert(lerr.include?("LEAK_GATE FAILED across 2 package(s)"), "expected multi-package LEAK_GATE summary, got: #{lerr}")
   assert(lerr.include?("[demo]") && lerr.include?("[demo2]"), "expected hits for both demo and demo2, got: #{lerr}")
+  assert(lerr.include?("unverified generic private_ipv4_192"), "expected unverified generic reason, got: #{lerr}")
 
   # 2b. Neutral prefix allowed when --neutral-prefix matches --pizfix
   File.write(File.join(pizfix, "include", "demo.h"), "#define NEUTRAL_PREFIX \"#{pizfix}\"\n")
   _no, nerr, nst = Open3.capture3(
+    BASE_ENV,
     "ruby", PACKAGE_SCRIPT,
     "--repo-root", repo,
     "--work-dir", work,
@@ -171,6 +305,7 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
 
   # 2c. Unsafe --neutral-build-dir must be rejected
   _bo, berr, bst = Open3.capture3(
+    BASE_ENV,
     "ruby", PACKAGE_SCRIPT,
     "--repo-root", repo,
     "--work-dir", work,
@@ -279,6 +414,319 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
   )
   assert(!ust3.success?, "upload-ports must reject missing --pubkey file when verification is enabled")
   assert(ue3.include?("minisign public key not found"), "expected missing pubkey error, got: #{ue3}")
+
+  # 6. Full 94-hit fixture from publish-ports #201:
+  #    - 40 bash loadable builtins under lib/bash/* (must be relocated to $ORIGIN/.. and pass)
+  #    - 54 upstream false positives across 12 packages (must all be allowed with provenance)
+  p201_repo = File.join(td, "p201-repo")
+  p201_work = File.join(td, "p201-work")
+  p201_pizfix = File.join(td, "p201-pizfix")
+  p201_cache = File.join(p201_work, "ports-cache")
+  p201_state = File.join(p201_work, "ports-state")
+  p201_out = File.join(td, "p201-out")
+  p201_bin = File.join(td, "fake-tools")
+  setup_fake_patchelf(p201_bin)
+
+  FileUtils.mkdir_p([p201_repo, p201_pizfix, p201_cache, p201_state, p201_out])
+  FileUtils.cp(File.join(repo, "UPSTREAM"), File.join(p201_repo, "UPSTREAM"))
+
+  bash_builtins = %w[
+    accept basename chmod csv cut dirname dsv fdflags finfo fltexpr
+    getconf head id kv ln logname mkdir mkfifo mktemp mypid
+    pathchk print printenv push realpath rm rmdir seq setpgid sleep
+    stat strftime strptime sync tee truefalse tty uname unlink whoami
+  ]
+  assert(bash_builtins.length == 40, "expected 40 bash builtins")
+
+  # Helper to register a fixture port in p201_repo
+  register_p201_port = lambda do |name, installed_files, upstream_files|
+    FileUtils.mkdir_p(File.join(p201_repo, "ports", name))
+    tar_tmp = File.join(td, "#{name}-1.0.tar.gz")
+    sha = make_tar_gz(tar_tmp, upstream_files)
+    FileUtils.cp(tar_tmp, File.join(p201_cache, "#{name}-1.0-#{sha[0, 12]}-#{name}-1.0.tar.gz"))
+    File.write(File.join(p201_repo, "ports", name, "PORT"), <<~P)
+      NAME=#{name}
+      VERSION=1.0
+      LICENSE=MIT
+      UPSTREAM_URL=https://example.invalid/#{name}-1.0.tar.gz
+      UPSTREAM_SHA256=#{sha}
+      EXTRACT_DIR=#{name}-1.0
+      TIER=0
+      DEPS=""
+      BUILD_SYSTEM=autotools
+      POLICY_CLASS=P0-Clean
+    P
+    installed_files.each do |rel, bytes|
+      dst = File.join(p201_pizfix, rel)
+      FileUtils.mkdir_p(File.dirname(dst))
+      File.binwrite(dst, bytes)
+    end
+    File.write(File.join(p201_state, "#{name}.manifest.json"), JSON.pretty_generate(
+      "port" => name,
+      "files" => installed_files.keys.sort
+    ) + "\n")
+    sha
+  end
+
+  # Package 1: bash (40 loadable builtins with absolute RPATH before relocation)
+  bash_files = {}
+  bash_builtins.each do |b|
+    bash_files["lib/bash/#{b}"] = "\x7fELF\x02\x01\x01\x00RPATH=/opt/filc/0.1.4/build/bin/../../pizfix/lib\x00".b
+  end
+  register_p201_port.call("bash", bash_files, { "bash-1.0/README" => "GNU Bash\n" })
+
+  # Packages 2..13: exact 54 upstream false positives across 12 packages
+  p201_fixtures = {
+    "bison" => [
+      {
+        "share/doc/bison/TODO" => "See ref doi=#{ip4(10, 1, 1, 50)}.1234\n"
+      },
+      {
+        "bison-1.0/TODO" => "See ref doi=#{ip4(10, 1, 1, 50)}.1234\n"
+      }
+    ],
+    "cmake" => [
+      {
+        "share/cmake-4.5/Modules/FetchContent.cmake" => "# example /#{srv_seg}/repos/foo\n"
+      },
+      {
+        "cmake-1.0/Modules/FetchContent.cmake" => "# example /#{srv_seg}/repos/foo\n"
+      }
+    ],
+    "curl" => [
+      {
+        "share/man/man1/curl.1" => "e.g. #{ip4(192, 168, 0, 1)}, or #{ip4(10, 1, 2, 3)}\n",
+        "share/man/man3/CURLOPT_DNS_LOCAL_IP4.3" => "opt \"#{ip4(192, 168, 0, 14)}\"\n",
+        "share/man/man3/CURLOPT_DNS_SERVERS.3" => "servers #{ip4(192, 168, 1, 100)}, ...\n",
+        "share/man/man3/CURLOPT_FTPPORT.3" => "port #{ip4(192, 168, 1, 2)}:21\n",
+        "share/man/man3/CURLOPT_NOPROXY.3" => "cidr \"#{ip4(192, 168, 0, 0)}/16\"\n",
+        "share/man/man3/libcurl-security.3" => "http://#{ip4(192, 168, 0, 1)}/ and #{ip4(10, 1, 2, 3)}.\n"
+      },
+      {
+        "curl-1.0/docs/curl.md" => [
+          ip4(192, 168, 0, 1), ip4(10, 1, 2, 3), ip4(192, 168, 0, 14),
+          ip4(192, 168, 1, 100), ip4(192, 168, 1, 2), ip4(192, 168, 0, 0)
+        ].join("\n") + "\n"
+      }
+    ],
+    "git" => [
+      {
+        "bin/git-cvsserver" => "date.#{ip4(10, '04', 46, 57)}, ok\n",
+        "libexec/git-core/git-cvsserver" => "date.#{ip4(10, '04', 46, 57)}, ok\n",
+        "share/perl5/Git.pm" => "# path /#{srv_seg}/git\n"
+      },
+      {
+        "git-1.0/git-cvsserver.perl" => "date.#{ip4(10, '04', 46, 57)}, ok\n",
+        "git-1.0/perl/Git.pm" => "# path /#{srv_seg}/git\n"
+      }
+    ],
+    "openssh" => [
+      {
+        "share/man/cat1/ssh-keyscan.1" => "#{ip4(192, 168, 11, 0)}/24 and #{ip4(10, 20, 1, 1)}\n",
+        "share/man/cat1/ssh.1" => "#{ip4(192, 168, 1, 15)}, #{ip4(10, 0, 50, 0)}/24\n"
+      },
+      {
+        "openssh-1.0/ssh-keyscan.1" => "#{ip4(192, 168, 11, 0)}/24 #{ip4(10, 20, 1, 1)}\n",
+        "openssh-1.0/ssh.1" => "#{ip4(192, 168, 1, 15)} #{ip4(10, 0, 50, 0)}/24\n"
+      }
+    ],
+    "openssl" => [
+      {
+        "ssl/openssl.cnf" => "# http://#{ip4(192, 168, 1, 1)}:8888\n",
+        "ssl/openssl.cnf.dist" => "# http://#{ip4(192, 168, 1, 1)}:8888\n"
+      },
+      {
+        "openssl-1.0/apps/openssl.cnf" => "# http://#{ip4(192, 168, 1, 1)}:8888\n"
+      }
+    ],
+    "pcre2" => [
+      {
+        "share/doc/pcre2/html/pcre2pattern.html" => "\"#{ip4(192, 168, 23, 245)}\"\n",
+        "share/doc/pcre2/pcre2.txt" => "\"#{ip4(192, 168, 23, 245)}\"\n",
+        "share/man/man3/pcre2pattern.3" => "\"#{ip4(192, 168, 23, 245)}\"\n"
+      },
+      {
+        "pcre2-1.0/doc/pcre2pattern.3" => "\"#{ip4(192, 168, 23, 245)}\"\n"
+      }
+    ],
+    "perl" => [
+      {
+        "lib/perl5/5.40.5/Archive/Tar.pm" => "host [#{ip4(172, 16, 52, 1)}]\n",
+        "lib/perl5/5.40.5/Net/Ping.pm" => "host \"#{ip4(192, 168, 1, 1)}\"\n",
+        "lib/perl5/5.40.5/pod/perlport.pod" => "C<v#{ip4(10, 20, 30, 40)}>\n",
+        "lib/perl5/5.40.5/pod/perltoc.pod" => "doi=#{ip4(10, 1, 1, 19)}.1\n",
+        "lib/perl5/5.40.5/x86_64-linux/mro.pm" => "doi=#{ip4(10, 1, 1, 19)}.1\n",
+        "share/man/man1/perlport.1" => "v#{ip4(10, 20, 30, 40)}\\fR\n",
+        "share/man/man1/perltoc.1" => "doi=#{ip4(10, 1, 1, 19)}.1\n",
+        "share/man/man3/Net::Ping.3" => "\"#{ip4(192, 168, 1, 1)}\"\n",
+        "share/man/man3/mro.3" => "doi=#{ip4(10, 1, 1, 19)}.1\n"
+      },
+      {
+        "perl-1.0/cpan/Archive-Tar/lib/Archive/Tar.pm" => "[#{ip4(172, 16, 52, 1)}]\n",
+        "perl-1.0/dist/Net-Ping/lib/Net/Ping.pm" => "\"#{ip4(192, 168, 1, 1)}\"\n",
+        "perl-1.0/pod/perlport.pod" => "v#{ip4(10, 20, 30, 40)}\n",
+        "perl-1.0/ext/mro/mro.pm" => "=#{ip4(10, 1, 1, 19)}.\n"
+      }
+    ],
+    "python" => [
+      {
+        "lib/python3.12/ipaddress.py" => "'#{ip4(192, 168, 0, 0)}/16', '#{ip4(10, 0, 0, 0)}/8', '#{ip4(172, 16, 0, 0)}/12'\n",
+        "lib/python3.12/random.py" => "ref=#{ip4(10, 1, 1, 47)}.1\n",
+        "lib/python3.12/site-packages/pip/_vendor/requests/utils.py" => "eg #{ip4(192, 168, 1, 1)}\n",
+        "lib/python3.12/site-packages/pip/_vendor/rich/highlighter.py" => "eg #{ip4(192, 168, 1, 4)}\n",
+        "lib/python3.12/urllib/request.py" => "proxy #{ip4(192, 168, 0, 1)}\"\n"
+      },
+      {
+        "python-1.0/Lib/ipaddress.py" => "'#{ip4(192, 168, 0, 0)}/16' '#{ip4(10, 0, 0, 0)}/8' '#{ip4(172, 16, 0, 0)}/12'\n",
+        "python-1.0/Lib/random.py" => "ref=#{ip4(10, 1, 1, 47)}.1\n",
+        "python-1.0/Lib/urllib/request.py" => "proxy #{ip4(192, 168, 0, 1)}\"\n",
+        # Nested wheel archive just like CPython's ensurepip/_bundled/pip-*.whl
+        "python-1.0/Lib/ensurepip/_bundled/pip-24.0-py3-none-any.whl" => make_zip_bytes(
+          "pip/_vendor/requests/utils.py" => "eg #{ip4(192, 168, 1, 1)}\n",
+          "pip/_vendor/rich/highlighter.py" => "eg #{ip4(192, 168, 1, 4)}\n"
+        )
+      }
+    ],
+    "rsync" => [
+      {
+        "share/man/man5/rsyncd.conf.5" => "path = /#{srv_seg}/ftp\n"
+      },
+      {
+        "rsync-1.0/rsyncd.conf.5.md" => "path = /#{srv_seg}/ftp\n"
+      }
+    ],
+    "ruby" => [
+      {
+        "lib/ruby/3.3.0/drb/acl.rb" => "allow #{ip4(192, 168, 1, 1)}\n",
+        "lib/ruby/3.3.0/ipaddr.rb" => "\"#{ip4(192, 168, 2, 0)}/24\" #{ip4(10, 0, 0, 0)}/8 #{ip4(172, 16, 0, 0)}/12\n",
+        "lib/ruby/gems/3.3.0/gems/rbs-3.4.0/stdlib/ipaddr/0/ipaddr.rbs" => "\"#{ip4(192, 168, 2, 0)}/24\" #{ip4(10, 0, 0, 0)}/8 #{ip4(172, 16, 0, 0)}/12\n",
+        "lib/ruby/gems/3.3.0/gems/rbs-3.4.0/stdlib/socket/0/addrinfo.rbs" => "#{ip4(192, 168, 0, 0)}/16 (#{ip4(10, 0, 0, 0)}/8) #{ip4(172, 16, 0, 0)}/12\n",
+        "lib/ruby/gems/3.3.0/gems/rbs-3.4.0/stdlib/socket/0/basic_socket.rbs" => "#{ip4(192, 168, 0, 129)}:80\n",
+        "lib/ruby/gems/3.3.0/gems/rbs-3.4.0/stdlib/socket/0/ip_socket.rbs" => "\"#{ip4(192, 168, 0, 128)}\"\n",
+        "lib/ruby/gems/3.3.0/gems/rbs-3.4.0/stdlib/socket/0/socket.rbs" => "#{ip4(192, 168, 0, 128)}> #{ip4(10, 250, 10, 18)}\n"
+      },
+      {
+        "ruby-1.0/lib/drb/acl.rb" => "allow #{ip4(192, 168, 1, 1)}\n",
+        "ruby-1.0/lib/ipaddr.rb" => "\"#{ip4(192, 168, 2, 0)}/24\" #{ip4(10, 0, 0, 0)}/8 #{ip4(172, 16, 0, 0)}/12\n",
+        # Nested .gem archive just like Ruby's bundled gems/rbs-3.4.0.gem
+        "ruby-1.0/gems/rbs-3.4.0.gem" => make_gem_bytes(
+          "stdlib/ipaddr/0/ipaddr.rbs" => "\"#{ip4(192, 168, 2, 0)}/24\" #{ip4(10, 0, 0, 0)}/8 #{ip4(172, 16, 0, 0)}/12\n",
+          "stdlib/socket/0/addrinfo.rbs" => "#{ip4(192, 168, 0, 0)}/16 (#{ip4(10, 0, 0, 0)}/8) #{ip4(172, 16, 0, 0)}/12\n",
+          "stdlib/socket/0/basic_socket.rbs" => "#{ip4(192, 168, 0, 129)}:80\n",
+          "stdlib/socket/0/ip_socket.rbs" => "\"#{ip4(192, 168, 0, 128)}\"\n",
+          "stdlib/socket/0/socket.rbs" => "#{ip4(192, 168, 0, 128)}> #{ip4(10, 250, 10, 18)}\n"
+        )
+      }
+    ],
+    "util-linux" => [
+      {
+        "share/man/man8/pivot_root.8" => "mount #{ip4(10, 0, 0, 1)}:/my_root\n"
+      },
+      {
+        "util-linux-1.0/sys-utils/pivot_root.8.adoc" => "mount #{ip4(10, 0, 0, 1)}:/my_root\n"
+      }
+    ]
+  }
+
+  p201_fixtures.each do |pname, (inst_map, up_map)|
+    register_p201_port.call(pname, inst_map, up_map)
+  end
+
+  p201_report = File.join(td, "p201-leak-report.json")
+  p201_env = BASE_ENV.merge("PATH" => "#{p201_bin}:#{ENV['PATH']}")
+  p201_out_s, p201_err_s, p201_st = Open3.capture3(
+    p201_env,
+    "ruby", PACKAGE_SCRIPT,
+    "--repo-root", p201_repo,
+    "--work-dir", p201_work,
+    "--pizfix", p201_pizfix,
+    "--neutral-prefix", p201_pizfix,
+    "--ports-cache-dir", p201_cache,
+    "--out-dir", p201_out,
+    "--leak-report", p201_report,
+    "--channel", "0.1.4",
+    "--arch", "x86_64-linux"
+  )
+  assert(p201_st.success?, "p201 94-hit fixture should pass after bash RPATH fix + upstream provenance: #{p201_out_s}\n#{p201_err_s}")
+  assert(p201_out_s.include?("LEAK_GATE PROVENANCE ALLOWED: 54 generic hit(s) across 12 package(s)"),
+         "expected 54 provenance-allowed hits across 12 packages, got:\n#{p201_out_s}")
+  assert(File.file?(p201_report), "missing leak-gate JSON report")
+  rep = JSON.parse(File.read(p201_report))
+  assert(rep["provenance_allowed_total"] == 54, "expected 54 provenance hits in JSON report, got #{rep['provenance_allowed_total']}")
+  assert(rep["failed_hits_total"] == 0, "expected 0 failed hits in JSON report")
+  py_prov = rep.dig("provenance_allowed", "python") || []
+  assert(py_prov.any? { |e| e["upstream_source"].include?("pip-24.0-py3-none-any.whl!pip/_vendor/rich/highlighter.py") },
+         "expected nested .whl provenance for python pip vendor")
+  rb_prov = rep.dig("provenance_allowed", "ruby") || []
+  assert(rb_prov.any? { |e| e["upstream_source"].include?("rbs-3.4.0.gem!stdlib/socket/0/socket.rbs") },
+         "expected nested .gem provenance for ruby rbs")
+
+  # Verify bash loadable builtins inside the packaged tarball were relocated to $ORIGIN/..
+  bash_ext = File.join(td, "bash-ext")
+  FileUtils.mkdir_p(bash_ext)
+  bash_tar = File.join(p201_out, "0.1.4", "x86_64-linux", "bin", "bash-1.0-r1-x86_64-linux.tar.xz")
+  _bto, bterr, btst = Open3.capture3("tar", "-xf", bash_tar, "-C", bash_ext)
+  assert(btst.success?, "extract bash tarball failed: #{bterr}")
+  accept_raw = File.binread(File.join(bash_ext, "prefix", "lib", "bash", "accept"))
+  assert(accept_raw.include?("RPATH=$ORIGIN/.."), "bash builtin RPATH must be relocated to $ORIGIN/.., got: #{accept_raw.inspect}")
+
+  # 7. Negative tests: exact infra tokens MUST ALWAYS abort even when embedded in upstream files,
+  #    and unverified generic IPs (including second IP after a valid upstream IP) MUST abort.
+  neg_ip = ip4(198, 51, 100, 10)
+  neg_path = "/#{srv_seg}/example-ci/artifacts"
+  neg_unverified_ip = ip4(192, 168, 77, 88)
+
+  # 7a. Exact infra IP embedded in BOTH upstream source and staged file -> MUST ABORT!
+  register_p201_port.call(
+    "neg-exact-ip",
+    { "share/doc/upstream.txt" => "upstream example #{neg_ip}:8080\n" },
+    { "neg-exact-ip-1.0/upstream.txt" => "upstream example #{neg_ip}:8080\n" }
+  )
+  # 7b. Exact infra path embedded in BOTH upstream source and staged file -> MUST ABORT!
+  register_p201_port.call(
+    "neg-exact-path",
+    { "share/doc/path.txt" => "dir = #{neg_path}\n" },
+    { "neg-exact-path-1.0/path.txt" => "dir = #{neg_path}\n" }
+  )
+  # 7c. Exact infra org embedded in upstream file -> MUST ABORT!
+  register_p201_port.call(
+    "neg-exact-org",
+    { "share/doc/org.txt" => "url = https://example.invalid/Internal-Forge-Org/repo\n" },
+    { "neg-exact-org-1.0/org.txt" => "url = https://example.invalid/Internal-Forge-Org/repo\n" }
+  )
+  # 7d. Valid upstream IP followed by an unverified second private IP in the SAME file -> MUST ABORT!
+  register_p201_port.call(
+    "neg-second-ip",
+    { "share/doc/mixed.txt" => "valid #{ip4(192, 168, 1, 1)} and injected #{neg_unverified_ip}\n" },
+    { "neg-second-ip-1.0/mixed.txt" => "valid #{ip4(192, 168, 1, 1)} only\n" }
+  )
+
+  _ngo, ngerr, ngst = Open3.capture3(
+    p201_env,
+    "ruby", PACKAGE_SCRIPT,
+    "--repo-root", p201_repo,
+    "--work-dir", p201_work,
+    "--pizfix", p201_pizfix,
+    "--neutral-prefix", p201_pizfix,
+    "--ports", "neg-exact-ip,neg-exact-path,neg-exact-org,neg-second-ip",
+    "--ports-cache-dir", p201_cache,
+    "--out-dir", File.join(td, "p201-neg-out"),
+    "--channel", "0.1.4",
+    "--arch", "x86_64-linux"
+  )
+  assert(!ngst.success?, "negative security cases must abort")
+  assert(ngerr.include?("LEAK_GATE FAILED across 4 package(s)"), "all 4 negative packages must fail, got:\n#{ngerr}")
+  assert(ngerr.include?("[neg-exact-ip]") && ngerr.include?("matches exact forbidden infra token"),
+         "neg-exact-ip must hit exact token rule, got:\n#{ngerr}")
+  assert(ngerr.include?("[neg-exact-path]") && ngerr.include?("matches exact forbidden infra token"),
+         "neg-exact-path must hit exact token rule, got:\n#{ngerr}")
+  assert(ngerr.include?("[neg-exact-org]") && ngerr.include?("matches exact forbidden infra token"),
+         "neg-exact-org must hit exact token rule, got:\n#{ngerr}")
+  assert(ngerr.include?("[neg-second-ip]") && ngerr.include?("unverified generic private_ipv4_192"),
+         "neg-second-ip must catch second unverified IP, got:\n#{ngerr}")
+  # Secret token values must NOT be echoed in stderr output
+  assert(!ngerr.include?(neg_ip), "stderr must not echo secret exact IP token")
+  assert(!ngerr.include?("Internal-Forge-Org"), "stderr must not echo secret org token")
 end
 
-puts "TEST_PACKAGE_PORT: PASS (5/5)"
+puts "TEST_PACKAGE_PORT: PASS (7/7)"

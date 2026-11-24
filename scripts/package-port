@@ -16,12 +16,14 @@ require "securerandom"
 require "set"
 require "time"
 require "tmpdir"
+require "zlib"
 
 module PortPackager
   PORT_NAME_RE = /\A[a-z0-9][a-z0-9._+-]{0,63}\z/
   CHANNEL_RE = /\A\d+\.\d+\.\d+(?:-[a-z0-9.]+)?\z/
   ARCH_RE = /\A(?:x86_64|aarch64)-linux\z/
   SHA256_RE = /\A[0-9a-f]{64}\z/
+  IPV4_EXACT_RE = /\A\d{1,3}(?:\.\d{1,3}){3}\z/
 
   INFRA_WORDS = [
     %w[ci server].join("-"),
@@ -30,15 +32,26 @@ module PortPackager
     %w[hyper ingress].join("-")
   ].freeze
 
-  FORBIDDEN_RE = [
-    /(?:^|[^0-9])192\.168\.\d{1,3}\.\d{1,3}(?:[^0-9]|$)/,
-    /(?:^|[^0-9])10\.\d{1,3}\.\d{1,3}\.\d{1,3}(?:[^0-9]|$)/,
-    /(?:^|[^0-9])172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}(?:[^0-9]|$)/,
-    Regexp.new("\\b(?:#{INFRA_WORDS.join('|')})\\b", Regexp::IGNORECASE),
-    %r{/ccache/},
-    Regexp.new("/#{%w[s rv].join}/"),
-    Regexp.new("/#{%w[wood pecker].join}/"),
-    %r{/\.work/}
+  SRV_SEG = %w[s rv].join.freeze
+  WP_SEG = %w[wood pecker].join.freeze
+
+  # Built-in hard-block patterns (NEVER exempted by upstream provenance).
+  HARD_FORBIDDEN_RE = [
+    ["infra_word", Regexp.new("(?<![A-Za-z0-9_-])(?:#{INFRA_WORDS.join('|')})(?![A-Za-z0-9_-])", Regexp::IGNORECASE)],
+    ["ccache_path", %r{(?<![A-Za-z0-9_.-])/ccache(?:/|(?![A-Za-z0-9_.-]))}],
+    ["wp_path", Regexp.new("(?<![A-Za-z0-9_.-])/#{WP_SEG}(?:/|(?![A-Za-z0-9_.-]))")],
+    ["work_path", %r{(?<![A-Za-z0-9_.-])/\.work(?:/|(?![A-Za-z0-9_.-]))}],
+    ["srv_ci_path", Regexp.new("(?<![A-Za-z0-9_.-])/#{SRV_SEG}/example-ci(?![A-Za-z0-9_.-])")],
+    ["mnt_ci_path", %r{(?<![A-Za-z0-9_.-])/mnt/example-ci-artifacts(?![A-Za-z0-9_.-])}]
+  ].freeze
+
+  # Generic patterns that are ONLY allowed when the exact matched token is proven
+  # to exist verbatim in the SHA-256-verified upstream source archive of the port.
+  GENERIC_PROVENANCE_RE = [
+    ["private_ipv4_192", /(?<![0-9])(192\.168\.\d{1,3}\.\d{1,3})(?![0-9])/],
+    ["private_ipv4_10", /(?<![0-9])(10\.\d{1,3}\.\d{1,3}\.\d{1,3})(?![0-9])/],
+    ["private_ipv4_172", /(?<![0-9])(172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(?![0-9])/],
+    ["srv_path", Regexp.new("(?<![A-Za-z0-9_.-])(/#{SRV_SEG}/)")]
   ].freeze
 
   NEUTRAL_BUILD_DIR_RE = %r{\A/build/filc-ports(?:/[A-Za-z0-9._-]+)?\z}
@@ -219,21 +232,81 @@ module PortPackager
     lits.uniq
   end
 
-  def scan_text_for_leaks(label, text, literals)
-    hits = []
-    literals.each do |lit|
-      hits << "#{label}: contains forbidden path/host #{lit.inspect}" if text.include?(lit)
-    end
-    FORBIDDEN_RE.each do |re|
-      if (m = re.match(text))
-        hits << "#{label}: matches forbidden pattern #{m[0].strip.inspect}"
+  def compile_exact_token_regex(token)
+    escaped = Regexp.escape(token)
+    if IPV4_EXACT_RE.match?(token)
+      Regexp.new("(?<![0-9.])#{escaped}(?![0-9]|\\.[0-9])")
+    elsif token.start_with?("/")
+      if token.end_with?("/")
+        Regexp.new("(?<![A-Za-z0-9_.-])#{escaped}")
+      else
+        Regexp.new("(?<![A-Za-z0-9_.-])#{escaped}(?![A-Za-z0-9_.-])")
       end
+    elsif token.include?("://") || token.include?(".")
+      Regexp.new("(?<![A-Za-z0-9_.-])#{escaped}(?![A-Za-z0-9_.-])", Regexp::IGNORECASE)
+    else
+      Regexp.new("(?<![A-Za-z0-9_-])#{escaped}(?![A-Za-z0-9_-])", Regexp::IGNORECASE)
     end
-    hits
   end
 
-  def scan_directory_leaks(stage_dir, literals:, scan_elf_strings: true)
-    hits = []
+  def load_exact_tokens!(env_var: "FILC_LEAK_EXACT_TOKENS")
+    raw = ENV[env_var]
+    if raw.nil? || raw.strip.empty?
+      raise "LEAK_GATE CONFIG ERROR: required exact-token secret env #{env_var} is missing or empty"
+    end
+
+    rules = []
+    raw.each_line do |line|
+      tok = line.strip
+      next if tok.empty? || tok.start_with?("#")
+
+      rules << { idx: rules.length + 1, regex: compile_exact_token_regex(tok), length: tok.length }
+    end
+    if rules.empty?
+      raise "LEAK_GATE CONFIG ERROR: required exact-token secret env #{env_var} contains no active tokens"
+    end
+
+    rules
+  end
+
+  def scan_text_for_leaks(label, text, literals, exact_rules: [])
+    hard_hits = []
+    generic_hits = []
+
+    literals.each do |lit|
+      hard_hits << "#{label}: contains forbidden path/host #{lit.inspect}" if text.include?(lit)
+    end
+
+    exact_rules.each do |rule|
+      if rule[:regex].match?(text)
+        hard_hits << "#{label}: matches exact forbidden infra token ##{rule[:idx]} (len=#{rule[:length]})"
+      end
+    end
+
+    HARD_FORBIDDEN_RE.each do |pat_name, re|
+      if (m = re.match(text))
+        hard_hits << "#{label}: matches forbidden #{pat_name} #{m[0].strip.inspect}"
+      end
+    end
+
+    GENERIC_PROVENANCE_RE.each do |pat_name, re|
+      seen = Set.new
+      text.scan(re) do |groups|
+        token = groups.is_a?(Array) ? groups.first : groups
+        next if token.nil? || token.empty? || seen.include?(token)
+
+        seen.add(token)
+        generic_hits << { file: label, pattern: pat_name, token: token }
+      end
+    end
+
+    [hard_hits, generic_hits]
+  end
+
+  def scan_directory_leaks(stage_dir, literals:, exact_rules: [], scan_elf_strings: true)
+    hard_hits = []
+    generic_hits = []
+
     Dir.glob(File.join(stage_dir, "**", "*"), File::FNM_DOTMATCH).sort.each do |path|
       base = File.basename(path)
       next if base == "." || base == ".."
@@ -242,7 +315,9 @@ module PortPackager
       rel = path.sub("#{stage_dir}/", "")
       if File.symlink?(path)
         target = File.readlink(path)
-        hits.concat(scan_text_for_leaks("symlink #{rel}", target, literals))
+        h, g = scan_text_for_leaks("symlink #{rel}", target, literals, exact_rules: exact_rules)
+        hard_hits.concat(h)
+        generic_hits.concat(g)
         next
       end
 
@@ -250,15 +325,21 @@ module PortPackager
         if cmd_available?("patchelf")
           out, _e, st = Open3.capture3("patchelf", "--print-rpath", path)
           if st.success? && !out.strip.empty?
-            hits.concat(scan_text_for_leaks("ELF RPATH #{rel}", out.strip, literals))
+            h, g = scan_text_for_leaks("ELF RPATH #{rel}", out.strip, literals, exact_rules: exact_rules)
+            hard_hits.concat(h)
+            generic_hits.concat(g)
             if out.strip.start_with?("/")
-              hits << "ELF RPATH #{rel}: absolute RPATH not allowed (#{out.strip})"
+              hard_hits << "ELF RPATH #{rel}: absolute RPATH not allowed (#{out.strip})"
             end
           end
         end
         if scan_elf_strings && cmd_available?("strings")
           out, _e, st = Open3.capture3("strings", "-a", "-n", "6", path)
-          hits.concat(scan_text_for_leaks("ELF strings #{rel}", out, literals)) if st.success?
+          if st.success?
+            h, g = scan_text_for_leaks("ELF strings #{rel}", out, literals, exact_rules: exact_rules)
+            hard_hits.concat(h)
+            generic_hits.concat(g)
+          end
         end
         next
       end
@@ -267,15 +348,181 @@ module PortPackager
       next if raw.include?("\x00".b)
 
       text = raw.force_encoding("UTF-8").encode("UTF-8", invalid: :replace, undef: :replace)
-      hits.concat(scan_text_for_leaks(rel, text, literals))
+      h, g = scan_text_for_leaks(rel, text, literals, exact_rules: exact_rules)
+      hard_hits.concat(h)
+      generic_hits.concat(g)
     end
 
-    hits.uniq
+    [hard_hits.uniq, generic_hits.uniq]
   end
 
-  def leak_gate_directory!(stage_dir, literals:, scan_elf_strings: true)
-    hits = scan_directory_leaks(stage_dir, literals: literals, scan_elf_strings: scan_elf_strings)
-    raise "LEAK_GATE FAILED:\n  #{hits.first(50).join("\n  ")}" unless hits.empty?
+  def search_zip_for_tokens(zip_path, rel_prefix, remaining_tokens, found)
+    return if remaining_tokens.empty?
+
+    data = File.binread(zip_path)
+    eocd = data.rindex("PK\x05\x06".b)
+    return unless eocd && eocd + 22 <= data.bytesize
+
+    cd_size, cd_offset = data.byteslice(eocd + 12, 8).unpack("V2")
+    pos = cd_offset
+    cd_end = cd_offset + cd_size
+    while pos + 46 <= data.bytesize && pos < cd_end && !remaining_tokens.empty?
+      break unless data.byteslice(pos, 4) == "PK\x01\x02".b
+
+      method = data.byteslice(pos + 10, 2).unpack1("v")
+      comp_size = data.byteslice(pos + 20, 4).unpack1("V")
+      fname_len, extra_len, comment_len = data.byteslice(pos + 28, 6).unpack("v3")
+      local_off = data.byteslice(pos + 42, 4).unpack1("V")
+      fname = data.byteslice(pos + 46, fname_len).force_encoding("UTF-8").scrub
+      pos += 46 + fname_len + extra_len + comment_len
+      next if fname.end_with?("/")
+      next unless local_off + 30 <= data.bytesize && data.byteslice(local_off, 4) == "PK\x03\x04".b
+
+      l_fname_len, l_extra_len = data.byteslice(local_off + 26, 4).unpack("v2")
+      payload_start = local_off + 30 + l_fname_len + l_extra_len
+      next unless payload_start + comp_size <= data.bytesize
+
+      payload = data.byteslice(payload_start, comp_size)
+      content = if method == 0
+                  payload
+                elsif method == 8
+                  begin
+                    Zlib::Inflate.new(-Zlib::MAX_WBITS).inflate(payload)
+                  rescue Zlib::Error
+                    nil
+                  end
+                end
+      next unless content
+
+      remaining_tokens.dup.each do |tok|
+        next unless content.include?(tok.b)
+
+        found[tok] = "#{rel_prefix}!#{fname}"
+        remaining_tokens.delete(tok)
+      end
+    end
+  rescue StandardError
+    nil
+  end
+
+  def search_gem_for_tokens(gem_path, rel_prefix, remaining_tokens, found, tar_bin)
+    return if remaining_tokens.empty?
+
+    Dir.mktmpdir("filc-gem-prov-") do |gtd|
+      _o, _e, st = Open3.capture3(tar_bin, "-xf", gem_path, "-C", gtd, "data.tar.gz")
+      data_gz = File.join(gtd, "data.tar.gz")
+      return unless st.success? && File.file?(data_gz)
+
+      data_dir = File.join(gtd, "data")
+      FileUtils.mkdir_p(data_dir)
+      _o2, _e2, st2 = Open3.capture3(tar_bin, "-xzf", data_gz, "-C", data_dir)
+      return unless st2.success?
+
+      Dir.glob(File.join(data_dir, "**", "*"), File::FNM_DOTMATCH).sort.each do |f|
+        break if remaining_tokens.empty?
+        next unless File.file?(f) && !File.symlink?(f)
+
+        raw = File.binread(f)
+        inner_rel = f.sub("#{data_dir}/", "")
+        remaining_tokens.dup.each do |tok|
+          next unless raw.include?(tok.b)
+
+          found[tok] = "#{rel_prefix}!#{inner_rel}"
+          remaining_tokens.delete(tok)
+        end
+      end
+    end
+  rescue StandardError
+    nil
+  end
+
+  # Extracts the SHA-256-verified upstream source archive into an isolated temp dir
+  # and proves exact fixed-string provenance for every generic token (including
+  # bundled .whl/.zip and .gem archives shipped inside upstream tarballs).
+  def verify_upstream_provenance(upstream_tarball, generic_hits)
+    return [{}, generic_hits] if generic_hits.empty?
+
+    needed = generic_hits.map { |h| h[:token] }.uniq
+    remaining = Set.new(needed)
+    found = {}
+    tar_bin = cmd_available?("gtar") ? "gtar" : "tar"
+
+    Dir.mktmpdir("filc-prov-src-") do |src_td|
+      _o, err, st = Open3.capture3(tar_bin, "-xf", upstream_tarball, "-C", src_td)
+      unless st.success?
+        raise "failed to extract verified upstream source #{File.basename(upstream_tarball)} for provenance check: #{err.strip}"
+      end
+
+      nested_zips = []
+      nested_gems = []
+
+      Dir.glob(File.join(src_td, "**", "*"), File::FNM_DOTMATCH).sort.each do |path|
+        break if remaining.empty?
+        next unless File.file?(path) && !File.symlink?(path)
+
+        rel = path.sub("#{src_td}/", "")
+        if rel.end_with?(".whl", ".zip")
+          nested_zips << [path, rel]
+          next
+        elsif rel.end_with?(".gem")
+          nested_gems << [path, rel]
+          next
+        end
+
+        raw = File.binread(path)
+        remaining.dup.each do |tok|
+          next unless raw.include?(tok.b)
+
+          found[tok] = rel
+          remaining.delete(tok)
+        end
+      end
+
+      unless remaining.empty?
+        nested_zips.each do |zp, zrel|
+          break if remaining.empty?
+
+          search_zip_for_tokens(zp, zrel, remaining, found)
+        end
+      end
+
+      unless remaining.empty?
+        nested_gems.each do |gp, grel|
+          break if remaining.empty?
+
+          search_gem_for_tokens(gp, grel, remaining, found, tar_bin)
+        end
+      end
+    end
+
+    unverified = generic_hits.reject { |h| found.key?(h[:token]) }
+    [found, unverified]
+  end
+
+  def evaluate_package_leaks(stage_dir, literals:, exact_rules:, upstream_tarball:, scan_elf_strings: true)
+    hard_hits, generic_hits = scan_directory_leaks(
+      stage_dir, literals: literals, exact_rules: exact_rules, scan_elf_strings: scan_elf_strings
+    )
+    provenance_map, unverified = verify_upstream_provenance(upstream_tarball, generic_hits)
+
+    allowed = []
+    generic_hits.each do |gh|
+      src_rel = provenance_map[gh[:token]]
+      next unless src_rel
+
+      allowed << {
+        "file" => gh[:file],
+        "pattern" => gh[:pattern],
+        "token" => gh[:token],
+        "upstream_source" => src_rel
+      }
+    end
+
+    unverified.each do |gh|
+      hard_hits << "#{gh[:file]}: unverified generic #{gh[:pattern]} #{gh[:token].inspect} (not found in verified upstream source)"
+    end
+
+    [hard_hits.uniq, allowed]
   end
 
   def relocate_stage!(prefix_dir, pizfix)
@@ -304,18 +551,22 @@ module PortPackager
         next
       end
 
-      # Relocate ELF binaries & shared libraries
+      # Relocate ALL ELF binaries, shared libraries, and loadable modules (e.g. lib/bash/*)
       next unless elf_file?(path)
 
       Open3.capture3("strip", "--strip-debug", path) if has_strip
       next unless has_patchelf
 
       parts = rel.split("/")
-      if parts[0] == "bin" || parts[0] == "sbin" || parts[0] == "libexec"
-        rpath = "$ORIGIN/" + ("../" * (parts.length - 1)) + "lib"
+      if parts[0] == "lib" || parts[0] == "lib64"
+        rpath = if parts.length == 2
+                  "$ORIGIN"
+                else
+                  "$ORIGIN/" + ("../" * (parts.length - 2)).chomp("/")
+                end
         Open3.capture3("patchelf", "--set-rpath", rpath, path)
-      elsif parts[0] == "lib" && File.basename(path).include?(".so")
-        rpath = parts.length == 2 ? "$ORIGIN" : ("$ORIGIN/" + ("../" * (parts.length - 2)) + "lib")
+      else
+        rpath = "$ORIGIN/" + ("../" * (parts.length - 1)) + "lib"
         Open3.capture3("patchelf", "--set-rpath", rpath, path)
       end
     end
@@ -421,6 +672,8 @@ module PortPackager
       ports_filter: nil,
       sign_key_file: nil,
       sign_key_env: "FILC_PORTS_MINISIGN_KEY",
+      exact_tokens_env: "FILC_LEAK_EXACT_TOKENS",
+      leak_report: nil,
       pubkey_file: nil,
       sign_only: false,
       ci_run: ENV["CI_PIPELINE_NUMBER"] ? Integer(ENV["CI_PIPELINE_NUMBER"], 10) : nil,
@@ -440,6 +693,8 @@ module PortPackager
       o.on("--arch ARCH", "Target arch (default: x86_64-linux)") { |v| opts[:arch] = v }
       o.on("--revision N", Integer, "Package revision number (default: 1)") { |v| opts[:revision] = v }
       o.on("--ports LIST", "Comma-separated subset of ports to package") { |v| opts[:ports_filter] = v.split(",").map(&:strip).reject(&:empty?) }
+      o.on("--exact-tokens-env VAR", "Env var containing newline-separated exact infra tokens (default: FILC_LEAK_EXACT_TOKENS)") { |v| opts[:exact_tokens_env] = v }
+      o.on("--leak-report PATH", "Optional path to write JSON leak-gate provenance report") { |v| opts[:leak_report] = File.expand_path(v) }
       o.on("--sign-key-file PATH", "Optional minisign secret key file (CI only)") { |v| opts[:sign_key_file] = v }
       o.on("--sign-key-env VAR", "Env var containing minisign secret key (default: FILC_PORTS_MINISIGN_KEY)") { |v| opts[:sign_key_env] = v }
       o.on("--pubkey-file PATH", "Optional minisign public key file to copy as pubkey.pub") { |v| opts[:pubkey_file] = v }
@@ -487,6 +742,7 @@ module PortPackager
     upstream = File.file?(File.join(repo_root, "UPSTREAM")) ? parse_kv_file(File.join(repo_root, "UPSTREAM")) : {}
     all_ports = load_all_ports(ports_dir)
     neutral_prefix = opts[:neutral_prefix] || "/opt/filc/#{opts[:channel]}/pizfix"
+    exact_rules = load_exact_tokens!(env_var: opts[:exact_tokens_env])
     literals = build_forbidden_literals(
       work_dir: work_dir,
       repo_root: repo_root,
@@ -515,6 +771,7 @@ module PortPackager
     packages_index = {}
     sums_entries = {}
     all_leaks = {}
+    all_provenance_allowed = {}
     created_archives = []
 
     selected_names.sort.each do |name|
@@ -528,6 +785,10 @@ module PortPackager
 
       tdeps = transitive_deps_topo(all_ports, name)
       pcount, added, removed = count_patches(meta["port_dir"])
+
+      # Resolve and SHA-256-verify the upstream source tarball first so the leak-gate
+      # can prove upstream provenance for generic patterns without trusting unverified files.
+      cached_src, src_fname, src_sha = find_cached_source_tarball(cache_dir, meta)
 
       bin_fname = "#{name}-#{meta['version']}-r#{opts[:revision]}-#{opts[:arch]}.tar.xz"
       bin_rel = "bin/#{bin_fname}"
@@ -589,7 +850,14 @@ module PortPackager
         }
         File.write(File.join(td, "filc-pkg.json"), "#{JSON.pretty_generate(sort_json(pkg_manifest))}\n", encoding: "UTF-8")
 
-        bin_leaks = scan_directory_leaks(td, literals: literals, scan_elf_strings: true)
+        bin_leaks, bin_allowed = evaluate_package_leaks(
+          td,
+          literals: literals,
+          exact_rules: exact_rules,
+          upstream_tarball: cached_src,
+          scan_elf_strings: true
+        )
+        all_provenance_allowed[name] = bin_allowed unless bin_allowed.empty?
         if bin_leaks.empty?
           create_deterministic_tar_xz(td, bin_out, opts[:source_date_epoch])
           created_archives << bin_out
@@ -599,7 +867,6 @@ module PortPackager
       end
 
       # 2. Copy SHA-256 verified upstream corresponding source tarball (GPL compliance)
-      cached_src, src_fname, src_sha = find_cached_source_tarball(cache_dir, meta)
       src_rel = "src/#{src_fname}"
       src_out = File.join(channel_dir, src_rel)
       if bin_leaks.empty?
@@ -632,7 +899,14 @@ module PortPackager
         }
         File.write(File.join(td, "recipe-meta.json"), "#{JSON.pretty_generate(sort_json(rec_meta))}\n", encoding: "UTF-8")
 
-        rec_leaks = scan_directory_leaks(td, literals: literals, scan_elf_strings: false)
+        rec_leaks, rec_allowed = evaluate_package_leaks(
+          td,
+          literals: literals,
+          exact_rules: exact_rules,
+          upstream_tarball: cached_src,
+          scan_elf_strings: false
+        )
+        all_provenance_allowed["#{name} (recipe)"] = rec_allowed unless rec_allowed.empty?
         if rec_leaks.empty? && bin_leaks.empty?
           create_deterministic_tar_xz(td, rec_out, opts[:source_date_epoch])
           created_archives << rec_out
@@ -683,6 +957,30 @@ module PortPackager
       packages_index[name] = pkg_entry
     end
 
+    if opts[:leak_report]
+      FileUtils.mkdir_p(File.dirname(opts[:leak_report]))
+      report_obj = {
+        "channel" => opts[:channel],
+        "arch" => opts[:arch],
+        "exact_token_rules_loaded" => exact_rules.length,
+        "failed_packages" => all_leaks.keys.sort,
+        "failed_hits_total" => all_leaks.values.sum(&:length),
+        "provenance_allowed_total" => all_provenance_allowed.values.sum(&:length),
+        "provenance_allowed" => sort_json(all_provenance_allowed)
+      }
+      File.write(opts[:leak_report], "#{JSON.pretty_generate(report_obj)}\n", encoding: "UTF-8")
+    end
+
+    unless all_provenance_allowed.empty?
+      allowed_total = all_provenance_allowed.values.sum(&:length)
+      puts "LEAK_GATE PROVENANCE ALLOWED: #{allowed_total} generic hit(s) across #{all_provenance_allowed.size} package(s):"
+      all_provenance_allowed.keys.sort.each do |pkg_key|
+        all_provenance_allowed[pkg_key].each do |entry|
+          puts "  [#{pkg_key}] #{entry['file']}: #{entry['token'].inspect} (#{entry['pattern']}) <- #{entry['upstream_source']}"
+        end
+      end
+    end
+
     unless all_leaks.empty?
       created_archives.each { |p| File.unlink(p) if File.exist?(p) }
       total_hits = all_leaks.values.sum(&:length)
@@ -712,8 +1010,9 @@ module PortPackager
 
     index_path = File.join(channel_dir, "index.json")
     index_json = "#{JSON.pretty_generate(sort_json(index_obj))}\n"
-    leaks = scan_text_for_leaks("index.json", index_json, literals)
-    raise "LEAK_GATE FAILED on index.json:\n  #{leaks.join("\n  ")}" unless leaks.empty?
+    idx_hard, idx_gen = scan_text_for_leaks("index.json", index_json, literals, exact_rules: exact_rules)
+    idx_leaks = idx_hard + idx_gen.map { |g| "#{g[:file]}: forbidden generic #{g[:pattern]} #{g[:token].inspect}" }
+    raise "LEAK_GATE FAILED on index.json:\n  #{idx_leaks.join("\n  ")}" unless idx_leaks.empty?
 
     File.write(index_path, index_json, encoding: "UTF-8")
     sums_entries["index.json"] = file_sha256(index_path)

@@ -1,0 +1,56 @@
+Subject: Implement usermusl fenv functions via Fil-C runtime zmath natives
+Policy-Class: P1-Toolchain
+Rationale: Replace musl's generic no-op src/fenv/fenv.c stubs with forwarding calls to the Fil-C runtime's zmath_feclearexcept, zmath_feraiseexcept, zmath_fetestexcept, zmath_fegetround, zmath_fesetround, zmath_fegetenv, and zmath_fesetenv natives, enabling real hardware rounding modes, floating-point exception flags, and environment save/restore under Fil-C without inline assembly in usermusl. Upstream candidate for Fil-C usermusl.
+Upstream-Status: Upstream-Candidate (Fil-C)
+Fil-C-Origin-Commits: none
+
+diff --git a/src/fenv/fenv.c b/src/fenv/fenv.c
+--- a/src/fenv/fenv.c
++++ b/src/fenv/fenv.c
+@@ -1,38 +1,38 @@
+ #include <fenv.h>
+-
+-/* Dummy functions for archs lacking fenv implementation */
++#include <pizlonated_math.h>
+ 
+ int feclearexcept(int mask)
+ {
++	zmath_feclearexcept(mask);
+ 	return 0;
+ }
+ 
+ int feraiseexcept(int mask)
+ {
+-	return 0;
++	return zmath_feraiseexcept(mask);
+ }
+ 
+ int fetestexcept(int mask)
+ {
+-	return 0;
++	return zmath_fetestexcept(mask);
+ }
+ 
+ int fegetround(void)
+ {
+-	return FE_TONEAREST;
++	return zmath_fegetround();
+ }
+ 
+ int __fesetround(int r)
+ {
+-	return 0;
++	return zmath_fesetround(r);
+ }
+ 
+ int fegetenv(fenv_t *envp)
+ {
+-	return 0;
++	return zmath_fegetenv(envp);
+ }
+ 
+ int fesetenv(const fenv_t *envp)
+ {
+-	return 0;
++	return zmath_fesetenv(envp);
+ }

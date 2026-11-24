@@ -198,6 +198,84 @@ int main(void) {
 }
 EOF
 
+cat > "$TEST_DIR/fenv_test.c" <<'EOF'
+#include <fenv.h>
+#include <stdio.h>
+
+__attribute__((noinline))
+static double div_volatile_d(volatile double a, volatile double b) {
+    return a / b;
+}
+
+__attribute__((noinline))
+static long double div_volatile_ld(volatile long double a, volatile long double b) {
+    return a / b;
+}
+
+int main(void) {
+    if (fegetround() != FE_TONEAREST)
+        return 10;
+
+    /* Verify fesetround updates both SSE (MXCSR for double) and x87 CW (for long double) */
+    if (fesetround(FE_DOWNWARD) != 0 || fegetround() != FE_DOWNWARD)
+        return 11;
+    double d_down = div_volatile_d(1.0, 3.0);
+    long double ld_down = div_volatile_ld(1.0L, 3.0L);
+
+    if (fesetround(FE_UPWARD) != 0 || fegetround() != FE_UPWARD)
+        return 12;
+    double d_up = div_volatile_d(1.0, 3.0);
+    long double ld_up = div_volatile_ld(1.0L, 3.0L);
+
+    if (!(d_down < d_up))
+        return 13;
+    if (!(ld_down < ld_up))
+        return 14;
+
+    if (fesetround(FE_TOWARDZERO) != 0 || fegetround() != FE_TOWARDZERO)
+        return 15;
+    if (fesetround(0x12345) == 0)
+        return 16;
+
+    /* Verify exception flags and fegetenv/fesetenv preserve both SSE and x87 rounding states */
+    if (fesetround(FE_UPWARD) != 0)
+        return 17;
+    if (feclearexcept(FE_ALL_EXCEPT) != 0 || fetestexcept(FE_ALL_EXCEPT) != 0)
+        return 18;
+    if (feraiseexcept(FE_INEXACT | FE_OVERFLOW) != 0)
+        return 19;
+    if (fetestexcept(FE_INEXACT | FE_OVERFLOW) != (FE_INEXACT | FE_OVERFLOW))
+        return 20;
+
+    fenv_t saved_up;
+    if (fegetenv(&saved_up) != 0)
+        return 21;
+
+    if (fesetenv(FE_DFL_ENV) != 0)
+        return 22;
+    if (fegetround() != FE_TONEAREST || fetestexcept(FE_ALL_EXCEPT) != 0)
+        return 23;
+
+    /* Switch both SSE and x87 to FE_DOWNWARD, then restore saved FE_UPWARD environment */
+    if (fesetround(FE_DOWNWARD) != 0)
+        return 24;
+    if (div_volatile_d(1.0, 3.0) != d_down || div_volatile_ld(1.0L, 3.0L) != ld_down)
+        return 25;
+
+    if (fesetenv(&saved_up) != 0)
+        return 26;
+    if (fegetround() != FE_UPWARD || fetestexcept(FE_INEXACT | FE_OVERFLOW) != (FE_INEXACT | FE_OVERFLOW))
+        return 27;
+    if (div_volatile_d(1.0, 3.0) != d_up || div_volatile_ld(1.0L, 3.0L) != ld_up)
+        return 28;
+
+    if (fesetenv(FE_DFL_ENV) != 0)
+        return 29;
+    printf("FENV_OK: sse+x87 down<up round=%d\n", fegetround());
+    return 0;
+}
+EOF
+
 # ---------------------------------------------------------------------------
 # Compile & link all test binaries
 # ---------------------------------------------------------------------------
@@ -223,6 +301,7 @@ echo "FILC_PHASE tests running"
 printf '/* empty asm for -Wa driver check */\n' > "$TEST_DIR/wa_test.S"
 "$CLANG" -O0 -Wall -Wextra -Werror "$TEST_DIR/indirectbr_test.c" -o "$TEST_DIR/indirectbr_o0"
 "$CLANG" -O2 -Wall -Wextra -Werror "$TEST_DIR/indirectbr_test.c" -o "$TEST_DIR/indirectbr_o2"
+"$CLANG" -O2 -Wall -Wextra -Werror "$TEST_DIR/fenv_test.c" -o "$TEST_DIR/fenv_test"
 
 # ---------------------------------------------------------------------------
 # Execute tests and verify expectations
@@ -507,6 +586,16 @@ else
   FAILURES=$((FAILURES + 1))
 fi
 
+echo "=== Running (h) Floating-Point Environment (<fenv.h>) ==="
+run_and_capture fenv_test "$TEST_DIR/fenv_test"
+RC_FENV="$(cat "$TEST_DIR/fenv_test.rc")"
+if [[ "$RC_FENV" -eq 0 ]] && grep -Fq "FENV_OK: sse+x87 down<up round=0" "$TEST_DIR/fenv_test.stdout"; then
+  STATUS_FENV="PASS"
+else
+  STATUS_FENV="FAIL"
+  FAILURES=$((FAILURES + 1))
+fi
+
 OVERALL_STATUS="PASS"
 if (( FAILURES > 0 )); then
   OVERALL_STATUS="FAIL"
@@ -609,6 +698,15 @@ ARCH="$(uname -m)"
   echo ""
   echo "--- TEST (g) COMPILE-TIME REJECTION OF UNSUPPORTED CONSTRUCTS [$STATUS_REJECT] ---"
   echo "REJECT_OK: $REJECT_OK (builtin_setjmp=$(cat "$TEST_DIR/reject_builtin_setjmp.rc"), builtin_longjmp=$(cat "$TEST_DIR/reject_builtin_longjmp.rc"), define_setjmp=$(cat "$TEST_DIR/reject_define_setjmp.rc"), addrspace=$(cat "$TEST_DIR/reject_addrspace.rc"), module_asm=$(cat "$TEST_DIR/reject_module_asm.rc"), trap_asm_goto=$RC_ASM_GOTO)"
+  echo ""
+  echo "--- TEST (h) FLOATING-POINT ENVIRONMENT (<fenv.h>) [$STATUS_FENV] ---"
+  echo "EXIT_CODE: $RC_FENV"
+  echo "STDOUT:"
+  sed 's/^/  | /' "$TEST_DIR/fenv_test.stdout"
+  if [[ -s "$TEST_DIR/fenv_test.stderr" ]]; then
+    echo "STDERR:"
+    sed 's/^/  | /' "$TEST_DIR/fenv_test.stderr"
+  fi
   echo "================================================================================"
 } > "$REPORT_FILE"
 

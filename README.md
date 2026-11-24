@@ -86,7 +86,6 @@ Building and packaging software with Fil-C follows a toolchain-first policy desi
 
 ## Known Limitations
 
-- **Floating-point rounding modes (`<fenv.h>`):** The Fil-C musl libc flavor stubs out hand-written `fenv` assembly; `fesetround` is a no-op and `fegetround` always reports `FE_TONEAREST` (upstream Fil-C `filc/tests/fenvroundtrip/fenvroundtrip.c`).
 - **SysV IPC bulk semaphore operations:** `semctl(GETALL)` and `semctl(SETALL)` return `ENOSYS` in the pinned Fil-C runtime (`filc_runtime.c`).
 - **Process thread name (`ps hc` / `prctl(PR_SET_NAME)`):** Fil-C executes `main()` on a worker pthread while the Linux TGID leader stays parked in `pause()` (`filc_start_program.c`), so `ps hc` displays the TGID leader's `comm` name; `/proc/self/cmdline` (`ps h`) is updated via `zsetproctitle()`.
 - **Pointer serialization/synthesis (e.g. Perl `pack`/`unpack` `p`/`P` with byte-swapping, UTF-8 re-encoding, or integer pointer arithmetic):** Forging or byte-mangling pointers via raw integers/bytes strips Fil-C capabilities by design and traps under InvisiCaps.

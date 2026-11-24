@@ -7,6 +7,7 @@ UPSTREAM_SHA256_SOURCE="sha256:https://ftp.postgresql.org/pub/source/v18.7/postg
 EXTRACT_DIR="postgresql-18.7"
 TIER=4
 DEPS="libedit lz4 openssl pkgconf zlib zstd"
+HOST_TOOLS="bison flex"
 BUILD_SYSTEM="custom"
 CONFIGURE_ARGS=""
 MAKE_ARGS=""

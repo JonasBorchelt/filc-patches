@@ -66,6 +66,7 @@ UPSTREAM_SHA256=""
 EXTRACT_DIR=""
 TIER=""
 DEPS=""
+HOST_TOOLS=""
 BUILD_SYSTEM=""
 CONFIGURE_ARGS=""
 CMAKE_ARGS=""
@@ -486,6 +487,12 @@ if [[ ! -d "$PIZFIX" ]]; then
   echo "error: Fil-C sysroot (pizfix) not found at $PIZFIX" >&2
   exit 1
 fi
+for ht in $HOST_TOOLS; do
+  if ! command -v "$ht" >/dev/null 2>&1; then
+    echo "error: required host build tool '$ht' not found in PATH (declared in HOST_TOOLS for $PORT_NAME)" >&2
+    exit 1
+  fi
+done
 
 export CC="$CLANG_BIN"
 export CXX="$CLANGXX_BIN"

@@ -545,6 +545,85 @@ print(f"CUSTOM RECIPE FUNCTIONS UNDER TIMEOUT, CONFIG.LOG DUMP, TEST TRACE & FAI
 PY
 done
 
+echo "=== 6b. HOST_TOOLS pre-flight check & autoconf config.log pre-Cache excerpt ==="
+HT_DIR="$TMP_DIR/ht-ports"
+HT_WORK="$TMP_DIR/ht-work"
+mkdir -p "$HT_DIR/need-missing-tool" "$HT_DIR/ac-cfg-fail"
+cat > "$HT_DIR/need-missing-tool/PORT" <<EOF
+NAME="need-missing-tool"
+VERSION="1.0"
+LICENSE="MIT"
+UPSTREAM_URL="file://$TMP_DIR/fn-ok-1.0.tar.gz"
+UPSTREAM_SHA256="$FN_SHA"
+EXTRACT_DIR="fn-ok-1.0"
+TIER=0
+DEPS=""
+HOST_TOOLS="definitely_nonexistent_host_tool_xyz"
+BUILD_SYSTEM="custom"
+POLICY_CLASS="P0-Clean"
+
+port_configure() { :; }
+port_build()     { :; }
+port_install()   { :; }
+port_test()      { :; }
+EOF
+HT_ERR="$TMP_DIR/ht.err"
+if FILC_PORTS_DIR="$HT_DIR" FILC_TOOLCHAIN_ROOT="$FN_TC" \
+    "$REPO_ROOT/scripts/build-port" need-missing-tool "$HT_WORK" >"$TMP_DIR/ht.out" 2>"$HT_ERR"; then
+  echo "FAIL: build-port should fail when HOST_TOOLS binary is missing" >&2
+  exit 1
+fi
+assert_grep -Fq "required host build tool 'definitely_nonexistent_host_tool_xyz' not found" "$HT_ERR" "missing HOST_TOOLS diagnostic"
+python3 - "$HT_WORK/ports-state/need-missing-tool.json" <<'PY'
+import json, sys
+rec = json.load(open(sys.argv[1]))
+assert rec["status"] == "failed" and rec["failed_stage"] == "toolchain" and rec["failed_kind"] == "runner", rec
+PY
+
+cat > "$HT_DIR/ac-cfg-fail/PORT" <<EOF
+NAME="ac-cfg-fail"
+VERSION="1.0"
+LICENSE="MIT"
+UPSTREAM_URL="file://$TMP_DIR/fn-ok-1.0.tar.gz"
+UPSTREAM_SHA256="$FN_SHA"
+EXTRACT_DIR="fn-ok-1.0"
+TIER=0
+DEPS=""
+BUILD_SYSTEM="custom"
+POLICY_CLASS="P0-Clean"
+
+port_configure() {
+  {
+    echo "configure:100: checking for flex"
+    echo "configure:101: result: no"
+    echo "configure:102: error: flex not found"
+    echo ""
+    echo "## Cache variables. ##"
+    for i in \$(seq 1 120); do
+      echo "ac_cv_dummy_\$i='yes'"
+    done
+  } > "\$SRC_DIR/config.log"
+  echo "configure: error: flex not found" >&2
+  return 1
+}
+port_build()   { :; }
+port_install() { :; }
+port_test()    { :; }
+EOF
+AC_ERR="$TMP_DIR/ac.err"
+if FILC_PORTS_DIR="$HT_DIR" FILC_TOOLCHAIN_ROOT="$FN_TC" \
+    "$REPO_ROOT/scripts/build-port" ac-cfg-fail "$HT_WORK-ac" >"$TMP_DIR/ac.out" 2>"$AC_ERR"; then
+  echo "FAIL: ac-cfg-fail should fail in configure" >&2
+  exit 1
+fi
+assert_grep -Fq "configure: error: flex not found" "$AC_ERR" "configure error line in dump"
+assert_grep -Fq "checking for flex" "$AC_ERR" "pre-Cache config.log excerpt"
+if grep -Fq "ac_cv_dummy_120" "$AC_ERR"; then
+  echo "FAIL: dump_configure_logs should omit Autoconf Cache variables dump" >&2
+  exit 1
+fi
+echo "HOST_TOOLS & AUTOCONF CONFIG.LOG EXCERPT TESTS OK"
+
 echo "=== 7. --ports and FILC_PORTS subset selection test (openssh -> 8 ports) ==="
 SUB_WORK_CLI="$TMP_DIR/sub-work-cli"
 SUB_WORK_ENV="$TMP_DIR/sub-work-env"

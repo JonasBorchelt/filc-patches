@@ -1,7 +1,7 @@
 Subject: Preserve pointer provenance across alignment, low-bit tagging, and slab allocation
 Policy-Class: P2-Package
 Rationale: Eliminates pointer-to-uintptr_t-to-pointer round-trips that strip pointer capabilities on CHERI and Fil-C architectures, using portable standard C without Fil-C-specific headers: (1) ngx_align_ptr uses byte-pointer offset arithmetic (p + delta); (2) ngx_epoll_module, ngx_hash, and http/stream upstream_zone use byte-pointer +/- tag arithmetic instead of (uintptr_t) bit-OR/AND casts; (3) ngx_slab uses a typed ngx_slab_page_t *prev plus separate type field and u_char* page addresses; (4) nginx.c and ngx_event_openssl.c drop redundant (uintptr_t) intermediate casts.
-Upstream-Status: Upstreamable
+Upstream-Status: Upstream-Candidate (nginx upstream, CHERI/Fil-C portable)
 Fil-C-Origin-Commits: none
 
 --- a/src/core/ngx_config.h

@@ -57,6 +57,19 @@ if [[ -n "$REFERENCE" ]]; then
     if [[ ! -f "$ALT_FILE" ]] || ! grep -Fxq "$OBJ_DIR" "$ALT_FILE"; then
       echo "$OBJ_DIR" >> "$ALT_FILE"
     fi
+    SHALLOW_SRC="$(git -c safe.directory='*' -C "$REFERENCE" rev-parse --git-path shallow)"
+    if [[ "$SHALLOW_SRC" != /* ]]; then
+      SHALLOW_SRC="$REFERENCE/$SHALLOW_SRC"
+    fi
+    if [[ -s "$SHALLOW_SRC" ]]; then
+      SHALLOW_DST="$TARGET_DIR/.git/shallow"
+      if [[ -s "$SHALLOW_DST" ]]; then
+        cat "$SHALLOW_DST" "$SHALLOW_SRC" | sort -u > "${SHALLOW_DST}.tmp"
+        mv "${SHALLOW_DST}.tmp" "$SHALLOW_DST"
+      else
+        cp "$SHALLOW_SRC" "$SHALLOW_DST"
+      fi
+    fi
   fi
 fi
 

@@ -247,6 +247,16 @@ if [[ -n "$NIGHTLY_SRC_CACHE" ]]; then
   if [[ ! -f "$ALT_FILE" ]] || ! grep -Fxq "$OBJ_DIR" "$ALT_FILE"; then
     echo "$OBJ_DIR" >> "$ALT_FILE"
   fi
+  SHALLOW_SRC="$NIGHTLY_SRC_CACHE/llvm-project.git/shallow"
+  if [[ -s "$SHALLOW_SRC" ]]; then
+    SHALLOW_DST="$LLVM_DIR/.git/shallow"
+    if [[ -s "$SHALLOW_DST" ]]; then
+      cat "$SHALLOW_DST" "$SHALLOW_SRC" | sort -u > "${SHALLOW_DST}.tmp"
+      mv "${SHALLOW_DST}.tmp" "$SHALLOW_DST"
+    else
+      cp "$SHALLOW_SRC" "$SHALLOW_DST"
+    fi
+  fi
 fi
 
 if git -C "$LLVM_DIR" cat-file -e "${RELEASE_COMMIT}^{commit}" 2>/dev/null; then
@@ -272,7 +282,7 @@ if [[ "$ACTUAL" != "$RELEASE_COMMIT" ]]; then
   emit_report
   exit 1
 fi
-RELEASE_SUBJECT="$(git -C "$LLVM_DIR" log -1 --format='%cI %s' HEAD)"
+RELEASE_SUBJECT="$(git -C "$LLVM_DIR" show -s --format='%cI %s' HEAD)"
 echo "Checked out ${RELEASE_TAG}: ${RELEASE_COMMIT} (${RELEASE_SUBJECT})"
 echo "FILC_PHASE fetch success $(( $(date +%s) - T_FETCH_START ))"
 

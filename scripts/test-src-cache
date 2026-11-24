@@ -123,4 +123,21 @@ else
   fail "expected UPSTREAM pin mismatch abort from build-toolchain, got: $OUT8"
 fi
 
-echo "TEST_SRC_CACHE: ALL 10 CHECKS PASSED"
+# 9. Shallow bare cache alternates: propagating shallow boundary fixes show -s and log -1
+SHALLOW_CACHE="$TMP_ROOT/shallow-cache.git"
+git init --bare -q "$SHALLOW_CACHE"
+git -C "$SHALLOW_CACHE" remote add origin "file://$UPSTREAM_BARE"
+git -C "$SHALLOW_CACHE" fetch --depth=1 --no-tags -q origin "$COMMIT2"
+test -s "$SHALLOW_CACHE/shallow" || fail "expected shallow file in depth-1 bare cache"
+CHECKOUT_SHALLOW="$TMP_ROOT/checkout-shallow"
+git init -q "$CHECKOUT_SHALLOW"
+echo "$SHALLOW_CACHE/objects" > "$CHECKOUT_SHALLOW/.git/objects/info/alternates"
+cp "$SHALLOW_CACHE/shallow" "$CHECKOUT_SHALLOW/.git/shallow"
+git -C "$CHECKOUT_SHALLOW" checkout -q --force --detach "$COMMIT2"
+SUBJ_SHOW="$(git -C "$CHECKOUT_SHALLOW" show -s --format='%cI %s' HEAD)"
+echo "$SUBJ_SHOW" | grep -Fq "commit v2" || fail "git show -s failed on shallow alternate: $SUBJ_SHOW"
+SUBJ_LOG="$(git -C "$CHECKOUT_SHALLOW" log -1 --format='%cI %s' HEAD)"
+echo "$SUBJ_LOG" | grep -Fq "commit v2" || fail "git log -1 failed after shallow propagation: $SUBJ_LOG"
+pass "9. shallow bare cache alternate checkout works with show -s and log -1 after shallow propagation"
+
+echo "TEST_SRC_CACHE: ALL 11 CHECKS PASSED"

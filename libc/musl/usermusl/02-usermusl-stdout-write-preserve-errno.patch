@@ -1,0 +1,26 @@
+Subject: Preserve errno around TIOCGWINSZ zsys_ioctl in __stdout_write
+Policy-Class: P1-Toolchain
+Rationale: Upstream musl's src/stdio/__stdout_write.c probes terminal line-buffering via __syscall(SYS_ioctl, f->fd, TIOCGWINSZ, &wsz), which does not modify errno. Fil-C's 01-usermusl-filc.patch replaced __syscall with zsys_ioctl() (which sets errno=ENOTTY on pipes/files) without saving/restoring errno, unlike src/stdio/__fdopen.c in the same patch (which saves and restores saved_errno around zsys_ioctl). As a result, the first line-buffered stdout flush to a pipe or regular file clobbers errno with ENOTTY, violating POSIX/C stdio semantics (caught by Perl t/io/errno.t PERLIO=stdio tests 9-12). Upstream candidate for Fil-C usermusl.
+Upstream-Status: Upstream-Candidate (Fil-C)
+Fil-C-Origin-Commits: none
+
+diff --git a/src/stdio/__stdout_write.c b/src/stdio/__stdout_write.c
+index 13904b33..00000000 100644
+--- a/src/stdio/__stdout_write.c
++++ b/src/stdio/__stdout_write.c
+@@ -1,12 +1,15 @@
+ #include "stdio_impl.h"
++#include <errno.h>
+ #include <sys/ioctl.h>
+ #include <stdfil.h>
+ 
+ size_t __stdout_write(FILE *f, const unsigned char *buf, size_t len)
+ {
+ 	struct winsize wsz;
++	int saved_errno = errno;
+ 	f->write = __stdio_write;
+ 	if (!(f->flags & F_SVB) && zsys_ioctl(f->fd, TIOCGWINSZ, &wsz))
+ 		f->lbf = -1;
++	errno = saved_errno;
+ 	return __stdio_write(f, buf, len);
+ }

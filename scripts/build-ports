@@ -317,6 +317,137 @@ def make_blocked_record(name, meta, blockers)
   }
 end
 
+def fold_filc_panic_lines(lines, max_frames: 20)
+  hdr_re = /\bfilc\b[^\n]*\berror:/i
+  end_re = /(?:\bfilc panic:|thwarted a futile attempt)/i
+  hdr_idx = lines.rindex { |l| hdr_re.match?(l) }
+  end_idx = lines.rindex { |l| end_re.match?(l) }
+  return [] if hdr_idx.nil? && end_idx.nil?
+
+  start_i = hdr_idx.nil? ? [0, end_idx - 120].max : hdr_idx
+  stop_i = (!end_idx.nil? && end_idx >= start_i) ? end_idx : [lines.length - 1, start_i + 4000].min
+  block = lines[start_i..stop_i]
+
+  short_label = lambda do |ln|
+    s = ln.strip
+    s.include?(": ") ? s.split(": ").last.strip : s
+  end
+
+  header_lines = []
+  frame_lines = []
+  tail_marker = nil
+  in_frames = false
+  in_semantic_origin = false
+
+  block.each_with_index do |ln, idx|
+    if idx == block.length - 1 && end_re.match?(ln)
+      tail_marker = ln
+      next
+    end
+    st = ln.strip
+    if !in_frames
+      header_lines << ln
+      if /\Asemantic origin:/i.match?(st)
+        in_semantic_origin = true
+      elsif /\Acheck scheduled at/i.match?(st)
+        in_semantic_origin = false
+        in_frames = true
+      elsif idx > 0 && !in_semantic_origin && (ln.start_with?(" ") || ln.start_with?("\t")) && !/\Apointer:/i.match?(st)
+        header_lines.pop
+        in_frames = true
+        frame_lines << ln
+      end
+    else
+      frame_lines << ln
+    end
+  end
+
+  runs = []
+  frame_lines.each do |ln|
+    if !runs.empty? && runs[-1][0].strip == ln.strip
+      runs[-1][1] += 1
+    else
+      runs << [ln, 1]
+    end
+  end
+
+  out = header_lines.dup
+  runs[0, max_frames].each do |ln, cnt|
+    out << ln
+    out << "    ... #{cnt}x #{short_label.call(ln)}" if cnt > 1
+  end
+  if runs.length > max_frames
+    omitted = runs[max_frames..].sum { |_, c| c }
+    out << "    ... (#{omitted} more frames omitted)"
+  end
+  out << tail_marker unless tail_marker.nil?
+  out
+end
+
+def format_failed_port_log(log_lines, tail_count: 80)
+  norm = log_lines.map { |l| l.chomp("\n").chomp("\r") }
+  sections = []
+
+  # 1. Full Perl Test Summary Report (never truncated by log tail)
+  perl_idx = norm.rindex { |l| /\ATest Summary Report\b/.match?(l) }
+  if perl_idx
+    perl_end = perl_idx
+    ((perl_idx + 1)...norm.length).each do |i|
+      perl_end = i
+      break if /\AResult:\s+(?:FAIL|PASS)\b/.match?(norm[i])
+      break if (i - perl_idx) >= 260
+    end
+    sections << ["PERL TEST SUMMARY", norm[perl_idx..perl_end]]
+  end
+
+  # 2. CTest failure list
+  ctest_idx = norm.rindex { |l| /\AThe following tests FAILED:\s*\z/.match?(l) }
+  if ctest_idx
+    ctest_end = ctest_idx
+    ((ctest_idx + 1)...norm.length).each do |i|
+      ln = norm[i]
+      if /\A\s+\d+\s+-\s+/.match?(ln) || /\AErrors while running CTest\b/.match?(ln)
+        ctest_end = i
+        break if /\AErrors while running CTest\b/.match?(ln)
+      else
+        break
+      end
+      break if (i - ctest_idx) >= 120
+    end
+    sections << ["CTEST FAILURES", norm[ctest_idx..ctest_end]]
+  end
+
+  # 3. Automake / TAP FAIL:/ERROR:/XPASS: lines
+  auto_lines = norm.select { |l| /\A(?:FAIL|ERROR|XPASS)(?::\s+|\s+\S+\s+\(exit status:)/.match?(l) }
+  unless auto_lines.empty?
+    sections << ["TEST FAILURE LINES", auto_lines.first(100)]
+  end
+
+  # 4. Structured per-test diagnostic block (if emitted by port_test)
+  diag_start = norm.rindex { |l| /\A=== [A-Z0-9_]+ FAILURE DIAGNOSTICS ===\z/.match?(l) }
+  if diag_start
+    diag_end = norm[diag_start..].index { |l| /\A=== END [A-Z0-9_]+ FAILURE DIAGNOSTICS ===\z/.match?(l) }
+    diag_stop = diag_end ? [diag_start + diag_end, diag_start + 450].min : [norm.length - 1, diag_start + 450].min
+    sections << ["FAILURE DIAGNOSTICS", norm[diag_start..diag_stop]]
+  end
+
+  # 5. Folded Fil-C panic summary (when no structured diagnostic block already folded panics)
+  if diag_start.nil?
+    panic_lines = fold_filc_panic_lines(norm, max_frames: 20)
+    sections << ["FIL-C PANIC SUMMARY", panic_lines] unless panic_lines.empty?
+  end
+
+  tail = norm.length > tail_count ? norm[-tail_count..] : norm
+  out = []
+  sections.each do |title, slines|
+    out << "--- #{title} ---"
+    out.concat(slines)
+  end
+  out << "--- LOG TAIL (last #{tail.length} lines) ---"
+  out.concat(tail)
+  out
+end
+
 def run_parallel_dag(ports, selected, order, opts, work_root, state_dir, parallel)
   logs_dir = File.join(work_root, "ports-logs")
   install_lock = ENV.fetch("FILC_PORTS_INSTALL_LOCK", File.join(work_root, "ports-install.lock"))
@@ -422,10 +553,8 @@ def run_parallel_dag(ports, selected, order, opts, work_root, state_dir, paralle
       end
 
       if rec["status"] == "failed"
-        $stderr.puts("=== FAILED PORT LOG: #{name} (last 120 lines; full log: #{log_file}) ===")
-        tail = log_lines.length > 120 ? log_lines[-120..] : log_lines
-        tail.each { |l| $stderr.write(l) }
-        $stderr.puts("") if !tail.empty? && !tail.last.end_with?("\n")
+        $stderr.puts("=== FAILED PORT LOG: #{name} (structured summary + tail; full log: #{log_file}) ===")
+        format_failed_port_log(log_lines, tail_count: 80).each { |l| $stderr.puts(l) }
         $stderr.puts("=== END FAILED PORT LOG: #{name} ===")
         $stderr.flush
       end

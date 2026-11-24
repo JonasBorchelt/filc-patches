@@ -137,6 +137,7 @@ dump_test_logs() {
   while IFS= read -r logf; do
     echo "--- TEST LOG ($logf) ---" >&2
     grep -E '^(FAIL|XPASS|ERROR):' "$logf" >&2 || true
+    awk '/^The following tests FAILED:/{p=1} p{print; if (/^Errors while running CTest/) p=0}' "$logf" >&2 || true
     ruby - "$logf" >&2 <<'RB' || tail -n 120 "$logf" >&2 || true
 path = ARGV[0]
 lines = File.binread(path).force_encoding("UTF-8").encode("UTF-8", invalid: :replace, undef: :replace).lines.map { |l| l.chomp("\n").chomp("\r") }
@@ -226,7 +227,7 @@ if !after.empty?
 end
 puts out
 RB
-  done < <(find "$SRC_DIR" -maxdepth 3 -name 'test-suite.log' -type f 2>/dev/null)
+  done < <(find "$SRC_DIR" -maxdepth 4 \( -name 'test-suite.log' -o -name 'LastTest.log' \) -type f 2>/dev/null)
 }
 
 dump_configure_logs() {

@@ -248,6 +248,28 @@ across multiple packages at once:
    For `coreutils`, stripping the unrelated distro i18n patch (`~10k` lines)
    isolates only the small genuine Fil-C delta.
 
+#### Port Audit Class Note: `nm` / ELF Symbol Heuristics (`pizlonated_` and `filc_*`)
+
+Fil-C's `FilPizlonator` pass prefixes ELF symbols for C globals and functions
+with `pizlonated_` (for example `pizlonated_boot_XS__Other` instead of
+`boot_XS__Other`) and emits runtime helper references such as
+`filc_allocate_without_exiting`. Any build system, test suite, or packaging
+check that runs `nm`, `readelf`, or `objdump` and filters output with regexes
+will silently miss symbols or trigger false positives unless audited:
+
+- **`libtool` symbol export pipes** (`lt_cv_sys_global_symbol_pipe`, seen in
+  `pkgconf`, `curl`, and autotools shared libraries).
+- **Perl `ExtUtils::MakeMaker`** (`ExtUtils::MM_Unix::xs_static_lib_is_xs`
+  matching `` `nm $libfile` =~ /\b_?boot_/ ``, which skipped static XS archives
+  under `LINKTYPE => 'static'` until extended to `/\b(?:pizlonated_|_)?boot_/`).
+- **PostgreSQL `libpq`** (`libpq-refs-stamp` grepping `nm -A -u` for `exit`,
+  which false-positives on `filc_allocate_without_exiting`).
+- **Python `setuptools` / extension builders, custom export-map scripts, and
+  linker-script generators** that parse `nm` output directly.
+
+Every new port pre-flight audit should grep the upstream build and test files
+for `nm `, `readelf`, `objdump`, `global_symbol_pipe`, and symbol-name regexes.
+
 ### 2.4 Initial Policy Metrics Baseline (47 Packages)
 
 - **`P0-Clean` (0 patches already):** 12 packages (`25.5%`): `bzip2`, `blake3`,
@@ -521,7 +543,7 @@ requirements:
 | 49 | `oniguruma` | 0 | none | `onig-6.9.10` (github.com/kkos/oniguruma, `.sha256`) | `2a5cfc5ae259` | none | `P2-Package` | Builds upstream tarball (`--enable-posix-api`) with 1 minimal patch changing internal `st_data_t`/`hash_data_type` from `unsigned long` to `void*` for pointer capability provenance (fixes safety trap in `regparse.c:673 callout_name_table_hash`), and runs `make check`. Maintenance note: upstream `kkos/oniguruma` has been archived since 2025 (unmaintained upstream); security fixes only come from our own patches or the `jq` community, so dedicated CVE tracking is mandatory. |
 | 50 | `jq` | 1 | `oniguruma` | `jq-1.8.2` (github.com/jqlang/jq, `sha256sum.txt`) | `71b8d6e8f5fe` | none | `P3-BuildOpt` | Builds unmodified upstream tarball against staged `oniguruma` (`--disable-docs --disable-valgrind`, 0 patches). Deep-nesting test #531 (`3671x jv_dump_term`) hits `filc safety error: stack overflow.` at default 8 MiB stack because Fil-C stack frames are larger (safe earlier abort on extreme nesting); `port_test` raises `ulimit -s 65536` for `make check`. |
 | 51 | `less` | 4 | `ncurses` | `less-710` (ftp.gnu.org/gnu/less, PGP-signed) | `d1008fb78dca` | none | `P3-BuildOpt` | Builds unmodified upstream tarball against staged `ncurses` (`--with-regex=posix`, 0 patches) and passes `CC`/`CFLAGS`/`LDFLAGS` explicitly to `lesstest` so `termcap.h` is found under `$PIZFIX/include/ncursesw`. |
-| 52 | `perl` | 5 | none | `perl-5.40.5` (cpan.org, `.sha256.txt`) | `1fe6f825b487` | 3 commits (`b14fce6d`, `0465b263`, `6d5df7b3`; 20 files, `+153/-84`) | `P4-Audit` | Adopted from Fil-C `perl-5.40.0`, refreshed to `5.40.5` (`0 fuzz, 0 offset`), decomposed into 3 thematic patches (`zptrtable`/XS/`doio`+`mg`), configured with `-Uusenm` (compile-probe libc checks), and tested with `make test_harness`. |
+| 52 | `perl` | 5 | none | `perl-5.40.5` (cpan.org, `.sha256.txt`) | `1fe6f825b487` | 3 commits (`b14fce6d`, `0465b263`, `6d5df7b3`; 20 files, `+153/-84`) | `P4-Audit` | Adopted from Fil-C `perl-5.40.0`, refreshed to `5.40.5` (`0 fuzz, 0 offset`), decomposed into 7 thematic patches (01-03 adopted `zptrtable`/XS/`doio`+`mg`, 04 CPAN/XS completeness + `ExtUtils::MM_Unix` `pizlonated_boot_` detection, 05 core `DPTR2FPTR`/ptrtable/`zsetproctitle`, 06 test-only platform-limit skips, 07 upstreamable `PERL_FPU_POST_EXEC` `errno` preservation), configured with `-Uusenm`, and verified with full unmodified `make test_harness` (4 approved platform exclusions: `IPC-SysV` `ipcsysv.t`/`sem.t`, `io/sem.t`, `POSIX` `fenv.t`). |
 
 Planned follow-ups in dependency order: `oniguruma` -> `jq`, `less`, `perl`,
 `nginx` (`pcre2`, `zlib`, `openssl`), and `postgresql` with `libpq` (`openssl`,

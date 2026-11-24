@@ -84,6 +84,11 @@ Building and packaging software with Fil-C follows a toolchain-first policy desi
 4. **Audit imported port patches:** Adopted Fil-C port patches serve only as a starting point with full provenance attribution and are reviewed to verify whether they mask an underlying toolchain gap.
 5. **Measure and reduce patch debt:** We track unmodified versus patched package counts and patch sizes, with the explicit goal of driving the number and size of package patches down over time.
 
+## Known Limitations
+
+- **Floating-point rounding modes (`<fenv.h>`):** The Fil-C musl libc flavor stubs out hand-written `fenv` assembly; `fesetround` is a no-op and `fegetround` always reports `FE_TONEAREST` (upstream Fil-C `filc/tests/fenvroundtrip/fenvroundtrip.c`).
+- **SysV IPC bulk semaphore operations:** `semctl(GETALL)` and `semctl(SETALL)` return `ENOSYS` in the pinned Fil-C runtime (`filc_runtime.c`).
+
 ## Provenance & Licensing
 
 Original scripts, documentation, and repository metadata in `filc-patches`

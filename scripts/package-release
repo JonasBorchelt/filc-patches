@@ -491,6 +491,11 @@ without access to the build tree:
 - Computed-goto (\`indirectbr\`) runtime verification at \`-O0\` and \`-O2\`
 - Upstream package build and test (\`zlib\` and \`lua\` 5.4.7 with jump table)
 
+## Known limitations
+
+- **Floating-point rounding modes (\`<fenv.h>\`):** The Fil-C musl libc flavor stubs out hand-written \`fenv\` assembly; \`fesetround\` is a no-op and \`fegetround\` always reports \`FE_TONEAREST\` (upstream Fil-C \`filc/tests/fenvroundtrip/fenvroundtrip.c\`).
+- **SysV IPC bulk semaphore operations:** \`semctl(GETALL)\` and \`semctl(SETALL)\` return \`ENOSYS\` in the pinned Fil-C runtime (\`filc_runtime.c\`).
+
 ## Quickstart
 
 \`\`\`sh

@@ -494,23 +494,31 @@ revisions and the \`filc-patches\` series.
 
 ## Components
 
-- LLVM / Clang / LLD / compiler-rt / libc++ / libc++abi: \`${LLVM_TAG}\` (\`${LLVM_COMMIT:0:12}\`)
+- LLVM / Clang / LLD / LLVM binutils (\`llvm-ar\`, \`llvm-ranlib\`, \`llvm-nm\`) / compiler-rt / libc++ / libc++abi: \`${LLVM_TAG}\` (\`${LLVM_COMMIT:0:12}\`)
 - Fil-C compiler passes and runtime: \`${FILC_COMMIT:0:12}\`
 - musl libc (yolomusl and usermusl): \`${MUSL_COMMIT:0:12}\`
 - Patch series SHA-256: \`${PATCH_SERIES_SHA256}\`
 ${PUBLIC_COMMIT:+- \`filc-patches\` commit: \`${PUBLIC_COMMIT}\`
 }
+## Highlights
+
+- **\`usermusl\` \`errno\` preservation:** \`src/stdio/__stdout_write.c\` saves and restores \`errno\` around \`zsys_ioctl(f->fd, TIOCGWINSZ, &wsz)\`, preventing non-TTY \`stdout\` writes from clobbering \`errno\` with \`ENOTTY\`.
+- **Centralized \`libtool\` and linker version-script support:** Clang driver rewrites both \`-Wl,--version-script\` and \`-Wl,-version-script\` (joined and separated forms, including anonymous \`{ global: ...; local: *; };\` scripts) via \`PizlonateVersionScript()\`, paired with \`pizlonated_\`-aware \`lt_cv_sys_global_symbol_pipe\`.
+- **Self-contained LLVM binutils:** \`llvm-ar\`, \`llvm-ranlib\`, and \`llvm-nm\` are built alongside \`clang\` and \`lld\`, bundled in this archive under \`build/bin/\` with top-level \`bin/\` wrappers, and required by \`scripts/build-port\` with no host \`ar\`/\`ranlib\`/\`nm\` fallbacks.
+- **54 verified userland ports** (24 unmodified upstream packages, 30 patched packages, 36 patches total), adding 7 new ports: \`libsodium 1.0.22\`, \`oniguruma 6.9.10\` (archived upstream since 2025; dedicated CVE monitoring required), \`jq 1.8.2\`, \`less 710\`, \`perl 5.40.5\`, \`nginx 1.30.8\`, and \`postgresql-client 18.7\`.
+
 ## Verification
 
 Tested directly from the unpacked archive in a fresh temporary directory
-without access to the build tree:
+without access to the build tree, plus a full 54/54 userland port sweep:
 
 - C Hello World compilation and execution
 - C++20 Hello World with \`libc++\` and exception handling
 - Out-of-Bounds memory-safety trap
 - Use-After-Free memory-safety trap
 - Computed-goto (\`indirectbr\`) runtime verification at \`-O0\` and \`-O2\`
-- Upstream package build and test (\`zlib\` and \`lua\` 5.4.7 with jump table)
+- Bundled \`llvm-ar\`, \`llvm-ranlib\`, and \`llvm-nm\` archive/symbol verification
+- Upstream package build and test (\`zlib\` and \`lua\` 5.4.7 with jump table) using only bundled toolchain binaries
 
 ## Known limitations
 
@@ -519,6 +527,7 @@ without access to the build tree:
 - **Process thread name (\`ps hc\` / \`prctl(PR_SET_NAME)\`):** Fil-C executes \`main()\` on a worker pthread while the Linux TGID leader stays parked in \`pause()\` (\`filc_start_program.c\`), so \`ps hc\` displays the TGID leader's \`comm\` name; \`/proc/self/cmdline\` (\`ps h\`) is updated via \`zsetproctitle()\`.
 - **Pointer serialization/synthesis (e.g. Perl \`pack\`/\`unpack\` \`p\`/\`P\` with byte-swapping, UTF-8 re-encoding, or integer pointer arithmetic):** Forging or byte-mangling pointers via raw integers/bytes strips Fil-C capabilities by design and traps under InvisiCaps.
 - **PostgreSQL (\`postgresql-client\`):** Client tools (\`psql\`, \`pg_dump\`, \`pg_restore\`, \`pg_isready\`, \`pg_config\`) and \`libpq\` only; the PostgreSQL server is not supported under Fil-C (\`Datum\` carries pointers as integers).
+- **GNU coreutils 9.12+ \`env\` pipe quoting:** \`env\` defaults to shell-quoting output even on non-TTY pipes when \`QUOTING_STYLE\` is unset; downstream tools/tests that clear \`%ENV\` and parse \`env\` output may need \`QUOTING_STYLE=literal\`.
 
 ## Quickstart
 

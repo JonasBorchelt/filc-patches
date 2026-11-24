@@ -44,7 +44,7 @@ Requirements on Linux (`x86_64` or `aarch64`): `git`, `cmake`, `ninja`,
 ./scripts/apply --sparse .work/llvm-project
 
 # 2. Build the complete Fil-C Linux musl + libc++ toolchain
-#    (clang, lld, compiler-rt, yolounwind, yolomusl, libpizlo/CRT, usermusl, libc++/libc++abi)
+#    (clang, lld, llvm-ar, llvm-ranlib, llvm-nm, compiler-rt, yolounwind, yolomusl, libpizlo/CRT, usermusl, libc++/libc++abi)
 ./scripts/build-toolchain .work/toolchain
 
 # 3. Run the end-to-end runtime and memory-safety verification suite

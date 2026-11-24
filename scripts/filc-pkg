@@ -4,7 +4,7 @@ set -eu
 # Lightweight installer for signed Fil-C userland port binary packages.
 #
 # Usage:
-#   scripts/filc-pkg --toolchain-root /path/to/filc-0.1.3-x86_64-linux [--channel 0.1.3] [--base-url https://filc.connected.link] [--pubkey /path/to/pubkey.pub] install <pkg> [pkg...]
+#   scripts/filc-pkg [--toolchain-root /opt/filc/0.1.4] [--channel 0.1.4] [--base-url https://filc.connected.link] [--pubkey /path/to/pubkey.pub] install <pkg> [pkg...]
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 DEFAULT_PUBKEY="$SCRIPT_DIR/../ports/ports-pubkey.pub"
@@ -20,7 +20,7 @@ fi
 SKIP_SIG=0
 
 usage() {
-  echo "Usage: $0 --toolchain-root DIR [--channel VER] [--base-url URL] [--pubkey FILE] install <pkg>..." >&2
+  echo "Usage: $0 [--toolchain-root DIR] [--channel VER] [--base-url URL] [--pubkey FILE] install <pkg>..." >&2
   exit 2
 }
 
@@ -38,7 +38,10 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -n "$TOOLCHAIN_ROOT" ] || { echo "error: --toolchain-root is required" >&2; exit 2; }
+if [ -z "$TOOLCHAIN_ROOT" ] && [ -n "$CHANNEL" ]; then
+  TOOLCHAIN_ROOT="/opt/filc/$CHANNEL"
+fi
+[ -n "$TOOLCHAIN_ROOT" ] || { echo "error: --toolchain-root (or --channel for /opt/filc/<channel>) is required" >&2; exit 2; }
 [ $# -ge 1 ] || usage
 
 PIZFIX="$TOOLCHAIN_ROOT/pizfix"

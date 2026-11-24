@@ -587,8 +587,17 @@ fi
 export PREFIX="$PIZFIX"
 export PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig:$PIZFIX/share/pkgconfig"
 export PATH="$PIZFIX/bin:$(dirname "$CLANG_BIN"):$PATH"
-export CFLAGS="${CFLAGS:--O2 -g}"
-export CXXFLAGS="${CXXFLAGS:--O2 -g}"
+case "$BUILD_BASE" in
+  /build/filc-ports|/build/filc-ports/*)
+    export CFLAGS="${CFLAGS:--O2 -g}"
+    export CXXFLAGS="${CXXFLAGS:--O2 -g}"
+    ;;
+  *)
+    PREFIX_MAP_FLAGS="-ffile-prefix-map=$BUILD_BASE=/build/filc-ports"
+    export CFLAGS="${CFLAGS:--O2 -g} $PREFIX_MAP_FLAGS"
+    export CXXFLAGS="${CXXFLAGS:--O2 -g} $PREFIX_MAP_FLAGS"
+    ;;
+esac
 export LDFLAGS="${LDFLAGS:-}"
 
 # 6. Configure, Build, Install

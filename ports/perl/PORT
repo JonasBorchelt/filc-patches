@@ -47,6 +47,8 @@ port_configure() {
     -Dlocincpth=' ' \
     -Dusethreads \
     -Dmyuname="linux" \
+    -Dmyhostname="localhost" \
+    -Dmydomain=".localdomain" \
     -Dcf_by="filc-ports" \
     -Dcf_email="ports@example.invalid"
 }

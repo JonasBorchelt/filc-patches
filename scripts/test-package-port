@@ -62,8 +62,9 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
     POLICY_CLASS=P0-Clean
   PORT
 
-  # Installed files in pizfix + install manifest
+  # Installed files in pizfix + install manifest (including a .la file that must be stripped)
   File.write(File.join(pizfix, "include", "demo.h"), "#define DEMO_VER 1\n")
+  File.write(File.join(pizfix, "lib", "libdemo.la"), "libdir='#{pizfix}/lib'\n")
   File.write(File.join(pizfix, "lib", "pkgconfig", "demo.pc"), <<~PC)
     prefix=#{pizfix}
     exec_prefix=${prefix}
@@ -78,7 +79,7 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
   PC
   File.write(File.join(state, "demo.manifest.json"), JSON.pretty_generate(
     "port" => "demo",
-    "files" => ["include/demo.h", "lib/pkgconfig/demo.pc"]
+    "files" => ["include/demo.h", "lib/libdemo.la", "lib/pkgconfig/demo.pc"]
   ) + "\n")
 
   # 1. Clean packaging + .pc relocation + GPL corresponding source + recipe
@@ -104,7 +105,7 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
   assert(File.file?(File.join(ch_dir, pkg.dig("source", "path"))), "missing GPL corresponding source tarball")
   assert(File.file?(File.join(ch_dir, pkg.dig("recipe", "path"))), "missing recipe tar.xz")
 
-  # Verify .pc relocation inside binary tarball
+  # Verify .pc relocation and .la stripping inside binary tarball
   extract = File.join(td, "extract")
   FileUtils.mkdir_p(extract)
   _to, terr, tst = Open3.capture3("tar", "-xf", File.join(ch_dir, pkg.dig("binary", "path")), "-C", extract)
@@ -112,10 +113,32 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
   pc_text = File.read(File.join(extract, "prefix", "lib", "pkgconfig", "demo.pc"))
   assert(pc_text.include?("prefix=${pcfiledir}/../.."), "demo.pc was not relocated: #{pc_text}")
   assert(!pc_text.include?(pizfix), "demo.pc still contains absolute pizfix path")
+  assert(!File.exist?(File.join(extract, "prefix", "lib", "libdemo.la")), ".la file must be stripped from binary tarball")
+  pkg_meta = JSON.parse(File.read(File.join(extract, "filc-pkg.json")))
+  assert(!pkg_meta["files"].key?("lib/libdemo.la"), ".la file must not appear in filc-pkg.json")
 
-  # 2. Leak-gate MUST fail if a staged file contains a private IP
+  # 2. Leak-gate MUST collect ALL hits across ALL packages before failing
+  FileUtils.mkdir_p(File.join(repo, "ports", "demo2", "patches"))
+  File.write(File.join(repo, "ports", "demo2", "PORT"), <<~PORT2)
+    NAME=demo2
+    VERSION=1.0
+    LICENSE=MIT
+    UPSTREAM_URL=https://example.invalid/demo-1.0.tar.gz
+    UPSTREAM_SHA256=#{src_sha}
+    EXTRACT_DIR=demo-1.0
+    TIER=0
+    DEPS=""
+    BUILD_SYSTEM=autotools
+    POLICY_CLASS=P0-Clean
+  PORT2
+  File.binwrite(File.join(cache, "demo2-1.0-#{src_sha[0, 12]}-demo-1.0.tar.gz"), src_bytes)
   fake_private_ip = %w[192 168 0 1].join(".")
   File.write(File.join(pizfix, "include", "demo.h"), "#define LEAK \"#{fake_private_ip}\"\n")
+  File.write(File.join(pizfix, "include", "demo2.h"), "#define LEAK2 \"#{repo}/secret\"\n")
+  File.write(File.join(state, "demo2.manifest.json"), JSON.pretty_generate(
+    "port" => "demo2",
+    "files" => ["include/demo2.h"]
+  ) + "\n")
   _lo, lerr, lst = Open3.capture3(
     "ruby", PACKAGE_SCRIPT,
     "--repo-root", repo,
@@ -126,8 +149,41 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
     "--channel", "0.1.3",
     "--arch", "x86_64-linux"
   )
-  assert(!lst.success?, "leak-gate must reject private IP in staged file")
-  assert(lerr.include?("LEAK_GATE FAILED"), "expected LEAK_GATE FAILED message, got: #{lerr}")
+  assert(!lst.success?, "leak-gate must reject private IP and repo path")
+  assert(lerr.include?("LEAK_GATE FAILED across 2 package(s)"), "expected multi-package LEAK_GATE summary, got: #{lerr}")
+  assert(lerr.include?("[demo]") && lerr.include?("[demo2]"), "expected hits for both demo and demo2, got: #{lerr}")
+
+  # 2b. Neutral prefix allowed when --neutral-prefix matches --pizfix
+  File.write(File.join(pizfix, "include", "demo.h"), "#define NEUTRAL_PREFIX \"#{pizfix}\"\n")
+  _no, nerr, nst = Open3.capture3(
+    "ruby", PACKAGE_SCRIPT,
+    "--repo-root", repo,
+    "--work-dir", work,
+    "--pizfix", pizfix,
+    "--neutral-prefix", pizfix,
+    "--ports", "demo",
+    "--ports-cache-dir", cache,
+    "--out-dir", File.join(td, "out-neutral"),
+    "--channel", "0.1.3",
+    "--arch", "x86_64-linux"
+  )
+  assert(nst.success?, "neutral prefix should be allowed when --neutral-prefix == --pizfix: #{nerr}")
+
+  # 2c. Unsafe --neutral-build-dir must be rejected
+  _bo, berr, bst = Open3.capture3(
+    "ruby", PACKAGE_SCRIPT,
+    "--repo-root", repo,
+    "--work-dir", work,
+    "--pizfix", pizfix,
+    "--neutral-build-dir", work,
+    "--ports", "demo",
+    "--ports-cache-dir", cache,
+    "--out-dir", File.join(td, "out-badbuild"),
+    "--channel", "0.1.3",
+    "--arch", "x86_64-linux"
+  )
+  assert(!bst.success?, "unsafe --neutral-build-dir must be rejected")
+  assert(berr.include?("unsafe --neutral-build-dir"), "expected unsafe --neutral-build-dir error, got: #{berr}")
 
   # 3. Upload script MUST refuse unsigned channel
   _uo, uerr, ust = Open3.capture3(

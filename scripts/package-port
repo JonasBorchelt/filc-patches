@@ -36,9 +36,12 @@ module PortPackager
     /(?:^|[^0-9])172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}(?:[^0-9]|$)/,
     Regexp.new("\\b(?:#{INFRA_WORDS.join('|')})\\b", Regexp::IGNORECASE),
     %r{/ccache/},
+    Regexp.new("/#{%w[s rv].join}/"),
     Regexp.new("/#{%w[wood pecker].join}/"),
     %r{/\.work/}
   ].freeze
+
+  NEUTRAL_BUILD_DIR_RE = %r{\A/build/filc-ports(?:/[A-Za-z0-9._-]+)?\z}
 
   module_function
 
@@ -193,11 +196,20 @@ module PortPackager
     [count, added, removed]
   end
 
-  def build_forbidden_literals(work_dir:, repo_root:, pizfix:)
+  def build_forbidden_literals(work_dir:, repo_root:, pizfix:, neutral_prefix: nil, neutral_build_dir: nil)
     lits = []
-    [work_dir, repo_root, pizfix, ENV["HOSTNAME"]].each do |v|
+    neutral = neutral_prefix.to_s.strip
+    neutral_build = neutral_build_dir.to_s.strip
+    if !neutral_build.empty? && !NEUTRAL_BUILD_DIR_RE.match?(neutral_build)
+      raise ArgumentError, "unsafe --neutral-build-dir (must match #{NEUTRAL_BUILD_DIR_RE.source}): #{neutral_build}"
+    end
+
+    candidates = [repo_root, ENV["HOSTNAME"]]
+    candidates << work_dir unless !neutral_build.empty? && work_dir.to_s.strip == neutral_build
+    candidates << pizfix unless !neutral.empty? && pizfix.to_s.strip == neutral
+    candidates.each do |v|
       s = v.to_s.strip
-      lits << s if s.length >= 6 && !%w[localhost debian linux].include?(s)
+      lits << s if s.length >= 6 && !%w[localhost debian linux].include?(s) && s != neutral && s != neutral_build
     end
     user = ENV["USER"].to_s.strip
     if !user.empty? && !%w[root nobody ci runner user builder].include?(user)
@@ -220,7 +232,7 @@ module PortPackager
     hits
   end
 
-  def leak_gate_directory!(stage_dir, literals:, allow_elf_strings: false)
+  def scan_directory_leaks(stage_dir, literals:, scan_elf_strings: true)
     hits = []
     Dir.glob(File.join(stage_dir, "**", "*"), File::FNM_DOTMATCH).sort.each do |path|
       base = File.basename(path)
@@ -244,8 +256,8 @@ module PortPackager
             end
           end
         end
-        if allow_elf_strings && cmd_available?("strings")
-          out, _e, st = Open3.capture3("strings", "-n", "6", path)
+        if scan_elf_strings && cmd_available?("strings")
+          out, _e, st = Open3.capture3("strings", "-a", "-n", "6", path)
           hits.concat(scan_text_for_leaks("ELF strings #{rel}", out, literals)) if st.success?
         end
         next
@@ -258,7 +270,12 @@ module PortPackager
       hits.concat(scan_text_for_leaks(rel, text, literals))
     end
 
-    raise "LEAK_GATE FAILED:\n  #{hits.uniq.first(25).join("\n  ")}" unless hits.empty?
+    hits.uniq
+  end
+
+  def leak_gate_directory!(stage_dir, literals:, scan_elf_strings: true)
+    hits = scan_directory_leaks(stage_dir, literals: literals, scan_elf_strings: scan_elf_strings)
+    raise "LEAK_GATE FAILED:\n  #{hits.first(50).join("\n  ")}" unless hits.empty?
   end
 
   def relocate_stage!(prefix_dir, pizfix)
@@ -269,6 +286,12 @@ module PortPackager
       next if File.directory?(path) || File.symlink?(path)
 
       rel = path.sub("#{prefix_dir}/", "")
+
+      # Remove libtool .la files (Debian policy; avoids hardcoded build paths)
+      if rel.end_with?(".la")
+        File.unlink(path)
+        next
+      end
 
       # Relocate pkg-config .pc files
       if rel.end_with?(".pc") && (rel.start_with?("lib/pkgconfig/", "share/pkgconfig/"))
@@ -388,6 +411,8 @@ module PortPackager
       repo_root: repo_root,
       work_dir: File.join(repo_root, ".work", "ports"),
       pizfix: nil,
+      neutral_prefix: nil,
+      neutral_build_dir: nil,
       ports_cache_dir: nil,
       out_dir: nil,
       channel: nil,
@@ -407,6 +432,8 @@ module PortPackager
       o.on("--repo-root DIR", "Repository root") { |v| opts[:repo_root] = File.expand_path(v) }
       o.on("--work-dir DIR", "build-ports work root (contains ports-state/)") { |v| opts[:work_dir] = File.expand_path(v) }
       o.on("--pizfix DIR", "Fil-C pizfix sysroot directory") { |v| opts[:pizfix] = File.expand_path(v) }
+      o.on("--neutral-prefix DIR", "Fixed public install prefix allowed in staged files (default: /opt/filc/<channel>/pizfix)") { |v| opts[:neutral_prefix] = File.expand_path(v) }
+      o.on("--neutral-build-dir DIR", "Fixed neutral build root under /build/filc-ports allowed in staged build metadata") { |v| opts[:neutral_build_dir] = File.expand_path(v) }
       o.on("--ports-cache-dir DIR", "Upstream source tarball cache directory") { |v| opts[:ports_cache_dir] = File.expand_path(v) }
       o.on("--out-dir DIR", "Output channel root directory") { |v| opts[:out_dir] = File.expand_path(v) }
       o.on("--channel VERSION", "Toolchain release channel (e.g. 0.1.3)") { |v| opts[:channel] = v }
@@ -459,7 +486,14 @@ module PortPackager
 
     upstream = File.file?(File.join(repo_root, "UPSTREAM")) ? parse_kv_file(File.join(repo_root, "UPSTREAM")) : {}
     all_ports = load_all_ports(ports_dir)
-    literals = build_forbidden_literals(work_dir: work_dir, repo_root: repo_root, pizfix: pizfix)
+    neutral_prefix = opts[:neutral_prefix] || "/opt/filc/#{opts[:channel]}/pizfix"
+    literals = build_forbidden_literals(
+      work_dir: work_dir,
+      repo_root: repo_root,
+      pizfix: pizfix,
+      neutral_prefix: neutral_prefix,
+      neutral_build_dir: opts[:neutral_build_dir]
+    )
 
     selected_names = if opts[:ports_filter] && !opts[:ports_filter].empty?
                        opts[:ports_filter]
@@ -473,11 +507,15 @@ module PortPackager
     FileUtils.mkdir_p(File.join(channel_dir, "src"))
     FileUtils.mkdir_p(File.join(channel_dir, "recipes"))
 
-    repo_commit_out, _e, rc_st = Open3.capture3("git", "-C", repo_root, "rev-parse", "--short=12", "HEAD")
-    repo_commit = rc_st.success? ? repo_commit_out.strip : nil
+    repo_commit = if cmd_available?("git")
+                    repo_commit_out, _e, rc_st = Open3.capture3("git", "-C", repo_root, "rev-parse", "--short=12", "HEAD")
+                    rc_st.success? ? repo_commit_out.strip : nil
+                  end
 
     packages_index = {}
     sums_entries = {}
+    all_leaks = {}
+    created_archives = []
 
     selected_names.sort.each do |name|
       meta = all_ports.fetch(name) { raise "unknown port: #{name}" }
@@ -495,13 +533,15 @@ module PortPackager
       bin_rel = "bin/#{bin_fname}"
       bin_out = File.join(channel_dir, bin_rel)
 
-      # 1. Stage binary package, relocate, leak-gate, and pack
+      # 1. Stage binary package, strip .la files, relocate, leak-gate, and pack
+      bin_leaks = []
       Dir.mktmpdir("filc-pkg-bin-") do |td|
         prefix_stage = File.join(td, "prefix")
         FileUtils.mkdir_p(prefix_stage)
 
         files.each do |rel|
           raise "unsafe manifest relative path: #{rel}" if rel.start_with?("/") || rel.split("/").include?("..")
+          next if rel.end_with?(".la")
 
           src_item = File.join(pizfix, rel)
           next unless File.exist?(src_item) || File.symlink?(src_item)
@@ -549,21 +589,29 @@ module PortPackager
         }
         File.write(File.join(td, "filc-pkg.json"), "#{JSON.pretty_generate(sort_json(pkg_manifest))}\n", encoding: "UTF-8")
 
-        leak_gate_directory!(td, literals: literals)
-        create_deterministic_tar_xz(td, bin_out, opts[:source_date_epoch])
+        bin_leaks = scan_directory_leaks(td, literals: literals, scan_elf_strings: true)
+        if bin_leaks.empty?
+          create_deterministic_tar_xz(td, bin_out, opts[:source_date_epoch])
+          created_archives << bin_out
+        else
+          all_leaks[name] = bin_leaks
+        end
       end
 
       # 2. Copy SHA-256 verified upstream corresponding source tarball (GPL compliance)
       cached_src, src_fname, src_sha = find_cached_source_tarball(cache_dir, meta)
       src_rel = "src/#{src_fname}"
       src_out = File.join(channel_dir, src_rel)
-      FileUtils.cp(cached_src, src_out) unless File.file?(src_out) && file_sha256(src_out) == src_sha
+      if bin_leaks.empty?
+        FileUtils.cp(cached_src, src_out) unless File.file?(src_out) && file_sha256(src_out) == src_sha
+      end
 
       # 3. Package recipe + patches + provenance + license metadata
       rec_fname = "#{name}-#{meta['version']}-r#{opts[:revision]}-recipe.tar.xz"
       rec_rel = "recipes/#{rec_fname}"
       rec_out = File.join(channel_dir, rec_rel)
 
+      rec_leaks = []
       Dir.mktmpdir("filc-pkg-rec-") do |td|
         FileUtils.cp(File.join(meta["port_dir"], "PORT"), File.join(td, "PORT"))
         patches_dir = File.join(meta["port_dir"], "patches")
@@ -584,9 +632,16 @@ module PortPackager
         }
         File.write(File.join(td, "recipe-meta.json"), "#{JSON.pretty_generate(sort_json(rec_meta))}\n", encoding: "UTF-8")
 
-        leak_gate_directory!(td, literals: literals)
-        create_deterministic_tar_xz(td, rec_out, opts[:source_date_epoch])
+        rec_leaks = scan_directory_leaks(td, literals: literals, scan_elf_strings: false)
+        if rec_leaks.empty? && bin_leaks.empty?
+          create_deterministic_tar_xz(td, rec_out, opts[:source_date_epoch])
+          created_archives << rec_out
+        elsif !rec_leaks.empty?
+          all_leaks["#{name} (recipe)"] = rec_leaks
+        end
       end
+
+      next unless bin_leaks.empty? && rec_leaks.empty?
 
       bin_sha = file_sha256(bin_out)
       rec_sha = file_sha256(rec_out)
@@ -626,6 +681,19 @@ module PortPackager
       pkg_entry["ci_run"] = opts[:ci_run] if opts[:ci_run]
       pkg_entry["repo_commit"] = repo_commit if repo_commit
       packages_index[name] = pkg_entry
+    end
+
+    unless all_leaks.empty?
+      created_archives.each { |p| File.unlink(p) if File.exist?(p) }
+      total_hits = all_leaks.values.sum(&:length)
+      lines = ["LEAK_GATE FAILED across #{all_leaks.size} package(s) (#{total_hits} total hit(s)):"]
+      all_leaks.keys.sort.each do |pkg_key|
+        pkg_hits = all_leaks[pkg_key]
+        lines << "  [#{pkg_key}] (#{pkg_hits.length} hit(s)):"
+        pkg_hits.first(50).each { |h| lines << "    - #{h}" }
+        lines << "    ... (#{pkg_hits.length - 50} more hits omitted)" if pkg_hits.length > 50
+      end
+      raise lines.join("\n")
     end
 
     index_obj = {

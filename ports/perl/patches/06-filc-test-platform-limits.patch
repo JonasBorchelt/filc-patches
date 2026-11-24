@@ -1,6 +1,6 @@
-Subject: Skip Fil-C-disallowed pointer-synthesis and TGID-comm subtests cleanly
+Subject: Skip Fil-C by-design memory-safety pointer-synthesis subtests cleanly
 Policy-Class: P4-Audit
-Rationale: Dedicated test-only patch cleanly separated from production code, skipping only 9 specific subtests that hit documented Fil-C safety invariants or runtime architecture limits while keeping all remaining subtests active: (1) t/io/scalar.t:350-375 (4 subtests in has_trailing_nul) synthesizes pointers via integer arithmetic on pack/unpack P (124/128 subtests still run); (2) t/op/pack.t:326,331,1648,1651 (4 subtests) byte-swaps pointers (p>) or utf8-upgrades raw pointer bytes (14,718/14,722 subtests still run, including native pack/unpack p/P); (3) t/op/magic.t:435 (1 subtest, test 103) expects ps hc $$ to reflect prctl(PR_SET_NAME), whereas Fil-C runs main() on a worker pthread while the Linux TGID leader stays parked in pause() (filc_start_program.c:261-266); the remaining 202/203 subtests (including /proc/$$/cmdline via zsetproctitle) still run.
+Rationale: Dedicated test-only patch cleanly separated from production code, skipping only 8 specific subtests that intentionally synthesize or byte-mangle raw pointers (disallowed by design under Fil-C InvisiCaps memory safety) while keeping all remaining subtests active: (1) t/io/scalar.t:350-375 (4 subtests in has_trailing_nul) synthesizes pointers via integer arithmetic on pack/unpack P (124/128 subtests still run); (2) t/op/pack.t:326,331,1648,1651 (4 subtests) byte-swaps pointers (p>) or utf8-upgrades raw pointer bytes (14,718/14,722 subtests still run, including native pack/unpack p/P).
 Upstream-Status: Fil-C-Specific
 Fil-C-Origin-Commits: none
 
@@ -53,17 +53,4 @@ Fil-C-Origin-Commits: none
  
      # x, X and @
      $down = "\xf8\xf9\xfa\xfb\xfc\xfd\xfe\xff\x05\x06";
---- a/t/op/magic.t
-+++ b/t/op/magic.t
-@@ -432,7 +432,10 @@
-     my $prctl_match = (grep(/$name_substr/, split /\n/, $prctl), "")[0];
- 
-     like($argv0, qr/$name/, "Set process name through argv[0] ($argv0_match)");
--    like($prctl, qr/$name_substr/, "Set process name through prctl() ($prctl_match)");
-+    SKIP: {
-+      skip "Fil-C runs main() on a worker pthread while TGID leader sleeps in pause() (filc_start_program.c:261-266); ps hc reads TGID leader comm", 1;
-+      like($prctl, qr/$name_substr/, "Set process name through prctl() ($prctl_match)");
-+    }
-   }
- }
  

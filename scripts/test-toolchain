@@ -596,6 +596,146 @@ else
   FAILURES=$((FAILURES + 1))
 fi
 
+echo "=== Running (i) Runtime semctl(GETALL/SETALL) & prctl(PR_SET_NAME) TGID-comm Regression ==="
+cat > "$TEST_DIR/test_semctl_prctl.c" <<'EOF'
+#include <errno.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/ipc.h>
+#include <sys/prctl.h>
+#include <sys/sem.h>
+
+union semun {
+    int val;
+    struct semid_ds *buf;
+    unsigned short *array;
+};
+
+int main(void) {
+    /* 1. semctl SETALL / GETALL roundtrip */
+    int semid = semget(IPC_PRIVATE, 3, IPC_CREAT | 0600);
+    if (semid < 0) {
+        fprintf(stderr, "semget failed: %s\n", strerror(errno));
+        return 1;
+    }
+    unsigned short set_vals[3] = {11, 22, 33};
+    unsigned short get_vals[3] = {0, 0, 0};
+    union semun arg;
+    arg.array = set_vals;
+    if (semctl(semid, 0, SETALL, arg) < 0) {
+        fprintf(stderr, "semctl(SETALL) failed: %s\n", strerror(errno));
+        semctl(semid, 0, IPC_RMID);
+        return 2;
+    }
+    arg.array = get_vals;
+    if (semctl(semid, 0, GETALL, arg) < 0) {
+        fprintf(stderr, "semctl(GETALL) failed: %s\n", strerror(errno));
+        semctl(semid, 0, IPC_RMID);
+        return 3;
+    }
+    semctl(semid, 0, IPC_RMID);
+    if (get_vals[0] != 11 || get_vals[1] != 22 || get_vals[2] != 33) {
+        fprintf(stderr, "semctl mismatch: %u %u %u\n", get_vals[0], get_vals[1], get_vals[2]);
+        return 4;
+    }
+
+    /* 2. prctl(PR_SET_NAME) updates both current thread and TGID leader /proc/self/comm */
+    const char *want = "filc_tgid_ok";
+    if (prctl(PR_SET_NAME, want, 0, 0, 0) != 0) {
+        fprintf(stderr, "prctl(PR_SET_NAME) failed: %s\n", strerror(errno));
+        return 5;
+    }
+    char got_prctl[16] = {0};
+    if (prctl(PR_GET_NAME, got_prctl, 0, 0, 0) != 0 || strcmp(got_prctl, want) != 0) {
+        fprintf(stderr, "prctl(PR_GET_NAME) mismatch: '%s'\n", got_prctl);
+        return 6;
+    }
+    FILE *fp = fopen("/proc/self/comm", "r");
+    if (fp) {
+        char got_comm[32] = {0};
+        if (!fgets(got_comm, sizeof(got_comm), fp)) {
+            fclose(fp);
+            fprintf(stderr, "failed to read /proc/self/comm\n");
+            return 7;
+        }
+        fclose(fp);
+        size_t len = strlen(got_comm);
+        while (len > 0 && (got_comm[len - 1] == '\n' || got_comm[len - 1] == '\r'))
+            got_comm[--len] = '\0';
+        if (strcmp(got_comm, want) != 0) {
+            fprintf(stderr, "/proc/self/comm mismatch: got '%s', want '%s'\n", got_comm, want);
+            return 8;
+        }
+    }
+
+    printf("SEMCTL_PRCTL_OK\n");
+    return 0;
+}
+EOF
+
+cat > "$TEST_DIR/trap_semctl_oob.c" <<'EOF'
+#include <stdio.h>
+#include <sys/ipc.h>
+#include <sys/sem.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+union semun {
+    unsigned short *array;
+};
+
+int main(void) {
+    int semid = semget(IPC_PRIVATE, 4, IPC_CREAT | 0600);
+    if (semid < 0)
+        return 1;
+    pid_t pid = fork();
+    if (pid == 0) {
+        unsigned short tiny[2] = {0, 0};
+        union semun arg;
+        arg.array = tiny;
+        /* Must trap with Fil-C OOB safety panic because sem_nsems=4 > 2 */
+        int rc = semctl(semid, 0, GETALL, arg);
+        printf("UNEXPECTED_SEMCTL_OOB_SURVIVED=%d\n", rc);
+        _exit(0);
+    }
+    int status = 0;
+    waitpid(pid, &status, 0);
+    semctl(semid, 0, IPC_RMID);
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+        return 2;
+    printf("SEMCTL_OOB_TRAPPED_OK\n");
+    return 0;
+}
+EOF
+
+SEMCTL_PRCTL_OK=1
+"$CLANG" -O2 "$TEST_DIR/test_semctl_prctl.c" -o "$TEST_DIR/test_semctl_prctl"
+run_and_capture test_semctl_prctl "$TEST_DIR/test_semctl_prctl"
+RC_SEMCTL_PRCTL="$(cat "$TEST_DIR/test_semctl_prctl.rc")"
+if [[ "$RC_SEMCTL_PRCTL" -ne 0 ]] || ! grep -Fxq "SEMCTL_PRCTL_OK" "$TEST_DIR/test_semctl_prctl.stdout"; then
+  echo "error: test_semctl_prctl failed (rc=$RC_SEMCTL_PRCTL)" >&2
+  cat "$TEST_DIR/test_semctl_prctl.stderr" >&2
+  SEMCTL_PRCTL_OK=0
+fi
+
+"$CLANG" -O2 "$TEST_DIR/trap_semctl_oob.c" -o "$TEST_DIR/trap_semctl_oob"
+run_and_capture trap_semctl_oob "$TEST_DIR/trap_semctl_oob"
+RC_SEMCTL_OOB="$(cat "$TEST_DIR/trap_semctl_oob.rc")"
+if [[ "$RC_SEMCTL_OOB" -ne 0 ]] \
+  || grep -q "UNEXPECTED_SEMCTL_OOB_SURVIVED" "$TEST_DIR/trap_semctl_oob.stdout" \
+  || ! grep -Fxq "SEMCTL_OOB_TRAPPED_OK" "$TEST_DIR/trap_semctl_oob.stdout"; then
+  echo "error: trap_semctl_oob did not safely trap (rc=$RC_SEMCTL_OOB)" >&2
+  cat "$TEST_DIR/trap_semctl_oob.stderr" >&2
+  SEMCTL_PRCTL_OK=0
+fi
+
+if [[ "$SEMCTL_PRCTL_OK" -eq 1 ]]; then
+  STATUS_SEMCTL_PRCTL="PASS"
+else
+  STATUS_SEMCTL_PRCTL="FAIL"
+  FAILURES=$((FAILURES + 1))
+fi
+
 OVERALL_STATUS="PASS"
 if (( FAILURES > 0 )); then
   OVERALL_STATUS="FAIL"
@@ -707,6 +847,9 @@ ARCH="$(uname -m)"
     echo "STDERR:"
     sed 's/^/  | /' "$TEST_DIR/fenv_test.stderr"
   fi
+  echo ""
+  echo "--- TEST (i) RUNTIME SEMCTL(GETALL/SETALL) & PRCTL TGID COMM [$STATUS_SEMCTL_PRCTL] ---"
+  echo "EXIT_CODE: $RC_SEMCTL_PRCTL  OOB_TRAP_RC: $RC_SEMCTL_OOB"
   echo "================================================================================"
 } > "$REPORT_FILE"
 

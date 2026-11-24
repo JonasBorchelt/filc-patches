@@ -522,10 +522,8 @@ without access to the build tree, plus a full 54/54 userland port sweep:
 
 ## Known limitations
 
-- **SysV IPC bulk semaphore operations:** \`semctl(GETALL)\` and \`semctl(SETALL)\` return \`ENOSYS\` in the pinned Fil-C runtime (\`filc_runtime.c\`).
-- **Process thread name (\`ps hc\` / \`prctl(PR_SET_NAME)\`):** Fil-C executes \`main()\` on a worker pthread while the Linux TGID leader stays parked in \`pause()\` (\`filc_start_program.c\`), so \`ps hc\` displays the TGID leader's \`comm\` name; \`/proc/self/cmdline\` (\`ps h\`) is updated via \`zsetproctitle()\`.
-- **Pointer serialization/synthesis (e.g. Perl \`pack\`/\`unpack\` \`p\`/\`P\` with byte-swapping, UTF-8 re-encoding, or integer pointer arithmetic):** Forging or byte-mangling pointers via raw integers/bytes strips Fil-C capabilities by design and traps under InvisiCaps.
-- **PostgreSQL (\`postgresql-client\`):** Client tools (\`psql\`, \`pg_dump\`, \`pg_restore\`, \`pg_isready\`, \`pg_config\`) and \`libpq\` only; the PostgreSQL server is not supported under Fil-C (\`Datum\` carries pointers as integers).
+- **Pointer serialization/synthesis (by design, memory safety):** Operations that forge, byte-swap, UTF-8-re-encode, or perform raw integer arithmetic on serialized pointers (for example Perl \`pack\`/\`unpack\` \`p\`/\`P\` with byte-swapping \`p>\` or \`utf8::upgrade\`) strip Fil-C capabilities by design and trap deterministically under InvisiCaps.
+- **PostgreSQL (\`postgresql-client\`):** Client tools (\`psql\`, \`pg_dump\`, \`pg_restore\`, \`pg_isready\`, \`pg_config\`) and \`libpq\` only; the PostgreSQL server is not supported under Fil-C (\`Datum\` carries pointers as integers and multi-process shared-memory tables cannot share process-private capability metadata).
 - **GNU coreutils 9.12+ \`env\` pipe quoting:** \`env\` defaults to shell-quoting output even on non-TTY pipes when \`QUOTING_STYLE\` is unset; downstream tools/tests that clear \`%ENV\` and parse \`env\` output may need \`QUOTING_STYLE=literal\`.
 
 ## Quickstart

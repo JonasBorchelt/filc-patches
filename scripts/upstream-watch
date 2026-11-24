@@ -293,10 +293,29 @@ module UpstreamWatch
 
   # Strictly checks every patch in runtime/filc/series against target_commit
   # with zero fuzz and zero line offset. Returns [passed_names, failed_entries].
-  def check_runtime_patches_strict(repo_root, bare_dir, target_commit)
+  def check_runtime_patches_strict(repo_root, bare_dir, target_commit, repo_url: nil)
     series_file = File.join(repo_root, "runtime", "filc", "series")
     patches = read_series(series_file)
     return [[], []] if patches.empty?
+
+    # A partial/promisor bare cache (--filter=blob:none) cannot serve missing
+    # blobs via local upload-pack (lazy fetching is disabled by default).
+    # In that case fetch the sparse runtime tree directly from the upstream
+    # remote URL with promisor blob:none so only the runtime paths are fetched.
+    prom_out, _prom_err, prom_st = run_cmd(
+      "git", "-C", bare_dir, "config", "--get-regexp", "^(extensions\\.partialclone|remote\\..*\\.promisor)$"
+    )
+    is_partial_bare = prom_st.success? && !prom_out.strip.empty?
+
+    fetch_remote = bare_dir
+    if is_partial_bare
+      resolved_url = repo_url.to_s.strip
+      if resolved_url.empty?
+        uout, _uerr, ust = run_cmd("git", "-C", bare_dir, "remote", "get-url", "origin")
+        resolved_url = uout.strip if ust.success?
+      end
+      fetch_remote = resolved_url unless resolved_url.empty?
+    end
 
     passed = []
     failed = []
@@ -305,7 +324,7 @@ module UpstreamWatch
       _o, err, st = run_cmd("git", "init", "-q", td)
       raise "git init failed: #{err.strip}" unless st.success?
 
-      _o, err, st = run_cmd("git", "-C", td, "remote", "add", "origin", bare_dir)
+      _o, err, st = run_cmd("git", "-C", td, "remote", "add", "origin", fetch_remote)
       raise "git remote add failed: #{err.strip}" unless st.success?
 
       _o, err, st = run_cmd("git", "-C", td, "sparse-checkout", "init", "--cone")
@@ -314,7 +333,15 @@ module UpstreamWatch
       _o, err, st = run_cmd("git", "-C", td, "sparse-checkout", "set", *RUNTIME_SPARSE_PATHS)
       raise "sparse-checkout set failed: #{err.strip}" unless st.success?
 
-      _o, err, st = run_cmd("git", "-C", td, "fetch", "--depth=1", "--no-tags", "origin", target_commit)
+      fetch_cmd = ["git", "-C", td, "fetch", "--depth=1", "--no-tags"]
+      if is_partial_bare
+        _o, _e, _s = run_cmd("git", "-C", td, "config", "remote.origin.promisor", "true")
+        _o, _e, _s = run_cmd("git", "-C", td, "config", "remote.origin.partialclonefilter", "blob:none")
+        fetch_cmd << "--filter=blob:none"
+      end
+      fetch_cmd.push("origin", target_commit)
+
+      _o, err, st = run_cmd(*fetch_cmd)
       raise "fetch runtime commit failed: #{err.strip}" unless st.success?
 
       _o, err, st = run_cmd("git", "-C", td, "checkout", "-q", "--force", "--detach", target_commit)
@@ -670,7 +697,9 @@ module UpstreamWatch
       return 0
     end
 
-    bare_dir = File.join(opts[:cache_dir], "fil-c.git")
+    # Keep the watcher's partial metadata mirror separate from the shared
+    # build-toolchain source cache (sync-git-cache rejects promisor repos).
+    bare_dir = File.join(opts[:cache_dir], "upstream-watch-fil-c.git")
     ensure_filc_bare_mirror(filc_repo, bare_dir, filc_branch, pinned_commit, target_commit)
     new_commits, subsystems = collect_new_commits(bare_dir, pinned_commit, target_commit)
     report["new_commits"] = new_commits
@@ -683,7 +712,9 @@ module UpstreamWatch
     branch_commit = create_auto_branch_and_commit(repo_root, auto_branch, pinned_commit, target_commit, new_commits)
     report["auto_branch_commit"] = branch_commit
 
-    passed_patches, failed_patches = check_runtime_patches_strict(repo_root, bare_dir, target_commit)
+    passed_patches, failed_patches = check_runtime_patches_strict(
+      repo_root, bare_dir, target_commit, repo_url: filc_repo
+    )
     report["runtime_patches_passed"] = passed_patches
     report["runtime_patches_failed"] = failed_patches
 

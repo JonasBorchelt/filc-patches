@@ -246,6 +246,19 @@ Dir.mktmpdir("filc-watch-test-") do |td|
   assert(penv["GIT_CONFIG_COUNT"] == "1", "expected GIT_CONFIG_COUNT=1")
   assert(penv["GIT_CONFIG_KEY_0"] == "http.extraHeader", "expected http.extraHeader")
   assert(penv["GIT_CONFIG_VALUE_0"] == "Authorization: token tok-secret-123", "expected Authorization header")
+
+  # 6. Partial/promisor bare mirror (--filter=blob:none) must not break strict runtime patch check
+  sh!("git", "-C", upstream_dir, "config", "uploadpack.allowFilter", "true")
+  sh!("git", "-C", upstream_dir, "config", "uploadpack.allowAnySHA1InWant", "true")
+  partial_bare = File.join(td, "partial-filc.git")
+  sh!("git", "clone", "-q", "--bare", "--filter=blob:none", "file://#{upstream_dir}", partial_bare)
+  prom_cfg = sh!("git", "-C", partial_bare, "config", "--get", "remote.origin.promisor")
+  assert(prom_cfg == "true", "expected partial bare mirror with remote.origin.promisor=true")
+  passed_p, failed_p = UpstreamWatch.check_runtime_patches_strict(repo1, partial_bare, sha2)
+  assert(failed_p.empty? && passed_p.length == 1,
+         "expected clean patch check against partial bare mirror, got passed=#{passed_p.inspect} failed=#{failed_p.inspect}")
+  _passed_c, failed_c = UpstreamWatch.check_runtime_patches_strict(repo1, partial_bare, sha3)
+  assert(failed_c.length == 1, "expected conflict detection against partial bare mirror, got #{failed_c.inspect}")
 end
 
-puts "TEST_UPSTREAM_WATCH: PASS (5/5)"
+puts "TEST_UPSTREAM_WATCH: PASS (6/6)"

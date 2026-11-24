@@ -574,6 +574,15 @@ if FILC_PORTS_DIR="$HT_DIR" FILC_TOOLCHAIN_ROOT="$FN_TC" \
   exit 1
 fi
 assert_grep -Fq "required host build tool 'definitely_nonexistent_host_tool_xyz' not found" "$HT_ERR" "missing HOST_TOOLS diagnostic"
+if [[ ! -f "$HT_WORK/ports-state/need-missing-tool.json" ]]; then
+  echo "FAIL: missing state file $HT_WORK/ports-state/need-missing-tool.json" >&2
+  echo "--- ht.out ---" >&2
+  cat "$TMP_DIR/ht.out" >&2 || true
+  echo "--- ht.err ---" >&2
+  cat "$HT_ERR" >&2 || true
+  ls -la "$HT_WORK" "$HT_WORK/ports-state" >&2 || true
+  exit 1
+fi
 python3 - "$HT_WORK/ports-state/need-missing-tool.json" <<'PY'
 import json, sys
 rec = json.load(open(sys.argv[1]))

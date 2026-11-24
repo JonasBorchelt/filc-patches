@@ -105,6 +105,7 @@ write_state() {
   local fail_stage="${2:-}"
   local fail_kind="${3:-}"
   local dur=$(( $(date +%s) - T_START ))
+  mkdir -p "$STATE_DIR"
   python3 - "$STATE_DIR/$PORT_NAME.json" "$NAME" "$VERSION" "$TIER" "$status" "$POLICY_CLASS" \
     "$dur" "$PATCH_COUNT" "$PATCH_ADDED" "$PATCH_REMOVED" "$PATCH_FILES" "$fail_stage" "$fail_kind" "$DEPS" <<'PY'
 import json, sys
@@ -298,19 +299,21 @@ classify_failure_kind() {
   case "$stage" in
     init|deps|toolchain)
       echo "runner"
-      return
+      return 0
       ;;
   esac
   if [[ "$rc" -eq 126 || "$rc" -eq 127 ]]; then
     echo "runner"
-    return
+    return 0
   fi
   echo "package"
+  return 0
 }
 
 PORT_DONE=0
 on_exit() {
   local rc=$?
+  set +e
   if [[ "$PORT_DONE" != "1" ]]; then
     local fkind
     fkind="$(classify_failure_kind "$CURRENT_STAGE" "$rc")"
@@ -326,7 +329,9 @@ on_exit() {
     fi
     local dur=$(( $(date +%s) - T_START ))
     echo "FILC_PORT $PORT_NAME failed:$fkind policy=$POLICY_CLASS duration=$dur stage=$CURRENT_STAGE rc=$rc" >&2
-    write_state "failed" "$CURRENT_STAGE" "$fkind" || true
+    if ! write_state "failed" "$CURRENT_STAGE" "$fkind"; then
+      echo "warning: write_state failed for $PORT_NAME ($STATE_DIR/$PORT_NAME.json)" >&2
+    fi
   fi
 }
 trap on_exit EXIT
@@ -394,6 +399,17 @@ if [[ "${FILC_PORT_SKIP_DEPS:-0}" != "1" ]]; then
   for dep in $DEPS; do
     if [[ ! -f "$STATE_DIR/$dep.installed" ]]; then
       echo "error: dependency '$dep' not installed in $STATE_DIR" >&2
+      exit 1
+    fi
+  done
+fi
+
+# 1b. Declared host build tools pre-flight check (before fetch/extract)
+if [[ -n "$HOST_TOOLS" ]]; then
+  CURRENT_STAGE="toolchain"
+  for ht in $HOST_TOOLS; do
+    if ! command -v "$ht" >/dev/null 2>&1; then
+      echo "error: required host build tool '$ht' not found in PATH (declared in HOST_TOOLS for $PORT_NAME)" >&2
       exit 1
     fi
   done
@@ -487,12 +503,6 @@ if [[ ! -d "$PIZFIX" ]]; then
   echo "error: Fil-C sysroot (pizfix) not found at $PIZFIX" >&2
   exit 1
 fi
-for ht in $HOST_TOOLS; do
-  if ! command -v "$ht" >/dev/null 2>&1; then
-    echo "error: required host build tool '$ht' not found in PATH (declared in HOST_TOOLS for $PORT_NAME)" >&2
-    exit 1
-  fi
-done
 
 export CC="$CLANG_BIN"
 export CXX="$CLANGXX_BIN"

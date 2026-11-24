@@ -1,6 +1,6 @@
 Subject: Use Perl_xsub_ptrtable in XS typemaps and core extensions for Fil-C capabilities
 Policy-Class: P4-Audit
-Rationale: Adopted and decomposed from pinned Fil-C (cede3de02b42:projects/perl-5.40.0) and extended for Perl 5.40.5 test completeness. Standard XS typemaps (including T_REF_IV_REF, T_REF_IV_PTR, T_PTRDESC, T_REFREF, T_REFOBJ) and core extensions (Encode, Storable, threads, threads::shared, B, DynaLoader, re, Compress::Raw::Zlib) convert C pointers to Perl IVs via PTR2IV/INT2PTR. Routing pointer conversions through zptrtable_encode/zptrtable_decode preserves Fil-C capabilities across XS boundaries, while B.xs get_overlay_object matches encoded overlay keys and OP_ARGELEM preserves its integer op_aux index via PTR2IV.
+Rationale: Adopted and decomposed from pinned Fil-C (cede3de02b42:projects/perl-5.40.0). Standard XS typemaps and core extensions (Encode, Storable, threads, threads::shared, B, DynaLoader, re, Compress::Raw::Zlib) convert C pointers to Perl IVs via PTR2IV/INT2PTR. Routing these conversions through zptrtable_encode/zptrtable_decode preserves Fil-C pointer capabilities across XS boundaries. Deviations from b14fce6d8d8a for Perl 5.40.5 correctness: (1) B.xs OP_ARGELEM keeps upstream PTR2IV(aux) because op_aux stores an integer parameter index rather than a heap pointer; (2) Encode.xs uses shared Perl_xsub_ptrtable instead of a module-private table so enc2xs-generated submodules (Encode::Byte, CN, JP, KR, TW, Symbol, EBCDIC) share the same table.
 Upstream-Status: Fil-C-Specific
 Fil-C-Origin-Commits: b14fce6d8d8a
 
@@ -20,57 +20,12 @@ Fil-C-Origin-Commits: b14fce6d8d8a
  	}
  	else
  	    Perl_croak_nocontext(\"%s: %s is not a reference\",
-@@ -215,7 +215,7 @@
- T_REF_IV_REF
- 	if (sv_isa($arg, \"${ntype}\")) {
- 	    IV tmp = SvIV((SV*)SvRV($arg));
--	    $var = *INT2PTR($type *, tmp);
-+	    $var = *(($type *)zptrtable_decode(Perl_xsub_ptrtable, tmp));
- 	}
- 	else {
- 		const char* refstr = SvROK($arg) ? \"\" : SvOK($arg) ? \"scalar \" : \"undef\";
-@@ -228,7 +228,7 @@
- T_REF_IV_PTR
- 	if (sv_isa($arg, \"${ntype}\")) {
- 	    IV tmp = SvIV((SV*)SvRV($arg));
--	    $var = INT2PTR($type, tmp);
-+	    $var = zptrtable_decode(Perl_xsub_ptrtable, tmp);
- 	}
- 	else {
- 		const char* refstr = SvROK($arg) ? \"\" : SvOK($arg) ? \"scalar \" : \"undef\";
 @@ -241,7 +241,7 @@
  T_PTROBJ
  	if (SvROK($arg) && sv_derived_from($arg, \"${ntype}\")) {
  	    IV tmp = SvIV((SV*)SvRV($arg));
 -	    $var = INT2PTR($type,tmp);
 +	    $var = zptrtable_decode(Perl_xsub_ptrtable, tmp);
- 	}
- 	else {
- 		const char* refstr = SvROK($arg) ? \"\" : SvOK($arg) ? \"scalar \" : \"undef\";
-@@ -254,7 +254,7 @@
- T_PTRDESC
- 	if (sv_isa($arg, \"${ntype}\")) {
- 	    IV tmp = SvIV((SV*)SvRV($arg));
--	    ${type}_desc = (\U${type}_DESC\E*) tmp;
-+	    ${type}_desc = (\U${type}_DESC\E*) zptrtable_decode(Perl_xsub_ptrtable, tmp);
- 	    $var = ${type}_desc->ptr;
- 	}
- 	else {
-@@ -268,7 +268,7 @@
- T_REFREF
- 	if (SvROK($arg)) {
- 	    IV tmp = SvIV((SV*)SvRV($arg));
--	    $var = *INT2PTR($type,tmp);
-+	    $var = *(($type)zptrtable_decode(Perl_xsub_ptrtable, tmp));
- 	}
- 	else
- 	    Perl_croak_nocontext(\"%s: %s is not a reference\",
-@@ -277,7 +277,7 @@
- T_REFOBJ
- 	if (sv_isa($arg, \"${ntype}\")) {
- 	    IV tmp = SvIV((SV*)SvRV($arg));
--	    $var = *INT2PTR($type,tmp);
-+	    $var = *(($type)zptrtable_decode(Perl_xsub_ptrtable, tmp));
  	}
  	else {
  		const char* refstr = SvROK($arg) ? \"\" : SvOK($arg) ? \"scalar \" : \"undef\";
@@ -96,70 +51,57 @@ Fil-C-Origin-Commits: b14fce6d8d8a
              croak(\"$var is not of type ${ntype}\")
 --- a/cpan/Encode/Encode.xs
 +++ b/cpan/Encode/Encode.xs
-@@ -33,12 +33,20 @@
- #define SVfARG(p) ((void*)(p))
- #endif
- 
-+static zptrtable* encode_ptrtable;
-+
-+static void construct_ptrtable(void) __attribute__((constructor));
-+static void construct_ptrtable(void)
-+{
-+    encode_ptrtable = zptrtable_new();
-+}
-+
- static void
- Encode_XSEncoding(pTHX_ encode_t * enc)
+@@ -38,7 +38,7 @@
  {
      dSP;
      HV *stash = gv_stashpv("Encode::XS", TRUE);
 -    SV *iv    = newSViv(PTR2IV(enc));
-+    SV *iv    = newSViv(zptrtable_encode(encode_ptrtable, enc));
++    SV *iv    = newSViv(zptrtable_encode(Perl_xsub_ptrtable, enc));
      SV *sv    = sv_bless(newRV_noinc(iv),stash);
      int i = 0;
      /* with the SvLEN() == 0 hack, PVX won't be freed. We cast away name's
-@@ -769,7 +777,7 @@
+@@ -769,7 +769,7 @@
  PREINIT:
      encode_t *enc;
  INIT:
 -    enc = INT2PTR(encode_t *, SvIV(SvRV(obj)));
-+    enc = zptrtable_decode(encode_ptrtable, SvIV(SvRV(obj)));
++    enc = zptrtable_decode(Perl_xsub_ptrtable, SvIV(SvRV(obj)));
  CODE:
      RETVAL = newSVpvn(enc->name[0], strlen(enc->name[0]));
  OUTPUT:
-@@ -799,7 +807,7 @@
+@@ -799,7 +799,7 @@
      check = SvROK(check_sv) ? ENCODE_PERLQQ|ENCODE_LEAVE_SRC : SvOK(check_sv) ? SvIV_nomg(check_sv) : 0;
      fallback_cb = SvROK(check_sv) ? check_sv : &PL_sv_undef;
      modify = (check && !(check & ENCODE_LEAVE_SRC));
 -    enc = INT2PTR(encode_t *, SvIV(SvRV(obj)));
-+    enc = zptrtable_decode(encode_ptrtable, SvIV(SvRV(obj)));
++    enc = zptrtable_decode(Perl_xsub_ptrtable, SvIV(SvRV(obj)));
      offset = (STRLEN)SvIV(off);
  CODE:
      if (!SvOK(src))
-@@ -834,7 +842,7 @@
+@@ -834,7 +834,7 @@
      check = SvROK(check_sv) ? ENCODE_PERLQQ|ENCODE_LEAVE_SRC : SvOK(check_sv) ? SvIV_nomg(check_sv) : 0;
      fallback_cb = SvROK(check_sv) ? check_sv : &PL_sv_undef;
      modify = (check && !(check & ENCODE_LEAVE_SRC));
 -    enc = INT2PTR(encode_t *, SvIV(SvRV(obj)));
-+    enc = zptrtable_decode(encode_ptrtable, SvIV(SvRV(obj)));
++    enc = zptrtable_decode(Perl_xsub_ptrtable, SvIV(SvRV(obj)));
  CODE:
      if (!SvOK(src))
          XSRETURN_UNDEF;
-@@ -866,7 +874,7 @@
+@@ -866,7 +866,7 @@
      check = SvROK(check_sv) ? ENCODE_PERLQQ|ENCODE_LEAVE_SRC : SvOK(check_sv) ? SvIV_nomg(check_sv) : 0;
      fallback_cb = SvROK(check_sv) ? check_sv : &PL_sv_undef;
      modify = (check && !(check & ENCODE_LEAVE_SRC));
 -    enc = INT2PTR(encode_t *, SvIV(SvRV(obj)));
-+    enc = zptrtable_decode(encode_ptrtable, SvIV(SvRV(obj)));
++    enc = zptrtable_decode(Perl_xsub_ptrtable, SvIV(SvRV(obj)));
  CODE:
      if (!SvOK(src))
          XSRETURN_UNDEF;
-@@ -905,7 +913,7 @@
+@@ -905,7 +905,7 @@
  PREINIT:
      encode_t *enc;
  INIT:
 -    enc = INT2PTR(encode_t *, SvIV(SvRV(obj)));
-+    enc = zptrtable_decode(encode_ptrtable, SvIV(SvRV(obj)));
++    enc = zptrtable_decode(Perl_xsub_ptrtable, SvIV(SvRV(obj)));
  CODE:
      ENTER;
      SAVETMPS;
@@ -365,15 +307,6 @@ Fil-C-Origin-Commits: b14fce6d8d8a
      return opsv;
  }
  
-@@ -124,7 +124,7 @@
-     sv = SvRV(sv);
-     if (SvTYPE(sv) != SVt_PVHV)
- 	return NULL;
--    key = newSViv(PTR2IV(o));
-+    key = newSViv(zptrtable_encode(Perl_xsub_ptrtable, (void*)o));
-     he = hv_fetch_ent((HV*)sv, key, 0, 0);
-     SvREFCNT_dec(key);
-     if (!he)
 @@ -159,7 +159,7 @@
      }
      if (!type) {

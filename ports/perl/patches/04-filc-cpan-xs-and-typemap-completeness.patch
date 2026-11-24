@@ -1,0 +1,97 @@
+Subject: Route remaining Perl 5.40.5 XS typemaps, B overlay, Encode enc2xs, Digest::SHA, and Compress::Raw::Bzip2 through Perl_xsub_ptrtable
+Policy-Class: P4-Audit
+Rationale: Project-authored completeness patch separated from the adopted Fil-C commits for P4 auditability. A central perl.h replacement of INT2PTR/PTR2IV is semantically invalid because Perl defines PTR2IV/PTR2UV via INT2PTR(IV/UV,p) and intentionally stores non-pointer integers in pointer slots (e.g. B.xs OP_ARGELEM op_aux, Storable.xs classnum/tagnum via INT2PTR(SV*,...)). Instead, this patch covers the remaining 5 XS pointer-via-IV boundaries in Perl 5.40.5: (1) lib/ExtUtils/typemap T_REF_IV_REF, T_REF_IV_PTR, T_PTRDESC, T_REFREF, T_REFOBJ decodes matching sv_setref_pv; (2) ext/B/B.xs get_overlay_object key encoding matching B::Deparse $$op; (3) cpan/Encode/bin/enc2xs Encode_XSEncoding using Perl_xsub_ptrtable so generated submodules (Byte, CN, JP, KR, TW, Symbol, EBCDIC) match Encode.xs; (4) cpan/Digest-SHA/SHA.xs getSHA decode matching sv_setref_pv; (5) cpan/Compress-Raw-Bzip2/typemap T_PTROBJ_AV decode.
+Upstream-Status: Fil-C-Specific
+Fil-C-Origin-Commits: none
+
+--- a/lib/ExtUtils/typemap
++++ b/lib/ExtUtils/typemap
+@@ -215,7 +215,7 @@
+ T_REF_IV_REF
+ 	if (sv_isa($arg, \"${ntype}\")) {
+ 	    IV tmp = SvIV((SV*)SvRV($arg));
+-	    $var = *INT2PTR($type *, tmp);
++	    $var = *(($type *)zptrtable_decode(Perl_xsub_ptrtable, tmp));
+ 	}
+ 	else {
+ 		const char* refstr = SvROK($arg) ? \"\" : SvOK($arg) ? \"scalar \" : \"undef\";
+@@ -228,7 +228,7 @@
+ T_REF_IV_PTR
+ 	if (sv_isa($arg, \"${ntype}\")) {
+ 	    IV tmp = SvIV((SV*)SvRV($arg));
+-	    $var = INT2PTR($type, tmp);
++	    $var = zptrtable_decode(Perl_xsub_ptrtable, tmp);
+ 	}
+ 	else {
+ 		const char* refstr = SvROK($arg) ? \"\" : SvOK($arg) ? \"scalar \" : \"undef\";
+@@ -254,7 +254,7 @@
+ T_PTRDESC
+ 	if (sv_isa($arg, \"${ntype}\")) {
+ 	    IV tmp = SvIV((SV*)SvRV($arg));
+-	    ${type}_desc = (\U${type}_DESC\E*) tmp;
++	    ${type}_desc = (\U${type}_DESC\E*) zptrtable_decode(Perl_xsub_ptrtable, tmp);
+ 	    $var = ${type}_desc->ptr;
+ 	}
+ 	else {
+@@ -268,7 +268,7 @@
+ T_REFREF
+ 	if (SvROK($arg)) {
+ 	    IV tmp = SvIV((SV*)SvRV($arg));
+-	    $var = *INT2PTR($type,tmp);
++	    $var = *(($type)zptrtable_decode(Perl_xsub_ptrtable, tmp));
+ 	}
+ 	else
+ 	    Perl_croak_nocontext(\"%s: %s is not a reference\",
+@@ -277,7 +277,7 @@
+ T_REFOBJ
+ 	if (sv_isa($arg, \"${ntype}\")) {
+ 	    IV tmp = SvIV((SV*)SvRV($arg));
+-	    $var = *INT2PTR($type,tmp);
++	    $var = *(($type)zptrtable_decode(Perl_xsub_ptrtable, tmp));
+ 	}
+ 	else {
+ 		const char* refstr = SvROK($arg) ? \"\" : SvOK($arg) ? \"scalar \" : \"undef\";
+--- a/ext/B/B.xs
++++ b/ext/B/B.xs
+@@ -124,7 +124,7 @@
+     sv = SvRV(sv);
+     if (SvTYPE(sv) != SVt_PVHV)
+ 	return NULL;
+-    key = newSViv(PTR2IV(o));
++    key = newSViv(zptrtable_encode(Perl_xsub_ptrtable, (void*)o));
+     he = hv_fetch_ent((HV*)sv, key, 0, 0);
+     SvREFCNT_dec(key);
+     if (!he)
+--- a/cpan/Encode/bin/enc2xs
++++ b/cpan/Encode/bin/enc2xs
+@@ -387,7 +387,7 @@
+ {
+  dSP;
+  HV *stash = gv_stashpv("Encode::XS", TRUE);
+- SV *iv    = newSViv(PTR2IV(enc));
++ SV *iv    = newSViv(zptrtable_encode(Perl_xsub_ptrtable, enc));
+  SV *sv    = sv_bless(newRV_noinc(iv),stash);
+  int i = 0;
+  /* with the SvLEN() == 0 hack, PVX won't be freed. We cast away name's
+--- a/cpan/Digest-SHA/SHA.xs
++++ b/cpan/Digest-SHA/SHA.xs
+@@ -49,7 +49,7 @@
+ {
+ 	if (!sv_isobject(self) || !sv_derived_from(self, "Digest::SHA"))
+ 		return(NULL);
+-	return INT2PTR(SHA *, SvIV(SvRV(self)));
++	return zptrtable_decode(Perl_xsub_ptrtable, SvIV(SvRV(self)));
+ }
+ 
+ MODULE = Digest::SHA		PACKAGE = Digest::SHA
+--- a/cpan/Compress-Raw-Bzip2/typemap
++++ b/cpan/Compress-Raw-Bzip2/typemap
+@@ -29,7 +29,7 @@
+             $var = NULL ;
+         else if (sv_derived_from($arg, \"${ntype}\")) {
+             IV tmp = SvIV(getInnerObject($arg)) ;
+-            $var = INT2PTR($type, tmp);
++            $var = zptrtable_decode(Perl_xsub_ptrtable, tmp);
+         }
+         else
+             croak(\"$var is not of type ${ntype}\")

@@ -564,17 +564,46 @@ def run_parallel_dag(ports, selected, order, opts, work_root, state_dir, paralle
           File.open(plog, "wb") do |lf|
             Open3.popen2e(penv, opts[:builder], pname, work_root) do |stdin, out_err, wait_thr|
               stdin.close
-              testing_prefix = "FILC_PORT #{pname} testing "
-              out_err.each_line do |raw_line|
-                lf.write(raw_line)
-                lf.flush
-                line_utf8 = raw_line.dup.force_encoding("UTF-8").encode("UTF-8", invalid: :replace, undef: :replace)
-                if line_utf8.start_with?(testing_prefix)
-                  stdout_mu.synchronize do
-                    $stdout.write(line_utf8)
-                    $stdout.puts("") unless line_utf8.end_with?("\n")
-                    $stdout.flush
+              testing_prefix = "FILC_PORT #{pname} testing ".b
+              carry = "".b
+              loop do
+                chunk = begin
+                  out_err.readpartial(65_536)
+                rescue EOFError
+                  nil
+                end
+                break if chunk.nil?
+
+                lf.write(chunk)
+                # Fast binary scan over complete lines only; split/decode only when testing marker appears.
+                scan = carry.empty? ? chunk : (carry + chunk)
+                nl = scan.rindex("\n".b)
+                if nl
+                  complete = scan.byteslice(0, nl + 1)
+                  if complete.include?(testing_prefix)
+                    complete.each_line do |raw_line|
+                      next unless raw_line.start_with?(testing_prefix)
+
+                      line_utf8 = raw_line.dup.force_encoding("UTF-8").encode("UTF-8", invalid: :replace, undef: :replace)
+                      stdout_mu.synchronize do
+                        $stdout.write(line_utf8)
+                        $stdout.puts("") unless line_utf8.end_with?("\n")
+                        $stdout.flush
+                      end
+                    end
                   end
+                  tail = scan.byteslice((nl + 1)..)
+                  carry = tail.bytesize <= 256 ? tail : "".b
+                else
+                  carry = scan.bytesize <= 256 ? scan : "".b
+                end
+              end
+              if !carry.empty? && carry.start_with?(testing_prefix)
+                line_utf8 = carry.dup.force_encoding("UTF-8").encode("UTF-8", invalid: :replace, undef: :replace)
+                stdout_mu.synchronize do
+                  $stdout.write(line_utf8)
+                  $stdout.puts("") unless line_utf8.end_with?("\n")
+                  $stdout.flush
                 end
               end
               rc = wait_thr.value.exitstatus || 1

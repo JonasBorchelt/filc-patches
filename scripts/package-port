@@ -572,7 +572,7 @@ module PortPackager
     end
   end
 
-  def create_deterministic_tar_xz(stage_dir, out_tar_xz, source_date_epoch)
+  def create_deterministic_tar_xz(stage_dir, out_tar_xz, source_date_epoch, xz_threads: 1)
     FileUtils.mkdir_p(File.dirname(out_tar_xz))
     entries = Dir.children(stage_dir).sort
     raise "refusing to create empty archive from #{stage_dir}" if entries.empty?
@@ -596,7 +596,8 @@ module PortPackager
       _o, err, st = Open3.capture3(*cmd)
       raise "tar failed: #{err.strip}" unless st.success?
 
-      xz_args = ["xz", "-6", "-f", tmp_tar]
+      threads = Integer(xz_threads.to_s, 10).clamp(1, 4)
+      xz_args = ["xz", "-6", "-T#{threads}", "-f", tmp_tar]
       _xo, xerr, xst = Open3.capture3(*xz_args)
       raise "xz failed: #{xerr.strip}" unless xst.success?
 
@@ -677,6 +678,7 @@ module PortPackager
       pubkey_file: nil,
       sign_only: false,
       parallel: 1,
+      xz_threads: Integer(ENV.fetch("FILC_PACKAGE_XZ_THREADS", "1"), 10).clamp(1, 4),
       watch_done_file: nil,
       ci_run: ENV["CI_PIPELINE_NUMBER"] ? Integer(ENV["CI_PIPELINE_NUMBER"], 10) : nil,
       source_date_epoch: Integer(ENV.fetch("SOURCE_DATE_EPOCH", "1700000000"), 10)
@@ -696,6 +698,7 @@ module PortPackager
       o.on("--revision N", Integer, "Package revision number (default: 1)") { |v| opts[:revision] = v }
       o.on("--ports LIST", "Comma-separated subset of ports to package") { |v| opts[:ports_filter] = v.split(",").map(&:strip).reject(&:empty?) }
       o.on("-j", "--parallel N", Integer, "Concurrent packaging workers (1..8, default: 1)") { |v| opts[:parallel] = v.clamp(1, 8) }
+      o.on("--xz-threads N", Integer, "Threads per xz invocation (1..4, default: 1)") { |v| opts[:xz_threads] = v.clamp(1, 4) }
       o.on("--watch-done-file PATH", "Continuously package green ports as manifests appear until PATH exists") { |v| opts[:watch_done_file] = File.expand_path(v) }
       o.on("--exact-tokens-env VAR", "Env var containing newline-separated exact infra tokens (default: FILC_LEAK_EXACT_TOKENS)") { |v| opts[:exact_tokens_env] = v }
       o.on("--leak-report PATH", "Optional path to write JSON leak-gate provenance report") { |v| opts[:leak_report] = File.expand_path(v) }
@@ -907,7 +910,7 @@ module PortPackager
           scan_elf_strings: true
         )
         if bin_leaks.empty?
-          create_deterministic_tar_xz(td, bin_out, opts[:source_date_epoch])
+          create_deterministic_tar_xz(td, bin_out, opts[:source_date_epoch], xz_threads: opts[:xz_threads])
         end
       end
 
@@ -955,7 +958,7 @@ module PortPackager
           scan_elf_strings: false
         )
         if rec_leaks.empty? && bin_leaks.empty?
-          create_deterministic_tar_xz(td, rec_out, opts[:source_date_epoch])
+          create_deterministic_tar_xz(td, rec_out, opts[:source_date_epoch], xz_threads: opts[:xz_threads])
         end
       end
 

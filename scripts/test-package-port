@@ -832,6 +832,52 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
     fail_srv.close
     fail_thr.join(2)
   end
+  # 9. Verify explicit --xz-threads 1 produces deterministic .tar.xz output
+  out_t1a = File.join(td, "out-t1a")
+  out_t1b = File.join(td, "out-t1b")
+  _t1ao, t1ae, t1ast = Open3.capture3(
+    { "FILC_LEAK_EXACT_TOKENS" => TEST_EXACT_TOKENS, "SOURCE_DATE_EPOCH" => "1700000000" },
+    "ruby", PACKAGE_SCRIPT,
+    "--repo-root", repo,
+    "--work-dir", work,
+    "--pizfix", pizfix,
+    "--neutral-prefix", pizfix,
+    "--ports-cache-dir", cache,
+    "--out-dir", out_t1a,
+    "--channel", "0.1.4",
+    "--arch", "x86_64-linux",
+    "--ports", "demo",
+    "--parallel", "1",
+    "--xz-threads", "1"
+  )
+  assert(t1ast.success?, "package-port --xz-threads 1 run A failed: #{t1ae}")
+  _t1bo, t1be, t1bst = Open3.capture3(
+    { "FILC_LEAK_EXACT_TOKENS" => TEST_EXACT_TOKENS, "SOURCE_DATE_EPOCH" => "1700000000" },
+    "ruby", PACKAGE_SCRIPT,
+    "--repo-root", repo,
+    "--work-dir", work,
+    "--pizfix", pizfix,
+    "--neutral-prefix", pizfix,
+    "--ports-cache-dir", cache,
+    "--out-dir", out_t1b,
+    "--channel", "0.1.4",
+    "--arch", "x86_64-linux",
+    "--ports", "demo",
+    "--parallel", "1",
+    "--xz-threads", "1"
+  )
+  assert(t1bst.success?, "package-port --xz-threads 1 run B failed: #{t1be}")
+  bin_t1a = Dir.glob(File.join(out_t1a, "0.1.4", "x86_64-linux", "bin", "demo-*.tar.xz")).first
+  bin_t1b = Dir.glob(File.join(out_t1b, "0.1.4", "x86_64-linux", "bin", "demo-*.tar.xz")).first
+  assert(bin_t1a && bin_t1b && File.size(bin_t1a) > 0 && File.size(bin_t1b) > 0,
+         "package-port --xz-threads 1 must produce non-empty .tar.xz archives")
+  _xto, xte, xtst = Open3.capture3("xz", "-t", bin_t1a, bin_t1b)
+  assert(xtst.success?, "xz -t failed for --xz-threads 1 archives: #{xte}")
+  tar_ver, = Open3.capture3("tar", "--version")
+  if tar_ver.include?("GNU tar")
+    assert(File.binread(bin_t1a) == File.binread(bin_t1b),
+           "package-port --xz-threads 1 must produce byte-identical deterministic .tar.xz archives on GNU tar")
+  end
 end
 
-puts "TEST_PACKAGE_PORT: PASS (8/8)"
+puts "TEST_PACKAGE_PORT: PASS (9/9)"

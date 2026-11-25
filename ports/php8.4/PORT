@@ -29,10 +29,12 @@ port_configure() {
     ac_cv_have_decl_UFFDIO_WRITEPROTECT_MODE_WP=no \
     php_cv_have_fpu_inline_asm_x86=no \
     ./configure --prefix="$PIZFIX" \
+      --with-layout=GNU \
       --program-suffix=8.4 \
       --libdir="$PIZFIX/lib/php8.4" \
       --includedir="$PIZFIX/include/php8.4" \
       --datadir="$PIZFIX/share/php8.4" \
+      --mandir="$PIZFIX/share/man" \
       --sysconfdir="$PIZFIX/etc/php8.4" \
       --localstatedir="$PIZFIX/var/php8.4" \
       --with-config-file-path="$PIZFIX/etc/php8.4" \
@@ -81,7 +83,7 @@ port_test() {
     -d assert.exception=1 \
     -d zend_extension=opcache \
     -d opcache.enable_cli=1 \
-    - <<'EOF' | grep -Fxq 'PHP84_FILC_SMOKE_OK'
+    <<'EOF' | grep -Fxq 'PHP84_FILC_SMOKE_OK'
 <?php
 // 1. WeakMap + WeakReference + GC (zexact_ptrtable + tagged pointers)
 $m = new WeakMap();
@@ -226,7 +228,7 @@ port_package_smoke() {
     -d assert.exception=1 \
     -d zend_extension=opcache \
     -d opcache.enable_cli=1 \
-    - <<'EOF' | grep -Fxq 'PHP84_PKG_SMOKE_OK'
+    <<'EOF' | grep -Fxq 'PHP84_PKG_SMOKE_OK'
 <?php
 $prefix = realpath(getenv("PKG_PREFIX"));
 assert(is_string($prefix) && str_starts_with(realpath(PHP_BINARY), $prefix . "/"));

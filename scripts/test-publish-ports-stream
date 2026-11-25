@@ -61,8 +61,17 @@ def write_mock_port(ports_dir, cache_dir, name:, version:, tier:, deps:, policy:
     port_package_smoke() {
       test -x "$PKG_PREFIX/bin/#{name}-config"
       test -f "$PKG_PREFIX/include/#{name}.h"
+      test -f "$PKG_PREFIX/bin/#{name}-elf"
+      test -f "$PKG_PREFIX/lib/lib#{name}.a"
       "$PKG_PREFIX/bin/#{name}-config" --prefix | grep -Fq "opt-filc/0.1.4/pizfix"
       ! "$PKG_PREFIX/bin/#{name}-config" --prefix | grep -Fq "/views/"
+      ! "$PKG_PREFIX/bin/#{name}-config" --prefix | grep -Fq "/.v0"
+      grep -aFq "opt-filc/0.1.4/pizfix/ssl" "$PKG_PREFIX/bin/#{name}-elf"
+      grep -aFq "opt-filc/0.1.4/build/bin/clang" "$PKG_PREFIX/bin/#{name}-elf"
+      ! grep -aFq "/.v0" "$PKG_PREFIX/bin/#{name}-elf"
+      ! grep -aFq "/build/vbn" "$PKG_PREFIX/bin/#{name}-elf"
+      grep -aFq "opt-filc/0.1.4/pizfix/lib/pkgconfig" "$PKG_PREFIX/lib/lib#{name}.a"
+      ! grep -aFq "/.v0" "$PKG_PREFIX/lib/lib#{name}.a"
     }
   PORT
   File.write(File.join(pdir, "PORT"), port_content, encoding: "UTF-8")
@@ -88,9 +97,14 @@ def write_mock_build_port(path)
       fi
     done
 
-    # Record observed FILC_PORTS_JOBS for budget verification
-    mkdir -p "$WORK_ROOT/observed-jobs"
+    # Record observed FILC_PORTS_JOBS and FILC_PORT_TIMEOUT for budget/timeout verification
+    mkdir -p "$WORK_ROOT/observed-jobs" "$WORK_ROOT/observed-timeouts"
     printf '%s\n' "${FILC_PORTS_JOBS:-unset}" > "$WORK_ROOT/observed-jobs/$PORT_NAME"
+    printf '%s\n' "${FILC_PORT_TIMEOUT:-unset}" > "$WORK_ROOT/observed-timeouts/$PORT_NAME"
+
+    # Emit UTF-8 multibyte bytes (0xC3 ..) and raw non-UTF-8 bytes (0xFF) to prove
+    # run_logged_cmd never crashes under LANG=C / US-ASCII container locale.
+    printf 'build-port %s locale test: \303\244\303\266\303\274\303\237 raw=\377\376 ok\n' "$PORT_NAME"
 
     # Read recipe metadata
     source "$PORTS_DIR/$PORT_NAME/PORT"
@@ -120,13 +134,27 @@ def write_mock_build_port(path)
       exit 1
     fi
 
-    # Install port artifacts (header, pkg-config .pc, and *-config script containing $PIZFIX)
+    # Install port artifacts (header, pkg-config .pc, *-config script, synthetic ELF binary,
+    # and binary static archive .a embedding $PIZFIX and $FILC_CLANG to mimic openssl/pkgconf/jq/xz)
     cat > "$PIZFIX/include/${PORT_NAME}.h" <<HDR
     /* ${PORT_NAME} ${VERSION} sibling=${HAS_SIBLING} */
     #define PORT_${PORT_NAME}_VER "${VERSION}"
     HDR
 
-    manifest_files="\"include/${PORT_NAME}.h\", \"bin/${PORT_NAME}-config\", \"lib/pkgconfig/${PORT_NAME}.pc\""
+    mkdir -p "$PIZFIX/lib"
+    # Synthetic ELF binary embedding $PIZFIX and $FILC_CLANG in binary .rodata strings
+    printf '\177ELF\002\001\001\000\000\000\000\000\000\000\000\000OPENSSLDIR=%s/ssl\000COMPILER=%s -O2 -g\000' \
+      "$PIZFIX" "${FILC_CLANG:-/opt/filc/0.1.4/build/bin/clang}" > "$PIZFIX/bin/${PORT_NAME}-elf"
+    if [[ "${MOCK_LEAK_PORT:-}" == "$PORT_NAME" ]]; then
+      printf 'LEAK_TOKEN=forbidden-ci-secret-token\000' >> "$PIZFIX/bin/${PORT_NAME}-elf"
+    fi
+    chmod 0755 "$PIZFIX/bin/${PORT_NAME}-elf"
+
+    # Synthetic binary static archive (.a with NUL bytes) embedding $PIZFIX/lib/pkgconfig
+    printf '!<arch>\n\000PKG_DEFAULT_PATH=%s/lib/pkgconfig\000CC=%s\000' \
+      "$PIZFIX" "${FILC_CLANG:-/opt/filc/0.1.4/build/bin/clang}" > "$PIZFIX/lib/lib${PORT_NAME}.a"
+
+    manifest_files="\"include/${PORT_NAME}.h\", \"bin/${PORT_NAME}-config\", \"bin/${PORT_NAME}-elf\", \"lib/lib${PORT_NAME}.a\", \"lib/pkgconfig/${PORT_NAME}.pc\""
     if [[ "$PORT_NAME" == "libc" ]]; then
       echo "/* optional sibling marker */" > "$PIZFIX/include/optional_sibling.h"
       manifest_files="$manifest_files, \"include/optional_sibling.h\""
@@ -222,14 +250,17 @@ Dir.mktmpdir("filc-stream-test-") do |tmp|
     "durations" => { "liba" => 5, "mid1" => 60, "app" => 30, "libb" => 5, "mid2" => 10, "libc" => 12 }
   }) + "\n", encoding: "UTF-8")
 
+  # Run explicitly under LANG=C / LC_ALL=C (US-ASCII) to prove UTF-8/binary log safety!
   common_env = ENV.to_h.merge(
+    "LANG" => "C",
+    "LC_ALL" => "C",
     "FILC_LEAK_EXACT_TOKENS" => "198.51.100.42\nforbidden-ci-secret-token\n",
     "FILC_PORTS_MINISIGN_KEY" => "must-never-leak-to-build-port",
     "FILC_PORTS_UPLOAD_TOKEN" => "must-never-leak-to-build-port",
     "FILC_LIVE_TOKEN" => "must-never-leak-to-build-port"
   )
 
-  puts "=== [1/4] Determinism proof (6-port diamond DAG: critical-path vs reverse order) ==="
+  puts "=== [1/6] Determinism proof (6-port diamond DAG + ELF/.a relocation + US-ASCII locale) ==="
   run_hashes = {}
   run_sequences = {}
 
@@ -264,20 +295,25 @@ Dir.mktmpdir("filc-stream-test-") do |tmp|
     assert(st.success?, "#{order} run failed (rc=#{st.exitstatus}):\nOUT:\n#{out}\nERR:\n#{err}")
     assert(out.include?("PUBLISH_PORTS_STREAM_RESULT: PASS"), "missing PASS marker in #{order}")
 
-    # Verify fixed core budget per slot: 16 / 4 = 4 cores for every port!
+    # Verify fixed core budget per slot (16 / 4 = 4 cores) AND scaled FILC_PORT_TIMEOUT (900 * 16 / 4 = 3600s)!
     %w[liba libb libc mid1 mid2 app].each do |p|
       obs = File.read(File.join(work_dir, "observed-jobs", p)).strip
       assert(obs == "4", "expected fixed slot_cores=4 for #{p}, got #{obs}")
+      to_s = File.read(File.join(work_dir, "observed-timeouts", p)).strip
+      assert(to_s == "3600", "expected scaled FILC_PORT_TIMEOUT=3600 for #{p}, got #{to_s}")
     end
 
     # Verify pristine base pizfix was NEVER mutated!
     after_snapshot = Dir.glob(File.join(fix[:tc_root], "pizfix", "**", "*")).sort
     assert(after_snapshot == base_snapshot, "pristine base pizfix was modified during #{order} run!")
 
-    # Verify views directory cleaned up
+    # Verify views directory, same-length sibling slot dirs, and shared wrapper dir are all cleaned up
     views_dir = File.join(fix[:tc_root], "views")
     leftover_views = File.directory?(views_dir) ? Dir.children(views_dir) : []
     assert(leftover_views.empty?, "leftover views after #{order}: #{leftover_views}")
+    tc_parent_entries = Dir.children(File.dirname(fix[:tc_root])).select { |e| e.start_with?(".v", ".s") }
+    assert(tc_parent_entries.empty?, "leftover same-length slot view dirs after #{order}: #{tc_parent_entries}")
+    assert(!File.exist?(File.join(fix[:tc_root], "build", "vbn")), "shared wrapper dir build/vbn not cleaned up after #{order}")
 
     idx = JSON.parse(File.read(File.join(out_dir, "0.1.4", "x86_64-linux", "index.json"), encoding: "UTF-8"))
     summary = JSON.parse(File.read(File.join(work_dir, "publish-summary.json"), encoding: "UTF-8"))
@@ -295,7 +331,7 @@ Dir.mktmpdir("filc-stream-test-") do |tmp|
     puts "  #{p.ljust(6)} #{run_hashes['critical-path'][p]}"
   end
 
-  puts "=== [2/4] Critical-path ordering proof (parallel=1) ==="
+  puts "=== [2/6] Critical-path ordering proof (parallel=1) ==="
   work_cp = File.join(tmp, "work-cp1")
   out_cp = File.join(tmp, "out-cp1")
   timings_cp = File.join(tmp, "timings-cp1.json")
@@ -329,7 +365,7 @@ Dir.mktmpdir("filc-stream-test-") do |tmp|
   assert(File.file?(timings_cp), "timings file not saved")
   puts "CRITICAL_PATH_SCHEDULER: PASS (order=#{seq.join(' -> ')})"
 
-  puts "=== [3/4] Failure isolation + atomic commit blocker summary ==="
+  puts "=== [3/6] Failure isolation + atomic commit blocker summary ==="
   work_fail = File.join(tmp, "work-fail")
   out_fail = File.join(tmp, "out-fail")
   fail_env = common_env.merge("MOCK_FAIL_PORT" => "mid1")
@@ -366,7 +402,7 @@ Dir.mktmpdir("filc-stream-test-") do |tmp|
   assert(fail_summary["summary"]["blocked"] == 1, "expected 1 blocked port")
   puts "FAILURE_ISOLATION_AND_ATOMIC_GATE: PASS (4 independent ports finished, mid1 failed, app blocked, index.json blocked)"
 
-  puts "=== [4/4] report-live.rb & report-live verifying/stream-ports dry-run parity ==="
+  puts "=== [4/6] report-live.rb & report-live verifying/stream-ports dry-run parity ==="
   mock_log = File.join(tmp, "publish-ports.log")
   File.write(mock_log, <<~LOG, encoding: "UTF-8")
     FILC_PHASE stream-ports running
@@ -407,7 +443,7 @@ Dir.mktmpdir("filc-stream-test-") do |tmp|
   assert(payloads[0] == payloads[1], "report-live.rb and report-live phase parity mismatch")
   puts "REPORT_LIVE_VERIFYING_PARITY: PASS (Ruby + Python identical)"
 
-  puts "=== [5/5] Incremental build cache (skipped (cached), dep cascade, FILC_PORTS_FORCE, HEAD-only check) ==="
+  puts "=== [5/6] Incremental build cache (skipped (cached), dep cascade, FILC_PORTS_FORCE, HEAD-only check) ==="
   cache_manifest = File.join(tmp, "build-cache.json")
   local_art_cache = File.join(tmp, "local-art-cache")
   mock_upload_log = File.join(tmp, "mock-upload.log")
@@ -516,6 +552,47 @@ Dir.mktmpdir("filc-stream-test-") do |tmp|
   assert(!s6["cached_ports"].include?("liba"), "liba must rebuild on server HEAD miss")
   assert(ops6.include?("stage liba"), "liba must re-upload after HEAD miss")
   puts "INCREMENTAL_BUILD_CACHE: PASS (6/6 warm skip, dep cascade, FILC_PORTS_FORCE=<port|all>, HEAD-miss fallback)"
+
+  puts "=== [6/6] LEAK_GATE detail reporting + per-port duration-based timeout scaling ==="
+  work_leak = File.join(tmp, "work-leak")
+  out_leak = File.join(tmp, "out-leak")
+  slow_timings = File.join(tmp, "timings-slow.json")
+  File.write(slow_timings, JSON.pretty_generate({
+    "schema_version" => 1,
+    "durations" => { "liba" => 600, "libc" => 2000 }
+  }) + "\n", encoding: "UTF-8")
+  leak_env = common_env.merge("MOCK_LEAK_PORT" => "libc")
+  out_l, _err_l, st_l = Open3.capture3(
+    leak_env,
+    STREAM_BIN,
+    "--repo-root", REPO_ROOT,
+    "--ports-dir", fix[:ports_dir],
+    "--toolchain-root", fix[:tc_root],
+    "--work-dir", work_leak,
+    "--out-dir", out_leak,
+    "--ports-cache-dir", fix[:cache_dir],
+    "--channel", "0.1.4",
+    "--arch", "x86_64-linux",
+    "--parallel", "1",
+    "--total-jobs", "4",
+    "--no-pin-cpus",
+    "--isolated-prefix",
+    "--ports", "liba,libc",
+    "--timings-file", slow_timings,
+    "--no-bootstrap-timings",
+    "--build-port-bin", fix[:mock_bp],
+    "--source-date-epoch", "1700000000"
+  )
+  assert(!st_l.success?, "expected LEAK_GATE failure when MOCK_LEAK_PORT=libc")
+  assert(out_l.include?("LEAK_GATE FAILED for libc"), "missing LEAK_GATE header:\n#{out_l}")
+  assert(out_l.include?("FAIL_DETAIL libc"), "missing immediate FAIL_DETAIL block:\n#{out_l}")
+  assert(out_l.include?("ELF strings prefix/bin/libc-elf"), "missing exact ELF leak hit detail line:\n#{out_l}")
+  assert(out_l.include?("matches exact forbidden infra token"), "missing exact token match reason:\n#{out_l}")
+  to_liba = File.read(File.join(work_leak, "observed-timeouts", "liba")).strip
+  to_libc = File.read(File.join(work_leak, "observed-timeouts", "libc")).strip
+  assert(to_liba == "1500", "expected duration-scaled timeout 1500s (600*2.5) for liba, got #{to_liba}")
+  assert(to_libc == "3600", "expected capped timeout 3600s for libc (2000*2.5 capped), got #{to_libc}")
+  puts "LEAK_GATE_DETAILS_AND_TIMEOUT_SCALING: PASS (exact ELF hit printed, liba=1500s, libc=3600s)"
 
   puts "ALL PUBLISH-PORTS-STREAM TESTS PASSED"
 end

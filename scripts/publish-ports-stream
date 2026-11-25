@@ -28,11 +28,16 @@ require "optparse"
 require "set"
 require "time"
 
+Encoding.default_external = Encoding::UTF_8
+Encoding.default_internal = Encoding::UTF_8
+
 module PublishPortsStream
   PORT_NAME_RE = /\A[a-z0-9][a-z0-9._+-]{0,63}\z/
   CHANNEL_RE = /\A\d+\.\d+\.\d+(?:-[a-z0-9.]+)?\z/
   ARCH_RE = /\A(?:x86_64|aarch64)-linux\z/
   DEFAULT_DURATION_ESTIMATE = 10.0
+  DEFAULT_PORT_TIMEOUT = 900
+  DEFAULT_MAX_PORT_TIMEOUT = 3600
   VALID_SCHEDULES = %w[critical-path reverse name-asc name-desc].freeze
   SECRET_ENV_KEYS = %w[
     FILC_LEAK_EXACT_TOKENS
@@ -464,10 +469,90 @@ module PublishPortsStream
     false
   end
 
+  def decode_utf8(str)
+    s = str.to_s.dup.force_encoding(Encoding::UTF_8)
+    s.valid_encoding? ? s : s.scrub("?")
+  end
+
+  def compute_port_timeout(base_timeout:, max_timeout:, total_jobs:, slot_cores:, estimated_duration: nil)
+    base = [base_timeout.to_i, 60].max
+    cap = [max_timeout.to_i, base].max
+    core_scaled = (base * total_jobs.to_f / [slot_cores.to_i, 1].max).ceil
+    dur_scaled = estimated_duration && estimated_duration.to_f > 0 ? (estimated_duration.to_f * 2.5).ceil : base
+    [[base, core_scaled, dur_scaled].max, cap].min
+  end
+
+  def same_length_slot_view_root(toolchain_root:, slot_idx:, port_name:)
+    tc_parent = File.dirname(toolchain_root)
+    tc_base = File.basename(toolchain_root)
+    tag = nil
+    if tc_base.bytesize >= 3 && slot_idx < (10**(tc_base.bytesize - 2))
+      cand = ".v#{format("%0*d", tc_base.bytesize - 2, slot_idx)}"
+      cand = ".s#{format("%0*d", tc_base.bytesize - 2, slot_idx)}" if cand == tc_base
+      tag = cand if cand.bytesize == tc_base.bytesize && cand != tc_base
+    elsif tc_base.bytesize == 2 && slot_idx < 10
+      cand = ".#{slot_idx}"
+      cand = "s#{slot_idx}" if cand == tc_base
+      tag = cand if cand.bytesize == tc_base.bytesize && cand != tc_base
+    end
+    if tag && File.directory?(tc_parent) && File.writable?(tc_parent)
+      return [File.join(tc_parent, tag), true]
+    end
+    [File.join(toolchain_root, "views", port_name), false]
+  end
+
+  def prepare_shared_view_wrappers!(toolchain_root:)
+    real_bin_dir = File.join(toolchain_root, "build", "bin")
+    # Use a shared 3-letter sibling dir "vbn" (exact same byte length as "bin")
+    # with zero port name or slot ID so even tools embedding CC into ELF .rodata
+    # (e.g. OpenSSL compiler string, jq build configuration) normalize cleanly
+    # in-place back to build/bin without shifting any binary offset.
+    wrapper_dir = File.join(toolchain_root, "build", "vbn")
+    FileUtils.rm_rf(wrapper_dir)
+    FileUtils.mkdir_p(wrapper_dir)
+
+    %w[clang clang++].each do |cc_name|
+      real_cc = File.join(real_bin_dir, cc_name)
+      next unless File.exist?(real_cc) || File.symlink?(real_cc)
+
+      wrapper_path = File.join(wrapper_dir, cc_name)
+      script = <<~SH
+        #!/bin/sh
+        real_cc="#{real_cc}"
+        if [ -n "${FILC_VIEW_PIZFIX:-}" ]; then
+          if [ -n "${FILC_NEUTRAL_PIZFIX:-}" ]; then
+            for arg in "$@"; do
+              case "$arg" in
+                -c|-S|-E|-M|-MM|*.c|*.cc|*.cpp|*.cxx|*.C|*.S|*.s|*.i|*.ii)
+                  exec "$real_cc" --filc-resource-dir="$FILC_VIEW_PIZFIX" -ffile-prefix-map="$FILC_VIEW_PIZFIX=$FILC_NEUTRAL_PIZFIX" "$@"
+                  ;;
+              esac
+            done
+          fi
+          exec "$real_cc" --filc-resource-dir="$FILC_VIEW_PIZFIX" "$@"
+        fi
+        exec "$real_cc" "$@"
+      SH
+      File.write(wrapper_path, script, encoding: "UTF-8")
+      File.chmod(0o755, wrapper_path)
+    end
+    %w[ld.lld llvm-ar llvm-ranlib llvm-nm].each do |tool|
+      real_tool = File.join(real_bin_dir, tool)
+      next unless File.exist?(real_tool) || File.symlink?(real_tool)
+
+      File.symlink(real_tool, File.join(wrapper_dir, tool))
+    end
+    wrapper_dir
+  end
+
   def overlay_tree!(src_root, dst_root, rewrite_from: nil, rewrite_to: nil)
     return unless File.directory?(src_root)
 
     do_rewrite = !rewrite_from.to_s.empty? && !rewrite_to.to_s.empty? && rewrite_from != rewrite_to
+    same_len_rewrite = do_rewrite && rewrite_from.bytesize == rewrite_to.bytesize
+    from_b = do_rewrite ? rewrite_from.b : nil
+    to_b = do_rewrite ? rewrite_to.b : nil
+
     Dir.glob(File.join(src_root, "**", "*"), File::FNM_DOTMATCH).sort.each do |src|
       base = File.basename(src)
       next if base == "." || base == ".."
@@ -486,10 +571,10 @@ module PublishPortsStream
         File.symlink(File.readlink(src), dst)
       elsif File.file?(src)
         st = File.stat(src)
-        if do_rewrite && should_rewrite_config_file?(rel)
+        if do_rewrite && (should_rewrite_config_file?(rel) || (same_len_rewrite && st.size <= 64 * 1024 * 1024))
           raw = File.binread(src)
-          if !raw.include?("\x00".b) && raw.include?(rewrite_from.b)
-            File.binwrite(dst, raw.gsub(rewrite_from.b, rewrite_to.b))
+          if raw.include?(from_b) && (!raw.include?("\x00".b) || same_len_rewrite)
+            File.binwrite(dst, raw.gsub(from_b, to_b))
             File.chmod(st.mode & 0o777, dst)
             next
           end
@@ -504,13 +589,15 @@ module PublishPortsStream
     end
   end
 
-  def prepare_isolated_view!(port_name:, toolchain_root:, neutral_prefix:, tdeps:, pkg_trees_dir:)
-    view_root = File.join(toolchain_root, "views", port_name)
+  def prepare_isolated_view!(port_name:, slot_idx:, toolchain_root:, neutral_prefix:, tdeps:, pkg_trees_dir:, wrapper_dir:)
+    view_root, same_length = same_length_slot_view_root(
+      toolchain_root: toolchain_root,
+      slot_idx: slot_idx,
+      port_name: port_name
+    )
     port_view = File.join(view_root, "pizfix")
-    wrapper_dir = File.join(view_root, ".toolchain")
     FileUtils.rm_rf(view_root)
     FileUtils.mkdir_p(port_view)
-    FileUtils.mkdir_p(wrapper_dir)
 
     base_pizfix = File.join(toolchain_root, "pizfix")
     raise "pristine base pizfix not found: #{base_pizfix}" unless File.directory?(base_pizfix)
@@ -526,28 +613,7 @@ module PublishPortsStream
       overlay_tree!(dep_tree, port_view, rewrite_from: neutral_prefix, rewrite_to: port_view)
     end
 
-    # 3. Create thin compiler wrappers enforcing --filc-resource-dir=<port_view>
-    real_bin_dir = File.join(toolchain_root, "build", "bin")
-    %w[clang clang++].each do |cc_name|
-      real_cc = File.join(real_bin_dir, cc_name)
-      next unless File.exist?(real_cc) || File.symlink?(real_cc)
-
-      wrapper_path = File.join(wrapper_dir, cc_name)
-      File.write(
-        wrapper_path,
-        "#!/bin/sh\nexec \"#{real_cc}\" --filc-resource-dir=\"#{port_view}\" \"$@\"\n",
-        encoding: "UTF-8"
-      )
-      File.chmod(0o755, wrapper_path)
-    end
-    %w[ld.lld llvm-ar llvm-ranlib llvm-nm].each do |tool|
-      real_tool = File.join(real_bin_dir, tool)
-      next unless File.exist?(real_tool) || File.symlink?(real_tool)
-
-      File.symlink(real_tool, File.join(wrapper_dir, tool))
-    end
-
-    { view_root: view_root, port_view: port_view, wrapper_dir: wrapper_dir }
+    { view_root: view_root, port_view: port_view, wrapper_dir: wrapper_dir, same_length: same_length }
   end
 
   def cache_verified_package_tree!(bin_tar_xz:, pkg_trees_dir:, port_name:)
@@ -557,7 +623,7 @@ module PublishPortsStream
     FileUtils.rm_rf(tmp)
     FileUtils.mkdir_p(tmp)
     _o, err, st = Open3.capture3("tar", "-xf", bin_tar_xz, "-C", tmp, "prefix")
-    raise "failed to unpack verified #{bin_tar_xz} into tree cache: #{err.strip}" unless st.success?
+    raise "failed to unpack verified #{bin_tar_xz} into tree cache: #{decode_utf8(err).strip}" unless st.success?
 
     extracted_prefix = File.join(tmp, "prefix")
     raise "verified archive #{bin_tar_xz} missing prefix/ tree" unless File.directory?(extracted_prefix)
@@ -570,7 +636,7 @@ module PublishPortsStream
   end
 
   def clean_env_without(keys)
-    env = {}
+    env = { "LANG" => "C.UTF-8", "LC_ALL" => "C.UTF-8" }
     keys.each { |k| env[k] = nil }
     env
   end
@@ -587,8 +653,10 @@ module PublishPortsStream
     opts[:chdir] = cwd if cwd
     Open3.popen2e(env, *full_cmd, **opts) do |stdin, oe, wait_thr|
       stdin.close
+      oe.binmode
       File.open(log_file, "a", encoding: "UTF-8") do |lf|
-        oe.each_line do |line|
+        oe.each_line do |raw_line|
+          line = decode_utf8(raw_line)
           lf.write(line)
           output << line
         end
@@ -598,7 +666,7 @@ module PublishPortsStream
   end
 
   def extract_short_reason(output, fallback)
-    lines = output.to_s.lines.map(&:strip).reject(&:empty?)
+    lines = decode_utf8(output).lines.map(&:strip).reject(&:empty?)
     hit = lines.reverse.find do |l|
       l.include?("LEAK_GATE FAILED") ||
         l.include?("SIZE_LIMIT FAILED") ||
@@ -611,6 +679,27 @@ module PublishPortsStream
     end
     reason = (hit || lines.last || fallback).to_s
     reason.length > 180 ? "#{reason[0, 177]}..." : reason
+  end
+
+  def extract_failure_details(output, max_lines: 30)
+    raw_lines = decode_utf8(output).lines.map { |l| l.chomp("\n").chomp("\r") }
+    gate_idx = raw_lines.rindex do |l|
+      l.include?("LEAK_GATE FAILED") ||
+        l.include?("SIZE_LIMIT FAILED") ||
+        l.include?("PACKAGE_SMOKE FAILED")
+    end
+    if gate_idx
+      block = []
+      raw_lines[gate_idx..].each_with_index do |ln, off|
+        break if off > 0 && (ln.strip.empty? || ln.start_with?("\tfrom ", "from "))
+
+        block << ln[0, 240]
+        break if block.length >= max_lines
+      end
+      return block
+    end
+    non_empty = raw_lines.reject { |l| l.strip.empty? }
+    non_empty.last([max_lines, 10].min).map { |l| l[0, 240] }
   end
 
   def sort_json(obj)
@@ -734,6 +823,8 @@ module PublishPortsStream
     repo_root = File.expand_path("..", __dir__)
     default_par = Integer(ENV.fetch("FILC_PORTS_PARALLEL", "4"), 10).clamp(1, 8)
     default_jobs = Integer(ENV.fetch("FILC_PORTS_JOBS", Etc.nprocessors.to_s), 10)
+    default_timeout = Integer(ENV.fetch("FILC_PORT_TIMEOUT", DEFAULT_PORT_TIMEOUT.to_s), 10)
+    default_max_timeout = Integer(ENV.fetch("FILC_PORT_MAX_TIMEOUT", DEFAULT_MAX_PORT_TIMEOUT.to_s), 10)
     opts = {
       repo_root: repo_root,
       ports_dir: nil,
@@ -746,6 +837,8 @@ module PublishPortsStream
       revision: 1,
       parallel: default_par,
       total_jobs: default_jobs,
+      port_timeout: default_timeout,
+      max_port_timeout: default_max_timeout,
       pin_cpus: ENV.fetch("FILC_PORTS_PIN_CPUS", "0") == "1",
       isolated_prefix: true,
       schedule_order: "critical-path",
@@ -780,6 +873,8 @@ module PublishPortsStream
       o.on("--revision N", Integer, "Package revision number (default: 1)") { |v| opts[:revision] = v }
       o.on("-j", "--parallel N", Integer, "Concurrent port slots (1..8, default: 4)") { |v| opts[:parallel] = v.clamp(1, 8) }
       o.on("--total-jobs N", Integer, "Total CPU budget split evenly across slots (default: FILC_PORTS_JOBS)") { |v| opts[:total_jobs] = [v, 1].max }
+      o.on("--port-timeout N", Integer, "Base per-stage build-port timeout in seconds (default: FILC_PORT_TIMEOUT or 900)") { |v| opts[:port_timeout] = [v, 60].max }
+      o.on("--max-port-timeout N", Integer, "Upper cap for scaled per-stage timeout in seconds (default: FILC_PORT_MAX_TIMEOUT or 3600)") { |v| opts[:max_port_timeout] = [v, 60].max }
       o.on("--pin-cpus", "Pin each worker slot to a disjoint CPU slice via taskset") { opts[:pin_cpus] = true }
       o.on("--no-pin-cpus", "Disable disjoint taskset CPU pinning") { opts[:pin_cpus] = false }
       o.on("--isolated-prefix", "Build each port in an isolated prefix view (default)") { opts[:isolated_prefix] = true }
@@ -859,6 +954,14 @@ module PublishPortsStream
                    Array.new(parallel, nil)
                  end
 
+    shared_wrapper_dir = opts[:isolated_prefix] ? prepare_shared_view_wrappers!(toolchain_root: opts[:toolchain_root]) : nil
+    view_mode = if opts[:isolated_prefix]
+                  _vr, same_len = same_length_slot_view_root(toolchain_root: opts[:toolchain_root], slot_idx: 0, port_name: "probe")
+                  same_len ? "same-length-slot" : "views-subdir"
+                else
+                  "shared"
+                end
+
     $stdout.puts("FILC_PHASE stream-ports running")
     $stdout.puts("FILC_PORTS_PARALLEL=#{parallel}")
     $stdout.puts("FILC_PORTS_TOTAL #{selected.size}")
@@ -867,7 +970,7 @@ module PublishPortsStream
     end
     $stdout.puts(
       "PUBLISH_PORTS_STREAM: parallel=#{parallel} total_jobs=#{opts[:total_jobs]} slot_cores=#{slot_cores} " \
-      "isolated_prefix=#{opts[:isolated_prefix]} schedule=#{opts[:schedule_order]} upload=#{opts[:upload]} " \
+      "isolated_prefix=#{opts[:isolated_prefix]} view_mode=#{view_mode} schedule=#{opts[:schedule_order]} upload=#{opts[:upload]} " \
       "pin_cpus=#{pin_ranges.any? ? pin_ranges.join(',') : 'off'} ports=#{selected.size}"
     )
     $stdout.flush
@@ -1090,9 +1193,17 @@ module PublishPortsStream
             next
           end
 
+          port_timeout = compute_port_timeout(
+            base_timeout: opts[:port_timeout],
+            max_timeout: opts[:max_port_timeout],
+            total_jobs: opts[:total_jobs],
+            slot_cores: slot_cores,
+            estimated_duration: timings[pname]
+          )
+
           mu.synchronize do
             $stdout.puts(
-              "STREAM_SLOT[#{slot_idx}] START #{pname} (cp=#{cp_map[pname]}s cores=#{slot_cores}" \
+              "STREAM_SLOT[#{slot_idx}] START #{pname} (cp=#{cp_map[pname]}s cores=#{slot_cores} timeout=#{port_timeout}s" \
               "#{cpu_range ? " cpus=#{cpu_range}" : ''} deps=#{tdeps.length}#{forced ? ' forced=1' : ''})"
             )
             $stdout.puts("FILC_PORT #{pname} building policy=#{meta['policy_class']} stage=build")
@@ -1105,6 +1216,7 @@ module PublishPortsStream
           fail_stage = nil
           fail_kind = nil
           fail_reason = nil
+          fail_details = []
           build_status = "tested"
           staged_rec = nil
 
@@ -1115,10 +1227,12 @@ module PublishPortsStream
             if opts[:isolated_prefix]
               view_info = prepare_isolated_view!(
                 port_name: pname,
+                slot_idx: slot_idx,
                 toolchain_root: opts[:toolchain_root],
                 neutral_prefix: neutral_prefix,
                 tdeps: tdeps,
-                pkg_trees_dir: pkg_trees_dir
+                pkg_trees_dir: pkg_trees_dir,
+                wrapper_dir: shared_wrapper_dir
               )
               build_pizfix = view_info[:port_view]
               wrapper_dir = view_info[:wrapper_dir]
@@ -1130,13 +1244,13 @@ module PublishPortsStream
             build_env["FILC_PORTS_DIR"] = ports_dir
             build_env["FILC_PORTS_CACHE_DIR"] = cache_dir
             build_env["FILC_PORTS_JOBS"] = slot_cores.to_s
+            build_env["FILC_PORT_TIMEOUT"] = port_timeout.to_s
             build_env["FILC_PORT_SKIP_DEPS"] = "1"
             if wrapper_dir
               build_env["FILC_CLANG"] = File.join(wrapper_dir, "clang")
               build_env["FILC_CLANGXX"] = File.join(wrapper_dir, "clang++")
-              prefix_map = "-ffile-prefix-map=#{build_pizfix}=#{neutral_prefix}"
-              build_env["CFLAGS"] = "-O2 -g #{prefix_map}"
-              build_env["CXXFLAGS"] = "-O2 -g #{prefix_map}"
+              build_env["FILC_VIEW_PIZFIX"] = build_pizfix
+              build_env["FILC_NEUTRAL_PIZFIX"] = neutral_prefix
             end
             build_env["SOURCE_DATE_EPOCH"] = opts[:source_date_epoch].to_s if opts[:source_date_epoch]
 
@@ -1158,6 +1272,7 @@ module PublishPortsStream
               fail_stage = (state_rec && state_rec["failed_stage"]) || "build"
               fail_kind = (state_rec && state_rec["failed_kind"]) || "package"
               fail_reason = extract_short_reason(out_b, "build-port exited with code #{rc_b}")
+              fail_details = extract_failure_details(out_b)
             end
 
             # Stage 2: Verify (package + relocate + leak-gate + 512-MiB limit + alt-prefix smoke)
@@ -1220,12 +1335,14 @@ module PublishPortsStream
                 fail_stage = "verify"
                 fail_kind = "package"
                 fail_reason = extract_short_reason(out_p, "package-port --single-port exited with code #{rc_p}")
+                fail_details = extract_failure_details(out_p)
               end
             end
           rescue StandardError => e
             fail_stage ||= build_ok ? "verify" : "build"
             fail_kind ||= "runner"
-            fail_reason = e.message.to_s
+            fail_reason = decode_utf8(e.message)
+            fail_details = ["#{e.class}: #{fail_reason}"]
           ensure
             FileUtils.rm_rf(view_info[:view_root]) if view_info && view_info[:view_root]
           end
@@ -1270,6 +1387,7 @@ module PublishPortsStream
                 fail_stage = "upload"
                 fail_kind = "runner"
                 fail_reason = extract_short_reason(out_u, "upload-ports --stage-port-meta exited with code #{rc_u}")
+                fail_details = extract_failure_details(out_u)
               end
             end
           end
@@ -1340,9 +1458,14 @@ module PublishPortsStream
                 "stage" => fail_stage || "build",
                 "kind" => fk,
                 "reason" => fail_reason || "unknown failure",
+                "details" => fail_details,
                 "log_file" => log_file
               }
               $stdout.puts("FILC_PORT #{pname} failed:#{fk} policy=#{meta['policy_class']} stage=#{fail_stage || 'build'} duration=#{port_dur.round}")
+              unless fail_details.empty?
+                $stdout.puts("STREAM_SLOT[#{slot_idx}] FAIL_DETAIL #{pname} (stage=#{fail_stage || 'build'}, kind=#{fk}):")
+                fail_details.each { |dl| $stdout.puts("  | #{dl}") }
+              end
               # Only build/verify failures block downstream builds (upload failure leaves verified tree intact)
               propagate_blocked.call(pname) unless verify_ok
             end
@@ -1353,7 +1476,11 @@ module PublishPortsStream
       end
     end
 
-    workers.each(&:join)
+    begin
+      workers.each(&:join)
+    ensure
+      FileUtils.rm_rf(shared_wrapper_dir) if shared_wrapper_dir && File.exist?(shared_wrapper_dir)
+    end
     total_duration = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - t_run_start).round(3)
 
     save_timings!(opts[:timings_file], measured_durations)
@@ -1400,6 +1527,9 @@ module PublishPortsStream
       $stdout.puts("FAILED PORTS PREVENTING INDEX COMMIT:")
       failures.sort_by { |f| f["name"] }.each do |f|
         $stdout.puts("  - #{f['name']} (stage=#{f['stage']}, kind=#{f['kind']}): #{f['reason']}")
+        Array(f["details"]).each do |dl|
+          $stdout.puts("      #{dl}")
+        end
       end
       unless blocked_records.empty?
         $stdout.puts("BLOCKED PORTS:")
@@ -1436,6 +1566,8 @@ module PublishPortsStream
     fin_cmd.concat(["--pubkey-file", opts[:pubkey_file]]) if opts[:pubkey_file]
 
     fin_out, fin_err, fin_st = Open3.capture3(fin_env, *fin_cmd)
+    fin_out = decode_utf8(fin_out)
+    fin_err = decode_utf8(fin_err)
     $stdout.puts(fin_out) unless fin_out.empty?
     unless fin_st.success?
       $stderr.puts(fin_err) unless fin_err.empty?

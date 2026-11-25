@@ -20,6 +20,9 @@ require "time"
 require "tmpdir"
 require "zlib"
 
+Encoding.default_external = Encoding::UTF_8
+Encoding.default_internal = Encoding::UTF_8
+
 module PortPackager
   PORT_NAME_RE = /\A[a-z0-9][a-z0-9._+-]{0,63}\z/
   CHANNEL_RE = /\A\d+\.\d+\.\d+(?:-[a-z0-9.]+)?\z/
@@ -249,7 +252,19 @@ module PortPackager
 
     candidates = [repo_root, ENV["HOSTNAME"]]
     candidates << work_dir unless !neutral_build.empty? && work_dir.to_s.strip == neutral_build
-    candidates << pizfix unless !neutral.empty? && pizfix.to_s.strip == neutral
+    pizfix_s = pizfix.to_s.strip
+    unless !neutral.empty? && pizfix_s == neutral
+      candidates << pizfix_s
+      if !neutral.empty? && !pizfix_s.empty? && File.basename(pizfix_s) == File.basename(neutral)
+        p_parent = File.dirname(pizfix_s)
+        n_parent = File.dirname(neutral)
+        if p_parent != n_parent && p_parent.length >= 6 &&
+           p_parent.bytesize == n_parent.bytesize &&
+           File.dirname(p_parent) == File.dirname(n_parent)
+          candidates << p_parent
+        end
+      end
+    end
     candidates << wrapper_dir unless wrapper_dir.to_s.strip.empty?
     candidates.each do |v|
       s = v.to_s.strip
@@ -362,19 +377,23 @@ module PortPackager
         if elf_file?(path)
           if cmd_available?("patchelf")
             out, _e, st = capture3_cmd(["patchelf", "--print-rpath", path], throttle_fn: throttle_fn)
-            if st.success? && !out.strip.empty?
-              h, g = scan_text_for_leaks("ELF RPATH #{placeholder}", out.strip, literals, exact_rules: exact_rules)
+            out_s = out.to_s.dup.force_encoding(Encoding::UTF_8)
+            out_s = out_s.scrub("?") unless out_s.valid_encoding?
+            if st.success? && !out_s.strip.empty?
+              h, g = scan_text_for_leaks("ELF RPATH #{placeholder}", out_s.strip, literals, exact_rules: exact_rules)
               ino_hard.concat(h)
               ino_generic.concat(g)
-              if out.strip.start_with?("/")
-                ino_hard << "ELF RPATH #{placeholder}: absolute RPATH not allowed (#{out.strip})"
+              if out_s.strip.start_with?("/")
+                ino_hard << "ELF RPATH #{placeholder}: absolute RPATH not allowed (#{out_s.strip})"
               end
             end
           end
           if scan_elf_strings && cmd_available?("strings")
             out, _e, st = capture3_cmd(["strings", "-a", "-n", "6", path], throttle_fn: throttle_fn)
             if st.success?
-              h, g = scan_text_for_leaks("ELF strings #{placeholder}", out, literals, exact_rules: exact_rules)
+              out_s = out.to_s.dup.force_encoding(Encoding::UTF_8)
+              out_s = out_s.scrub("?") unless out_s.valid_encoding?
+              h, g = scan_text_for_leaks("ELF strings #{placeholder}", out_s, literals, exact_rules: exact_rules)
               ino_hard.concat(h)
               ino_generic.concat(g)
             end
@@ -590,9 +609,40 @@ module PortPackager
     has_strip = cmd_available?("strip")
     processed_elfs = {}
     neutral = neutral_prefix.to_s.strip
-    rewrite_view = !neutral.empty? && !pizfix.to_s.empty? && pizfix != neutral
+    pizfix_s = pizfix.to_s.strip
+    rewrite_view = !neutral.empty? && !pizfix_s.empty? && pizfix_s != neutral
+    pizfix_parent = nil
+    neutral_parent = nil
+    if rewrite_view && File.basename(pizfix_s) == File.basename(neutral)
+      pp_cand = File.dirname(pizfix_s)
+      np_cand = File.dirname(neutral)
+      # Only treat parent as a slot-view root when it is an exact-length sibling
+      # of neutral's parent (e.g. /opt/filc/.v000 next to /opt/filc/0.1.4), never
+      # a shared parent directory that could also contain repo_root or work_dir.
+      if pp_cand != np_cand && pp_cand.length >= 6 &&
+         pp_cand.bytesize == np_cand.bytesize &&
+         File.dirname(pp_cand) == File.dirname(np_cand)
+        pizfix_parent = pp_cand
+        neutral_parent = np_cand
+      end
+    end
     wrapper = wrapper_dir.to_s.strip
     neutral_bin_dir = (!neutral.empty? && !wrapper.empty?) ? File.expand_path("../build/bin", neutral) : nil
+
+    # Exact-length binary replacement pairs: preserves every ELF section offset,
+    # symbol/relocation offset, tail-merged .rodata suffix pointer, Fil-C global
+    # capability bound, static archive (.a) header size, and .pyc string length.
+    bin_pairs = []
+    if rewrite_view && pizfix_s.bytesize == neutral.bytesize
+      bin_pairs << [pizfix_s.b, neutral.b]
+      if pizfix_parent && neutral_parent && pizfix_parent.bytesize == neutral_parent.bytesize
+        bin_pairs << [pizfix_parent.b, neutral_parent.b]
+      end
+    end
+    if !wrapper.empty? && neutral_bin_dir && wrapper != neutral_bin_dir && wrapper.bytesize == neutral_bin_dir.bytesize
+      bin_pairs << [wrapper.b, neutral_bin_dir.b]
+    end
+
     stats = {
       elf_count: 0,
       unique_elf_count: 0,
@@ -600,6 +650,7 @@ module PortPackager
       strip_failed_count: 0,
       strip_saved_bytes: 0,
       patchelf_count: 0,
+      elf_prefix_rewritten: 0,
       reused_hardlinks: 0
     }
 
@@ -616,11 +667,12 @@ module PortPackager
 
       # Relocate pkg-config .pc files
       if rel.end_with?(".pc") && (rel.start_with?("lib/pkgconfig/", "share/pkgconfig/"))
-        raw = File.read(path, encoding: "UTF-8")
+        raw = File.binread(path).force_encoding(Encoding::UTF_8).scrub("?")
         depth = rel.count("/")
         rel_prefix = "${pcfiledir}" + ("/.." * depth)
         updated = raw.gsub(/^prefix=.*$/, "prefix=#{rel_prefix}")
-        updated = updated.gsub(pizfix, "${prefix}") unless pizfix.empty?
+        updated = updated.gsub(pizfix_s, "${prefix}") unless pizfix_s.empty?
+        updated = updated.gsub(pizfix_parent, neutral_parent) if pizfix_parent && neutral_parent
         updated = updated.gsub(wrapper, neutral_bin_dir) if !wrapper.empty? && neutral_bin_dir
         File.write(path, updated, encoding: "UTF-8")
         next
@@ -630,25 +682,38 @@ module PortPackager
       unless elf_file?(path)
         # When building inside an isolated per-port prefix view, normalize view-specific
         # prefix/wrapper paths in text files (e.g. *-config scripts, CMake configs, headers)
+        # and exact-length binary non-ELF files (e.g. static archives .a, Python .pyc)
         # back to the neutral public prefix so archives stay bit-for-bit identical.
         if rewrite_view || (!wrapper.empty? && neutral_bin_dir)
           raw = File.binread(path)
-          unless raw.include?("\x00".b)
-            updated = raw.dup
-            changed = false
-            if rewrite_view && updated.include?(pizfix.b)
-              updated.gsub!(pizfix.b, neutral.b)
+          updated = raw.dup
+          changed = false
+          if !raw.include?("\x00".b)
+            if rewrite_view && updated.include?(pizfix_s.b)
+              updated.gsub!(pizfix_s.b, neutral.b)
+              changed = true
+            end
+            if pizfix_parent && neutral_parent && updated.include?(pizfix_parent.b)
+              updated.gsub!(pizfix_parent.b, neutral_parent.b)
               changed = true
             end
             if !wrapper.empty? && neutral_bin_dir && updated.include?(wrapper.b)
               updated.gsub!(wrapper.b, neutral_bin_dir.b)
               changed = true
             end
-            if changed
-              mode = File.stat(path).mode & 0o777
-              File.binwrite(path, updated)
-              File.chmod(mode, path)
+          elsif !bin_pairs.empty?
+            bin_pairs.each do |from_b, to_b|
+              if updated.include?(from_b)
+                updated.gsub!(from_b, to_b)
+                changed = true
+              end
             end
+          end
+          if changed
+            st = File.stat(path)
+            File.binwrite(path, updated)
+            File.chmod(st.mode & 0o777, path)
+            File.utime(st.atime, st.mtime, path) rescue nil
           end
         end
         next
@@ -656,7 +721,8 @@ module PortPackager
 
       stats[:elf_count] += 1
       rpath = has_patchelf ? compute_elf_rpath(rel) : nil
-      mode = File.stat(path).mode & 0o777
+      st_elf = File.stat(path)
+      mode = st_elf.mode & 0o777
       src_ino = src_inode_map[path]
       elf_key = src_ino ? [src_ino, mode, rpath] : nil
 
@@ -689,10 +755,27 @@ module PortPackager
         if rewrite_view
           interp_out, _ie, ist = capture3_cmd(["patchelf", "--print-interpreter", path], throttle_fn: throttle_fn)
           cur_interp = ist.success? ? interp_out.strip : ""
-          if cur_interp.start_with?("#{pizfix}/")
-            new_interp = "#{neutral}/#{cur_interp.sub("#{pizfix}/", "")}"
+          if cur_interp.start_with?("#{pizfix_s}/")
+            new_interp = "#{neutral}/#{cur_interp.sub("#{pizfix_s}/", "")}"
             capture3_cmd(["patchelf", "--set-interpreter", new_interp, path], throttle_fn: throttle_fn)
           end
+        end
+      end
+      unless bin_pairs.empty?
+        raw_elf = File.binread(path)
+        updated_elf = raw_elf
+        elf_changed = false
+        bin_pairs.each do |from_b, to_b|
+          if updated_elf.include?(from_b)
+            updated_elf = updated_elf.dup unless elf_changed
+            updated_elf.gsub!(from_b, to_b)
+            elf_changed = true
+          end
+        end
+        if elf_changed
+          File.binwrite(path, updated_elf)
+          File.chmod(mode, path)
+          stats[:elf_prefix_rewritten] += 1
         end
       end
       processed_elfs[elf_key] = path if elf_key

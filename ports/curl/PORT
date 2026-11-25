@@ -50,7 +50,7 @@ port_test() {
   printf 'filc-curl-ok\n' > "$td/hello.txt"
   "$PIZFIX/bin/curl" -fsS "file://$td/hello.txt" | grep -qx 'filc-curl-ok'
 
-  python3 - "$PIZFIX/bin/curl" <<'PY'
+  "${HOST_PYTHON3:-/usr/bin/python3}" - "$PIZFIX/bin/curl" <<'PY'
 import subprocess, sys, threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 

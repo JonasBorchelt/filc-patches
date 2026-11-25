@@ -87,7 +87,7 @@ port_test() {
   rc=${PIPESTATUS[0]}
   set -e
 
-  ruby - "$SRC_DIR" "$harness_log" "$rc" <<'RB'
+  "${HOST_RUBY:-/usr/bin/ruby}" - "$SRC_DIR" "$harness_log" "$rc" <<'RB'
 require "open3"
 
 src_dir, log_path, raw_rc = ARGV

@@ -252,7 +252,7 @@ loop do
 end
 RB
 
-  ruby "$td/mock_pg.rb" "$td/port" &
+  "${HOST_RUBY:-/usr/bin/ruby}" "$td/mock_pg.rb" "$td/port" &
   local srv_pid=$!
   local i port=""
   for i in $(seq 1 50); do

@@ -62,7 +62,7 @@ port_test() {
     -keyout "$td/server.key" -out "$td/server.crt" \
     -days 1 -subj "/CN=127.0.0.1" >/dev/null 2>&1
 
-  read -r http_port https_port < <(python3 -c '
+  read -r http_port https_port < <("${HOST_PYTHON3:-/usr/bin/python3}" -c '
 import socket
 socks = []
 ports = []

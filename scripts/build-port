@@ -53,6 +53,39 @@ LLVM_AR="${FILC_AR:-$TOOLCHAIN_ROOT/build/bin/llvm-ar}"
 LLVM_RANLIB="${FILC_RANLIB:-$TOOLCHAIN_ROOT/build/bin/llvm-ranlib}"
 LLVM_NM="${FILC_NM:-$TOOLCHAIN_ROOT/build/bin/llvm-nm}"
 
+# Resolve host interpreter absolute paths before $PIZFIX/bin is prepended to PATH
+# so harness logic never invokes staged Fil-C binaries (e.g. Fil-C ruby/python3).
+resolve_host_tool() {
+  local tool="$1"
+  local fallback="$2"
+  local clean_path=""
+  local entry
+  local old_ifs="$IFS"
+  IFS=':'
+  for entry in $PATH; do
+    [[ -z "$entry" ]] && continue
+    [[ "$entry" == "$PIZFIX/bin" ]] && continue
+    clean_path="${clean_path:+$clean_path:}$entry"
+  done
+  IFS="$old_ifs"
+  local found=""
+  if [[ -n "$clean_path" ]]; then
+    found="$(PATH="$clean_path" command -v "$tool" 2>/dev/null || true)"
+  fi
+  if [[ -n "$found" && -x "$found" ]]; then
+    printf '%s\n' "$found"
+  elif [[ -x "$fallback" ]]; then
+    printf '%s\n' "$fallback"
+  else
+    printf '%s\n' "$tool"
+  fi
+}
+
+HOST_RUBY="${FILC_HOST_RUBY:-$(resolve_host_tool ruby /usr/bin/ruby)}"
+HOST_PYTHON3="${FILC_HOST_PYTHON3:-$(resolve_host_tool python3 /usr/bin/python3)}"
+HOST_PERL="${FILC_HOST_PERL:-$(resolve_host_tool perl /usr/bin/perl)}"
+export HOST_RUBY HOST_PYTHON3 HOST_PERL
+
 NPROC="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)"
 JOBS="${FILC_PORTS_JOBS:-$NPROC}"
 TIMEOUT_SEC="${FILC_PORT_TIMEOUT:-900}"
@@ -106,7 +139,7 @@ write_state() {
   local fail_kind="${3:-}"
   local dur=$(( $(date +%s) - T_START ))
   mkdir -p "$STATE_DIR"
-  python3 - "$STATE_DIR/$PORT_NAME.json" "$NAME" "$VERSION" "$TIER" "$status" "$POLICY_CLASS" \
+  "$HOST_PYTHON3" - "$STATE_DIR/$PORT_NAME.json" "$NAME" "$VERSION" "$TIER" "$status" "$POLICY_CLASS" \
     "$dur" "$PATCH_COUNT" "$PATCH_ADDED" "$PATCH_REMOVED" "$PATCH_FILES" "$fail_stage" "$fail_kind" "$DEPS" <<'PY'
 import json, sys
 out_path, name, ver, tier, status, policy, dur, pc, pa, pr, pf, fstage, fkind, deps = sys.argv[1:]
@@ -140,7 +173,7 @@ dump_test_logs() {
     echo "--- TEST LOG ($logf) ---" >&2
     grep -E '^(FAIL|XPASS|ERROR):' "$logf" >&2 || true
     awk '/^The following tests FAILED:/{p=1} p{print; if (/^Errors while running CTest/) p=0}' "$logf" >&2 || true
-    ruby - "$logf" >&2 <<'RB' || tail -n 120 "$logf" >&2 || true
+    "$HOST_RUBY" - "$logf" >&2 <<'RB' || tail -n 120 "$logf" >&2 || true
 path = ARGV[0]
 lines = File.binread(path).force_encoding("UTF-8").encode("UTF-8", invalid: :replace, undef: :replace).lines.map { |l| l.chomp("\n").chomp("\r") }
 hdr_re = /\bfilc\b[^\n]*\berror:/i
@@ -237,7 +270,7 @@ dump_configure_logs() {
   local logf
   while IFS= read -r logf; do
     echo "--- CONFIGURE LOG ($logf) ---" >&2
-    ruby - "$logf" >&2 <<'RB' || tail -n 80 "$logf" >&2 || true
+    "$HOST_RUBY" - "$logf" >&2 <<'RB' || tail -n 80 "$logf" >&2 || true
 path = ARGV[0]
 lines = File.binread(path).force_encoding("UTF-8").encode("UTF-8", invalid: :replace, undef: :replace).lines.map { |l| l.chomp("\n").chomp("\r") }
 var_idx = lines.index { |l| /\A##\s*(?:Cache|Output)\s+variables\.\s*##\z/.match?(l) }
@@ -346,7 +379,7 @@ run_with_timeout() {
 
 run_with_install_lock() {
   local lock_file="${FILC_PORTS_INSTALL_LOCK:-$WORK_ROOT/ports-install.lock}"
-  ruby -e '
+  "$HOST_RUBY" -e '
     lock_path = ARGV.shift
     File.open(lock_path, File::CREAT | File::RDWR, 0o666) do |f|
       f.flock(File::LOCK_EX)
@@ -362,7 +395,7 @@ run_with_install_lock() {
 run_install_with_manifest() {
   local lock_file="${FILC_PORTS_INSTALL_LOCK:-$WORK_ROOT/ports-install.lock}"
   local manifest_out="$STATE_DIR/$PORT_NAME.manifest.json"
-  ruby -e '
+  "$HOST_RUBY" -e '
     require "digest/sha2"
     require "json"
 
@@ -523,7 +556,7 @@ if [[ -f "$PORT_DIR/patches/series" ]]; then
     echo "Applying patch: $line"
     patch -d "$SRC_DIR" -p1 --batch --forward < "$pfile"
     PATCH_COUNT=$((PATCH_COUNT + 1))
-    read -r pa pr pf < <(python3 - "$pfile" <<'PY'
+    read -r pa pr pf < <("$HOST_PYTHON3" - "$pfile" <<'PY'
 import sys
 a = r = f = 0
 in_diff = False

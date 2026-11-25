@@ -746,4 +746,72 @@ for path in sys.argv[1:]:
 print("UNIFORM FILC_PORTS PARSING TESTS OK")
 PY
 
+echo "=== Test: host interpreter isolation when poisoned ruby/python3 exist in PIZFIX/bin and front of PATH ==="
+ISO_WORK="$TMP_DIR/iso-work"
+ISO_TC="$ISO_WORK/toolchain"
+ISO_PORTS="$TMP_DIR/iso-ports"
+ISO_CACHE="$ISO_WORK/ports-cache"
+mkdir -p "$ISO_TC/pizfix/bin" "$ISO_TC/build/bin" "$ISO_PORTS/iso-pkg" "$ISO_CACHE"
+for t in clang clang++ llvm-ar llvm-ranlib llvm-nm; do
+  printf '#!/bin/sh\nexit 0\n' > "$ISO_TC/build/bin/$t"
+  chmod +x "$ISO_TC/build/bin/$t"
+done
+# Place poisoned ruby and python3 in $PIZFIX/bin simulating freshly installed Fil-C interpreters
+cat > "$ISO_TC/pizfix/bin/ruby" <<'EOF'
+#!/bin/sh
+echo "error_highlight was not loaded." >&2
+echo "-:1:in \`require': cannot load such file -- open3 (LoadError)" >&2
+exit 1
+EOF
+cat > "$ISO_TC/pizfix/bin/python3" <<'EOF'
+#!/bin/sh
+echo "ModuleNotFoundError: poisoned staged python3" >&2
+exit 1
+EOF
+chmod +x "$ISO_TC/pizfix/bin/ruby" "$ISO_TC/pizfix/bin/python3"
+
+ISO_SRC_STAGE="$TMP_DIR/iso-src-stage"
+mkdir -p "$ISO_SRC_STAGE/iso-pkg-1.0"
+printf 'hello\n' > "$ISO_SRC_STAGE/iso-pkg-1.0/README"
+tar -czf "$TMP_DIR/iso-pkg-1.0.tar.gz" -C "$ISO_SRC_STAGE" iso-pkg-1.0
+ISO_SHA="$(shasum -a 256 "$TMP_DIR/iso-pkg-1.0.tar.gz" 2>/dev/null | awk '{print $1}' || sha256sum "$TMP_DIR/iso-pkg-1.0.tar.gz" | awk '{print $1}')"
+cp "$TMP_DIR/iso-pkg-1.0.tar.gz" "$ISO_CACHE/iso-pkg-1.0-${ISO_SHA:0:12}-iso-pkg-1.0.tar.gz"
+
+cat > "$ISO_PORTS/iso-pkg/PORT" <<EOF
+NAME="iso-pkg"
+VERSION="1.0"
+LICENSE="MIT"
+UPSTREAM_URL="https://example.invalid/iso-pkg-1.0.tar.gz"
+UPSTREAM_SHA256="$ISO_SHA"
+EXTRACT_DIR="iso-pkg-1.0"
+TIER=0
+DEPS=""
+BUILD_SYSTEM="custom"
+POLICY_CLASS="P0-Clean"
+port_configure() { :; }
+port_build() { :; }
+port_install() {
+  mkdir -p "\$PIZFIX/share/iso-pkg"
+  printf 'installed\n' > "\$PIZFIX/share/iso-pkg/ok"
+}
+port_test() {
+  # Verify bare ruby in PATH really hits the poisoned staged binary,
+  # while HOST_RUBY and HOST_PYTHON3 invoke the clean host interpreters.
+  if ruby -e 'require "open3"' >/dev/null 2>&1; then
+    echo "expected bare ruby in PATH to hit poisoned binary" >&2
+    return 1
+  fi
+  "\$HOST_RUBY" -e 'require "open3"; puts "HOST_RUBY_OPEN3_OK"' | grep -Fxq "HOST_RUBY_OPEN3_OK"
+  "\$HOST_PYTHON3" -c 'import json; print(json.dumps({"ok": True}))' | grep -Fq '"ok": true'
+}
+EOF
+
+PATH="$ISO_TC/pizfix/bin:$PATH" \
+  FILC_PORTS_DIR="$ISO_PORTS" \
+  FILC_TOOLCHAIN_ROOT="$ISO_TC" \
+  FILC_PORTS_CACHE_DIR="$ISO_CACHE" \
+  "$REPO_ROOT/scripts/build-port" iso-pkg "$ISO_WORK" > "$TMP_DIR/iso-build.out" 2>&1
+assert_grep -Fq "FILC_PORT iso-pkg tested" "$TMP_DIR/iso-build.out" "host interpreter isolation build-port"
+echo "HOST INTERPRETER ISOLATION TEST OK"
+
 echo "ALL PORTS TESTS PASSED"

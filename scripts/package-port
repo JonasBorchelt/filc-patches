@@ -1127,7 +1127,7 @@ module PortPackager
           set -x
           port_package_smoke
         SH
-        bash_cmd = [bash_bin, "-euo", "pipefail", "-c", smoke_script]
+        bash_cmd = [bash_bin, "-eEuo", "pipefail", "-c", smoke_script]
         bash_cmd = [timeout_bin, "120", *bash_cmd] if timeout_bin
         out_err, st = Open3.capture2e(smoke_env, *bash_cmd)
         unless st.success?

@@ -463,7 +463,7 @@ run_stage_fn() {
   if [[ "$fn" == "port_test" ]]; then
     trace_flag="set -x;"
   fi
-  local stage_script="set -euo pipefail; export PS4='+ [$fn:\${LINENO}] '; trap 'rc=\$?; echo \"STAGE_CMD_FAILED port=\$PORT_NAME stage=\$CURRENT_STAGE fn=$fn line=\${LINENO} rc=\$rc cmd=\${BASH_COMMAND}\" >&2' ERR; source \"\$PORT_FILE\"; $trace_flag $fn"
+  local stage_script="set -eEuo pipefail; export PS4='+ [$fn:\${LINENO}] '; trap 'rc=\$?; echo \"STAGE_CMD_FAILED port=\$PORT_NAME stage=\$CURRENT_STAGE fn=$fn line=\${LINENO} rc=\$rc cmd=\${BASH_COMMAND}\" >&2' ERR; source \"\$PORT_FILE\"; $trace_flag $fn"
   export PORT_NAME CURRENT_STAGE PORT_FILE SRC_DIR PIZFIX CC CXX AR RANLIB NM lt_cv_sys_global_symbol_pipe PREFIX PKG_CONFIG_PATH PATH CFLAGS CXXFLAGS LDFLAGS JOBS
   if [[ "$use_lock" == "1" ]]; then
     run_install_cmd bash -c "$stage_script"

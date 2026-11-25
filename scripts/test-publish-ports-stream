@@ -250,10 +250,18 @@ Dir.mktmpdir("filc-stream-test-") do |tmp|
     "durations" => { "liba" => 5, "mid1" => 60, "app" => 30, "libb" => 5, "mid2" => 10, "libc" => 12 }
   }) + "\n", encoding: "UTF-8")
 
-  # Run explicitly under LANG=C / LC_ALL=C (US-ASCII) to prove UTF-8/binary log safety!
-  common_env = ENV.to_h.merge(
+  # Run explicitly under LANG=C / LC_ALL=C (US-ASCII) to prove UTF-8/binary log safety,
+  # and explicitly unset CI run-control env vars (e.g. FILC_PORTS, FILC_PORTS_FORCE)
+  # via nil entries in Process.spawn/Open3 env so the self-test fixture never inherits
+  # subset/force filters from outer CI runs.
+  unset_run_vars = ENV.keys
+                      .select { |k| k == "FILC_PORTS" || k.start_with?("FILC_PORTS_", "FILC_PORT_") }
+                      .each_with_object({}) { |k, h| h[k] = nil }
+  common_env = unset_run_vars.merge(
     "LANG" => "C",
     "LC_ALL" => "C",
+    "FILC_PORTS" => nil,
+    "FILC_PORTS_FORCE" => nil,
     "FILC_LEAK_EXACT_TOKENS" => "198.51.100.42\nforbidden-ci-secret-token\n",
     "FILC_PORTS_MINISIGN_KEY" => "must-never-leak-to-build-port",
     "FILC_PORTS_UPLOAD_TOKEN" => "must-never-leak-to-build-port",

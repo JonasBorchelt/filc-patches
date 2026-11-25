@@ -118,7 +118,11 @@ TEST_EXACT_TOKENS = [
   "builder-host.internal"
 ].join("\n") + "\n"
 
-BASE_ENV = { "FILC_LEAK_EXACT_TOKENS" => TEST_EXACT_TOKENS }.freeze
+BASE_ENV = {
+  "FILC_LEAK_EXACT_TOKENS" => TEST_EXACT_TOKENS,
+  "FILC_PORTS" => nil,
+  "FILC_PORTS_FORCE" => nil
+}.freeze
 
 Dir.mktmpdir("filc-pkg-test-") do |td|
   repo = File.join(td, "repo")

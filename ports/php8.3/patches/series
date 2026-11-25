@@ -1,0 +1,4 @@
+01-php-filc-tracked-allocator-and-strcase.patch
+02-php-filc-portable-asm.patch
+03-php-filc-capability-ptrtable-and-weakrefs.patch
+04-php-filc-fibers-and-opcache.patch

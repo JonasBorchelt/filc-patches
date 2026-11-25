@@ -1,0 +1,105 @@
+Subject: Adapt stack-limit detection, fiber stack limit, and private opcache mmap for Fil-C
+Policy-Class: P4-Audit
+Rationale: Under Fil-C, address-taken local variables (&local, &buffer) are heap-allocated in libpas rather than on the native stack, so PHP 8.3's configure stack-growth probe returned false (disabling ZEND_CHECK_STACK_LIMIT) and zend_call_stack_get_linux_proc_maps() looked up a heap address. Backport PHP 8.4's __builtin_frame_address(0) stack-growth probe in configure and zend_call_stack_position() in Zend/zend_call_stack.c. With --disable-fiber-asm, Fil-C runs ucontext fibers on runtime-allocated native stacks, so compute EG(stack_base)/EG(stack_limit) from __builtin_frame_address(0). For opcache, capabilities are per-process, so map the opcache region MAP_PRIVATE instead of MAP_SHARED and skip the MAP_32BIT huge-page unmap/remap sequence under __FILC__.
+Upstream-Status: Fil-C-Specific (configure & zend_call_stack.c hunks backported from PHP 8.4)
+Fil-C-Origin-Commits: fd1f26a649078e4e12cb01026cf43199b6e6d160
+Origin-Kind: filc-upstream
+Origin-Project: pizlonator/fil-c
+Origin-Commit: fd1f26a649078e4e12cb01026cf43199b6e6d160
+Origin-URL: https://github.com/pizlonator/fil-c/commit/fd1f26a649078e4e12cb01026cf43199b6e6d160
+
+--- a/Zend/zend_call_stack.c
++++ b/Zend/zend_call_stack.c
+@@ -161,7 +161,7 @@
+ {
+ 	FILE *f;
+ 	char buffer[4096];
+-	uintptr_t addr_on_stack = (uintptr_t)&buffer;
++	uintptr_t addr_on_stack = (uintptr_t) zend_call_stack_position();
+ 	uintptr_t start, end, prev_end = 0;
+ 	size_t max_size;
+ 	bool found = false;
+--- a/Zend/zend_fibers.c
++++ b/Zend/zend_fibers.c
+@@ -593,8 +593,15 @@
+ 		EG(error_reporting) = error_reporting;
+ 
+ #ifdef ZEND_CHECK_STACK_LIMIT
++# ifdef __FILC__
++		/* Fil-C runs the fiber on a native stack of the requested size that
++		 * its runtime allocates, not on stack->pointer; measure from here. */
++		EG(stack_base) = __builtin_frame_address(0);
++		EG(stack_limit) = (int8_t*)EG(stack_base) - fiber->context.stack->size + EG(reserved_stack_size);
++# else
+ 		EG(stack_base) = zend_fiber_stack_base(fiber->context.stack);
+ 		EG(stack_limit) = zend_fiber_stack_limit(fiber->context.stack);
++# endif
+ #endif
+ 
+ 		fiber->fci.retval = &fiber->result;
+--- a/configure
++++ b/configure
+@@ -92368,19 +92368,35 @@
+ /* end confdefs.h.  */
+ 
+ #include <stdint.h>
++
++#ifdef __has_builtin
++# if __has_builtin(__builtin_frame_address)
++#  define builtin_frame_address __builtin_frame_address(0)
++# endif
++#endif
+ 
+ int (*volatile f)(uintptr_t);
+ 
+ int stack_grows_downwards(uintptr_t arg) {
++#ifdef builtin_frame_address
++    uintptr_t addr = (uintptr_t)builtin_frame_address;
++#else
+     int local;
+-    return (uintptr_t)&local < arg;
++    uintptr_t addr = (uintptr_t)&local;
++#endif
++    return addr < arg;
+ }
+ 
+ int main(void) {
++#ifdef builtin_frame_address
++    uintptr_t addr = (uintptr_t)builtin_frame_address;
++#else
+     int local;
++    uintptr_t addr = (uintptr_t)&local;
++#endif
+ 
+     f = stack_grows_downwards;
+-    return f((uintptr_t)&local) ? 0 : 1;
++    return f(addr) ? 0 : 1;
+ }
+ 
+ _ACEOF
+--- a/ext/opcache/shared_alloc_mmap.c
++++ b/ext/opcache/shared_alloc_mmap.c
+@@ -43,6 +43,14 @@
+ 
+ #if defined(MAP_ANON) && !defined(MAP_ANONYMOUS)
+ # define MAP_ANONYMOUS MAP_ANON
++#endif
++#ifdef __FILC__
++/* Fil-C keeps pointer capabilities per process, so a pointer one process
++ * stores in a shared mapping has none in another: an FPM worker trapped
++ * reading the hash entry of a script another worker had cached. Map the
++ * cache privately; forked workers still start from what the parent cached. */
++# undef MAP_SHARED
++# define MAP_SHARED MAP_PRIVATE
+ #endif
+ #if defined(MAP_ALIGNED_SUPER)
+ # include <sys/types.h>
+@@ -241,7 +249,7 @@
+ 	 * (boot time config only, but enabled by default on most arches).
+ 	 */
+ 	if (requested_size >= huge_page_size && requested_size % huge_page_size == 0) {
+-# if defined(__x86_64__) && defined(MAP_32BIT)
++# if defined(__x86_64__) && defined(MAP_32BIT) && !defined(__FILC__)
+ 		/* to got HUGE PAGES in low 32-bit address we have to reserve address
+ 		   space and then remap it using MAP_HUGETLB */
+ 

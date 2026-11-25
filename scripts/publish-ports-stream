@@ -1,0 +1,1457 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Per-port streaming orchestrator for publish-ports.
+#
+# Each port runs its own independent stream:
+#   building -> verifying (package + leak-gate + 512-MiB check + alt-prefix smoke) -> uploaded (staged)
+#
+# Key guarantees:
+#   1. Isolated per-port prefix views: pristine base toolchain pizfix + ONLY the
+#      port's declared transitive_deps from already-verified packaged trees.
+#      Eliminates timing-dependent configure detection across parallel ports.
+#   2. Critical-path scheduling: ready ports with longest remaining DAG critical
+#      path (based on measured per-port timings from previous runs) start first.
+#   3. Fixed core budget per slot: floor(total_jobs / parallel) cores per worker
+#      slot across build + xz compression + smoke, with optional disjoint CPU
+#      pinning via taskset. No overcommit.
+#   4. Error isolation + atomic index boundary: a failing port blocks only its
+#      transitive dependents; independent ports finish cleanly. index.json and
+#      SHA256SUMS are finalized ONLY when 100% of selected ports succeed.
+
+require "digest/sha2"
+require "etc"
+require "fileutils"
+require "json"
+require "open3"
+require "optparse"
+require "set"
+require "time"
+
+module PublishPortsStream
+  PORT_NAME_RE = /\A[a-z0-9][a-z0-9._+-]{0,63}\z/
+  CHANNEL_RE = /\A\d+\.\d+\.\d+(?:-[a-z0-9.]+)?\z/
+  ARCH_RE = /\A(?:x86_64|aarch64)-linux\z/
+  DEFAULT_DURATION_ESTIMATE = 10.0
+  VALID_SCHEDULES = %w[critical-path reverse name-asc name-desc].freeze
+  SECRET_ENV_KEYS = %w[
+    FILC_LEAK_EXACT_TOKENS
+    FILC_PORTS_MINISIGN_KEY
+    FILC_PORTS_MINISIGN_PASSWORD
+    FILC_PORTS_UPLOAD_TOKEN
+    FILC_LIVE_TOKEN
+  ].freeze
+
+  module_function
+
+  def parse_port_file(port_file)
+    data = {}
+    File.foreach(port_file, encoding: "UTF-8") do |raw|
+      line = raw.strip
+      next if line.empty? || line.start_with?("#")
+      break if line.start_with?("port_") && line.include?("()")
+
+      m = /\A([A-Z0-9_]+)=(.*)\z/.match(line)
+      next unless m
+
+      val = m[2].strip
+      if val.length >= 2 && ((val.start_with?('"') && val.end_with?('"')) ||
+                             (val.start_with?("'") && val.end_with?("'")))
+        val = val[1..-2]
+      end
+      data[m[1]] = val
+    end
+    data
+  end
+
+  def count_recipe_patches(port_dir)
+    series = File.join(port_dir, "patches", "series")
+    return [0, 0, 0, 0] unless File.file?(series)
+
+    pcount = 0
+    added = 0
+    removed = 0
+    files = 0
+    File.foreach(series, encoding: "UTF-8") do |raw|
+      line = raw.split("#", 2).first.to_s.strip
+      next if line.empty?
+
+      pfile = File.join(port_dir, "patches", line)
+      next unless File.file?(pfile)
+
+      pcount += 1
+      in_diff = false
+      pf = 0
+      File.binread(pfile).force_encoding("UTF-8").encode("UTF-8", invalid: :replace, undef: :replace).each_line do |ln|
+        if ln.start_with?("diff --git ")
+          in_diff = true
+          pf += 1
+        elsif !in_diff && ln.start_with?("--- ")
+          in_diff = true
+        elsif in_diff
+          added += 1 if ln.start_with?("+") && !ln.start_with?("+++ ")
+          removed += 1 if ln.start_with?("-") && !ln.start_with?("--- ")
+        end
+      end
+      pf = 1 if pf.zero?
+      files += pf
+    end
+    [pcount, added, removed, files]
+  end
+
+  def load_ports(ports_dir)
+    raise ArgumentError, "ports directory not found: #{ports_dir}" unless File.directory?(ports_dir)
+
+    ports = {}
+    Dir.children(ports_dir).sort.each do |entry|
+      pdir = File.join(ports_dir, entry)
+      pfile = File.join(pdir, "PORT")
+      next unless File.directory?(pdir) && File.file?(pfile)
+
+      meta = parse_port_file(pfile)
+      next unless meta["NAME"] == entry && PORT_NAME_RE.match?(entry)
+
+      deps = meta.fetch("DEPS", "").split.reject(&:empty?)
+      pcount, added, removed, files = count_recipe_patches(pdir)
+      ports[entry] = {
+        "name" => entry,
+        "version" => meta["VERSION"],
+        "license" => meta["LICENSE"],
+        "tier" => Integer(meta["TIER"], 10),
+        "deps" => deps,
+        "upstream_sha256" => meta["UPSTREAM_SHA256"].to_s,
+        "policy_class" => meta["POLICY_CLASS"],
+        "patch_count" => pcount,
+        "added_lines" => added,
+        "removed_lines" => removed,
+        "files_changed" => files,
+        "port_dir" => pdir
+      }
+    end
+    ports
+  end
+
+  def sha256_file(path)
+    Digest::SHA256.file(path).hexdigest
+  end
+
+  def compute_recipe_sha256(port_dir)
+    h = Digest::SHA256.new
+    port_file = File.join(port_dir, "PORT")
+    h.update("PORT\0")
+    h.update(File.binread(port_file))
+    h.update("\0")
+    patches_dir = File.join(port_dir, "patches")
+    if File.directory?(patches_dir)
+      Dir.glob(File.join(patches_dir, "**", "*")).sort.each do |p|
+        next unless File.file?(p) && !File.symlink?(p)
+
+        rel = p.sub("#{port_dir}/", "")
+        h.update("#{rel}\0")
+        h.update(File.binread(p))
+        h.update("\0")
+      end
+    end
+    h.hexdigest
+  end
+
+  def compute_toolchain_identity(toolchain_root:, repo_root:, channel:, arch:)
+    h = Digest::SHA256.new
+    h.update("channel=#{channel}\0arch=#{arch}\0")
+    upstream_file = File.join(repo_root, "UPSTREAM")
+    if File.file?(upstream_file)
+      h.update("UPSTREAM\0")
+      h.update(File.binread(upstream_file))
+      h.update("\0")
+    end
+    %w[
+      PROVENANCE
+      build/bin/clang
+      build/bin/ld.lld
+      pizfix/lib/libpizlo.so
+      pizfix/lib/libyoloc.so
+      pizfix/lib/libc.so
+      pizfix/lib/libc++.a
+    ].each do |rel|
+      full = File.join(toolchain_root, rel)
+      next unless File.file?(full)
+
+      h.update("#{rel}\0")
+      h.update(sha256_file(full))
+      h.update("\0")
+    end
+    "#{channel}:#{h.hexdigest}"
+  end
+
+  def compute_port_build_key(port_meta:, channel:, arch:, revision:, toolchain_id:, tdep_pkg_hashes:)
+    payload = {
+      "schema_version" => 1,
+      "port" => port_meta["name"],
+      "version" => port_meta["version"],
+      "revision" => revision,
+      "upstream_sha256" => port_meta["upstream_sha256"],
+      "recipe_sha256" => compute_recipe_sha256(port_meta["port_dir"]),
+      "channel" => channel,
+      "arch" => arch,
+      "toolchain_id" => toolchain_id,
+      "transitive_dep_hashes" => tdep_pkg_hashes.keys.sort.each_with_object({}) { |k, hh| hh[k] = tdep_pkg_hashes[k] }
+    }
+    Digest::SHA256.hexdigest(JSON.generate(sort_json(payload)))
+  end
+
+  def load_cache_manifest(path)
+    return {} if path.nil? || path.empty? || !File.file?(path)
+
+    parsed = JSON.parse(File.read(path, encoding: "UTF-8"))
+    entries = parsed.is_a?(Hash) && parsed["ports"].is_a?(Hash) ? parsed["ports"] : {}
+    entries.is_a?(Hash) ? entries : {}
+  rescue StandardError
+    {}
+  end
+
+  def save_cache_manifest!(path, entries)
+    return if path.nil? || path.empty?
+
+    FileUtils.mkdir_p(File.dirname(path))
+    payload = {
+      "schema_version" => 1,
+      "updated_at" => Time.now.utc.iso8601,
+      "ports" => sort_json(entries)
+    }
+    tmp = "#{path}.tmp.#{Process.pid}"
+    File.write(tmp, "#{JSON.pretty_generate(payload)}\n", encoding: "UTF-8")
+    File.rename(tmp, path)
+  rescue StandardError => e
+    $stderr.puts("warning: failed to persist cache manifest #{path}: #{e.message}")
+  end
+
+  def link_or_copy_file!(src, dst)
+    FileUtils.mkdir_p(File.dirname(dst))
+    File.unlink(dst) if File.exist?(dst) || File.symlink?(dst)
+    begin
+      File.link(src, dst)
+    rescue SystemCallError
+      FileUtils.cp(src, dst, preserve: false)
+    end
+  end
+
+  def store_artifacts_in_local_cache!(channel_dir:, local_cache_dir:, pkg_entry:)
+    return if local_cache_dir.nil? || local_cache_dir.empty?
+
+    %w[binary source recipe].each do |kind|
+      rel = pkg_entry.dig(kind, "path")
+      next unless rel
+
+      src = File.join(channel_dir, rel)
+      dst = File.join(local_cache_dir, rel)
+      next unless File.file?(src)
+
+      link_or_copy_file!(src, dst)
+    end
+  end
+
+  def restore_cached_artifacts!(channel_dir:, local_cache_dir:, pkg_entry:)
+    return false if local_cache_dir.nil? || local_cache_dir.empty?
+
+    %w[binary source recipe].each do |kind|
+      art = pkg_entry[kind]
+      return false unless art.is_a?(Hash)
+
+      rel = art["path"].to_s
+      expected_sha = art["sha256"].to_s
+      return false if rel.empty? || expected_sha.empty?
+
+      src = File.join(local_cache_dir, rel)
+      return false unless File.file?(src) && sha256_file(src) == expected_sha
+    end
+
+    %w[binary source recipe].each do |kind|
+      rel = pkg_entry[kind]["path"]
+      src = File.join(local_cache_dir, rel)
+      dst = File.join(channel_dir, rel)
+      link_or_copy_file!(src, dst) unless File.file?(dst) && sha256_file(dst) == pkg_entry[kind]["sha256"]
+    end
+    true
+  end
+
+  def parse_force_spec(raw)
+    tokens = raw.to_s.split(/[\s,]+/).map(&:strip).reject(&:empty?)
+    return [:all, Set.new] if tokens.include?("all") || tokens.include?("*")
+
+    [:subset, Set.new(tokens)]
+  end
+
+  def select_with_deps(ports, initial_names)
+    selected = Set.new
+    stack = initial_names.dup
+    until stack.empty?
+      cur = stack.pop
+      raise ArgumentError, "unknown port: #{cur}" unless ports.key?(cur)
+      next if selected.include?(cur)
+
+      selected.add(cur)
+      ports[cur]["deps"].each do |dep|
+        raise ArgumentError, "port '#{cur}' depends on unknown port '#{dep}'" unless ports.key?(dep)
+
+        stack << dep
+      end
+    end
+    selected
+  end
+
+  def topo_sort(ports, selected)
+    indeg = {}
+    rdeps = Hash.new { |h, k| h[k] = [] }
+    selected.each { |n| indeg[n] = 0 }
+    selected.each do |n|
+      ports[n]["deps"].each do |d|
+        raise ArgumentError, "port '#{n}' depends on unselected port '#{d}'" unless selected.include?(d)
+
+        indeg[n] += 1
+        rdeps[d] << n
+      end
+    end
+
+    ready = indeg.select { |_k, v| v.zero? }.keys.sort_by { |x| [ports[x]["tier"], x] }
+    order = []
+    until ready.empty?
+      cur = ready.shift
+      order << cur
+      rdeps[cur].each do |nxt|
+        indeg[nxt] -= 1
+        if indeg[nxt].zero?
+          ready << nxt
+          ready.sort_by! { |x| [ports[x]["tier"], x] }
+        end
+      end
+    end
+    raise ArgumentError, "dependency cycle detected among ports" unless order.length == selected.length
+
+    order
+  end
+
+  def transitive_deps_topo(ports, target_name)
+    needed = Set.new
+    stack = ports.fetch(target_name)["deps"].dup
+    until stack.empty?
+      cur = stack.pop
+      next if needed.include?(cur)
+
+      needed.add(cur)
+      ports.fetch(cur)["deps"].each { |d| stack << d }
+    end
+    topo_sort(ports, needed)
+  end
+
+  def compute_downstream_counts(ports, selected)
+    rdeps = Hash.new { |h, k| h[k] = [] }
+    selected.each do |n|
+      ports[n]["deps"].each { |d| rdeps[d] << n if selected.include?(d) }
+    end
+    counts = {}
+    selected.each do |n|
+      visited = Set.new
+      stack = rdeps[n].dup
+      until stack.empty?
+        cur = stack.pop
+        next if visited.include?(cur)
+
+        visited.add(cur)
+        stack.concat(rdeps[cur])
+      end
+      counts[n] = visited.size
+    end
+    counts
+  end
+
+  def load_timings(timings_file, bootstrap_glob: "/ccache/reports/ports-*.json")
+    durations = {}
+    if timings_file && File.file?(timings_file)
+      begin
+        parsed = JSON.parse(File.read(timings_file, encoding: "UTF-8"))
+        raw_map = parsed.is_a?(Hash) && parsed["durations"].is_a?(Hash) ? parsed["durations"] : parsed
+        if raw_map.is_a?(Hash)
+          raw_map.each do |k, v|
+            val = v.to_f
+            durations[k.to_s] = val if PORT_NAME_RE.match?(k.to_s) && val > 0.0
+          end
+        end
+      rescue StandardError
+        nil
+      end
+      return durations unless durations.empty?
+    end
+
+    if bootstrap_glob && !bootstrap_glob.empty?
+      latest = Dir.glob(bootstrap_glob).sort_by { |p| File.mtime(p) }.last
+      if latest && File.file?(latest)
+        begin
+          rep = JSON.parse(File.read(latest, encoding: "UTF-8"))
+          Array(rep["ports"]).each do |p|
+            next unless p.is_a?(Hash) && PORT_NAME_RE.match?(p["name"].to_s)
+
+            d = p["duration_seconds"].to_f
+            durations[p["name"]] = d if d > 0.0
+          end
+        rescue StandardError
+          nil
+        end
+      end
+    end
+    durations
+  end
+
+  def save_timings!(timings_file, measured_durations)
+    return if timings_file.nil? || timings_file.empty? || measured_durations.empty?
+
+    existing = load_timings(timings_file, bootstrap_glob: nil)
+    merged = existing.merge(measured_durations)
+    FileUtils.mkdir_p(File.dirname(timings_file))
+    payload = {
+      "schema_version" => 1,
+      "updated_at" => Time.now.utc.iso8601,
+      "durations" => merged.keys.sort.each_with_object({}) { |k, h| h[k] = merged[k].round(3) }
+    }
+    tmp = "#{timings_file}.tmp.#{Process.pid}"
+    File.write(tmp, "#{JSON.pretty_generate(payload)}\n", encoding: "UTF-8")
+    File.rename(tmp, timings_file)
+  rescue StandardError => e
+    $stderr.puts("warning: failed to persist timings file #{timings_file}: #{e.message}")
+  end
+
+  def compute_critical_paths(ports, selected, durations)
+    topo = topo_sort(ports, selected)
+    rdeps = Hash.new { |h, k| h[k] = [] }
+    selected.each do |n|
+      ports[n]["deps"].each { |d| rdeps[d] << n if selected.include?(d) }
+    end
+
+    cp = {}
+    topo.reverse_each do |n|
+      own = [durations.fetch(n, DEFAULT_DURATION_ESTIMATE).to_f, 1.0].max
+      tail = rdeps[n].empty? ? 0.0 : rdeps[n].map { |child| cp[child] }.max
+      cp[n] = (own + tail).round(3)
+    end
+    cp
+  end
+
+  def schedule_sort_key(name, schedule_order, cp_map, downstream_counts, ports)
+    case schedule_order
+    when "critical-path"
+      [-cp_map.fetch(name, 0.0), -downstream_counts.fetch(name, 0), ports[name]["tier"], name]
+    when "reverse"
+      [cp_map.fetch(name, 0.0), downstream_counts.fetch(name, 0), -ports[name]["tier"], -name.bytes.sum, name]
+    when "name-asc"
+      [name]
+    when "name-desc"
+      [name.bytes.map { |b| -b }]
+    else
+      raise ArgumentError, "unsupported schedule order: #{schedule_order}"
+    end
+  end
+
+  def cmd_available?(name)
+    ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).any? do |dir|
+      full = File.join(dir, name)
+      File.file?(full) && File.executable?(full)
+    end
+  end
+
+  def should_rewrite_config_file?(rel)
+    return true if rel.start_with?("bin/") && rel.end_with?("-config")
+    return true if rel.end_with?(".cmake") && (rel.start_with?("lib/cmake/", "share/cmake/"))
+
+    false
+  end
+
+  def overlay_tree!(src_root, dst_root, rewrite_from: nil, rewrite_to: nil)
+    return unless File.directory?(src_root)
+
+    do_rewrite = !rewrite_from.to_s.empty? && !rewrite_to.to_s.empty? && rewrite_from != rewrite_to
+    Dir.glob(File.join(src_root, "**", "*"), File::FNM_DOTMATCH).sort.each do |src|
+      base = File.basename(src)
+      next if base == "." || base == ".."
+
+      rel = src.sub("#{src_root}/", "")
+      dst = File.join(dst_root, rel)
+      if File.directory?(src) && !File.symlink?(src)
+        FileUtils.mkdir_p(dst)
+        next
+      end
+
+      FileUtils.mkdir_p(File.dirname(dst))
+      File.unlink(dst) if File.exist?(dst) || File.symlink?(dst)
+
+      if File.symlink?(src)
+        File.symlink(File.readlink(src), dst)
+      elsif File.file?(src)
+        st = File.stat(src)
+        if do_rewrite && should_rewrite_config_file?(rel)
+          raw = File.binread(src)
+          if !raw.include?("\x00".b) && raw.include?(rewrite_from.b)
+            File.binwrite(dst, raw.gsub(rewrite_from.b, rewrite_to.b))
+            File.chmod(st.mode & 0o777, dst)
+            next
+          end
+        end
+        begin
+          File.link(src, dst)
+        rescue SystemCallError
+          FileUtils.cp(src, dst, preserve: false)
+          File.chmod(st.mode & 0o777, dst)
+        end
+      end
+    end
+  end
+
+  def prepare_isolated_view!(port_name:, toolchain_root:, neutral_prefix:, tdeps:, pkg_trees_dir:)
+    view_root = File.join(toolchain_root, "views", port_name)
+    port_view = File.join(view_root, "pizfix")
+    wrapper_dir = File.join(view_root, ".toolchain")
+    FileUtils.rm_rf(view_root)
+    FileUtils.mkdir_p(port_view)
+    FileUtils.mkdir_p(wrapper_dir)
+
+    base_pizfix = File.join(toolchain_root, "pizfix")
+    raise "pristine base pizfix not found: #{base_pizfix}" unless File.directory?(base_pizfix)
+
+    # 1. Hardlink pristine base toolchain sysroot (musl, libc++, libpizlo, os-include)
+    overlay_tree!(base_pizfix, port_view)
+
+    # 2. Overlay ONLY declared transitive dependencies from verified packaged trees
+    tdeps.each do |dep|
+      dep_tree = File.join(pkg_trees_dir, dep)
+      raise "missing verified dependency tree for #{dep} (needed by #{port_name})" unless File.directory?(dep_tree)
+
+      overlay_tree!(dep_tree, port_view, rewrite_from: neutral_prefix, rewrite_to: port_view)
+    end
+
+    # 3. Create thin compiler wrappers enforcing --filc-resource-dir=<port_view>
+    real_bin_dir = File.join(toolchain_root, "build", "bin")
+    %w[clang clang++].each do |cc_name|
+      real_cc = File.join(real_bin_dir, cc_name)
+      next unless File.exist?(real_cc) || File.symlink?(real_cc)
+
+      wrapper_path = File.join(wrapper_dir, cc_name)
+      File.write(
+        wrapper_path,
+        "#!/bin/sh\nexec \"#{real_cc}\" --filc-resource-dir=\"#{port_view}\" \"$@\"\n",
+        encoding: "UTF-8"
+      )
+      File.chmod(0o755, wrapper_path)
+    end
+    %w[ld.lld llvm-ar llvm-ranlib llvm-nm].each do |tool|
+      real_tool = File.join(real_bin_dir, tool)
+      next unless File.exist?(real_tool) || File.symlink?(real_tool)
+
+      File.symlink(real_tool, File.join(wrapper_dir, tool))
+    end
+
+    { view_root: view_root, port_view: port_view, wrapper_dir: wrapper_dir }
+  end
+
+  def cache_verified_package_tree!(bin_tar_xz:, pkg_trees_dir:, port_name:)
+    FileUtils.mkdir_p(pkg_trees_dir)
+    dest = File.join(pkg_trees_dir, port_name)
+    tmp = File.join(pkg_trees_dir, ".#{port_name}.tmp.#{Process.pid}.#{Thread.current.object_id}")
+    FileUtils.rm_rf(tmp)
+    FileUtils.mkdir_p(tmp)
+    _o, err, st = Open3.capture3("tar", "-xf", bin_tar_xz, "-C", tmp, "prefix")
+    raise "failed to unpack verified #{bin_tar_xz} into tree cache: #{err.strip}" unless st.success?
+
+    extracted_prefix = File.join(tmp, "prefix")
+    raise "verified archive #{bin_tar_xz} missing prefix/ tree" unless File.directory?(extracted_prefix)
+
+    FileUtils.rm_rf(dest)
+    File.rename(extracted_prefix, dest)
+    dest
+  ensure
+    FileUtils.rm_rf(tmp) if tmp && File.exist?(tmp)
+  end
+
+  def clean_env_without(keys)
+    env = {}
+    keys.each { |k| env[k] = nil }
+    env
+  end
+
+  def run_logged_cmd(cmd, env:, log_file:, cpu_range: nil, cwd: nil)
+    full_cmd = if cpu_range && !cpu_range.empty? && cmd_available?("taskset")
+                 ["taskset", "-c", cpu_range, *cmd]
+               else
+                 cmd
+               end
+    FileUtils.mkdir_p(File.dirname(log_file))
+    output = +""
+    opts = {}
+    opts[:chdir] = cwd if cwd
+    Open3.popen2e(env, *full_cmd, **opts) do |stdin, oe, wait_thr|
+      stdin.close
+      File.open(log_file, "a", encoding: "UTF-8") do |lf|
+        oe.each_line do |line|
+          lf.write(line)
+          output << line
+        end
+      end
+      [wait_thr.value.exitstatus, output]
+    end
+  end
+
+  def extract_short_reason(output, fallback)
+    lines = output.to_s.lines.map(&:strip).reject(&:empty?)
+    hit = lines.reverse.find do |l|
+      l.include?("LEAK_GATE FAILED") ||
+        l.include?("SIZE_LIMIT FAILED") ||
+        l.include?("PACKAGE_SMOKE FAILED") ||
+        l.include?("SHA-256 mismatch") ||
+        l.include?("error:") ||
+        l.include?("ERROR:") ||
+        l.include?("FAIL:") ||
+        l.include?("failed")
+    end
+    reason = (hit || lines.last || fallback).to_s
+    reason.length > 180 ? "#{reason[0, 177]}..." : reason
+  end
+
+  def sort_json(obj)
+    case obj
+    when Hash
+      obj.keys.sort.each_with_object({}) { |k, h| h[k] = sort_json(obj[k]) }
+    when Array
+      obj.map { |v| sort_json(v) }
+    else
+      obj
+    end
+  end
+
+  def write_json(path, obj)
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, "#{JSON.pretty_generate(sort_json(obj))}\n", encoding: "UTF-8")
+  end
+
+  def find_root_blockers(port_name, ports, results)
+    blockers = []
+    visited = Set.new
+    stack = ports[port_name]["deps"].dup
+    until stack.empty?
+      d = stack.pop
+      next if visited.include?(d)
+
+      visited.add(d)
+      st = results.dig(d, "status")
+      if st == "failed"
+        blockers << d
+      elsif st == "blocked"
+        stack.concat(ports[d]["deps"])
+      end
+    end
+    blockers.uniq.sort
+  end
+
+  def write_ports_reports!(work_dir:, ports:, selected:, results:, duration_total:)
+    ordered = topo_sort(ports, selected)
+    records = ordered.map { |n| results.fetch(n) }
+    tested = records.count { |r| r["status"] == "tested" }
+    built = records.count { |r| r["status"] == "built" }
+    cached = records.count { |r| r["status"] == "cached" }
+    failed = records.count { |r| r["status"] == "failed" }
+    failed_runner = records.count { |r| r["status"] == "failed" && r["failed_kind"] == "runner" }
+    failed_package = records.count { |r| r["status"] == "failed" && r["failed_kind"] != "runner" }
+    blocked = records.count { |r| r["status"] == "blocked" }
+    unmodified = records.count { |r| r["patch_count"].to_i == 0 }
+    patched = records.length - unmodified
+    patches_total = records.sum { |r| r["patch_count"].to_i }
+    added_total = records.sum { |r| r["added_lines"].to_i }
+    removed_total = records.sum { |r| r["removed_lines"].to_i }
+
+    date_utc = Time.now.utc.iso8601
+    report_obj = {
+      "date_utc" => date_utc,
+      "duration_seconds" => duration_total.to_i,
+      "summary" => {
+        "total" => records.length,
+        "tested" => tested,
+        "built" => built,
+        "cached" => cached,
+        "failed" => failed,
+        "failed_runner" => failed_runner,
+        "failed_package" => failed_package,
+        "blocked" => blocked,
+        "unmodified" => unmodified,
+        "patched" => patched,
+        "patches_total" => patches_total,
+        "added_lines" => added_total,
+        "removed_lines" => removed_total
+      },
+      "ports" => records
+    }
+    write_json(File.join(work_dir, "ports-report.json"), report_obj)
+
+    lines = [
+      "=" * 80,
+      "FIL-C PORTS STREAM REPORT",
+      "=" * 80,
+      "DATE_UTC=#{date_utc}",
+      "DURATION_SECONDS=#{duration_total.to_i}",
+      "PORTS_TOTAL=#{records.length}",
+      "PORTS_TESTED=#{tested}",
+      "PORTS_BUILT=#{built}",
+      "PORTS_CACHED=#{cached}",
+      "PORTS_FAILED=#{failed} (runner=#{failed_runner}, package=#{failed_package})",
+      "PORTS_FAILED_RUNNER=#{failed_runner}",
+      "PORTS_FAILED_PACKAGE=#{failed_package}",
+      "PORTS_BLOCKED=#{blocked}",
+      "PORTS_UNMODIFIED=#{unmodified}",
+      "PORTS_PATCHED=#{patched}",
+      "PATCHES_TOTAL=#{patches_total} (+#{added_total}/-#{removed_total})",
+      "",
+      "PORTS:"
+    ]
+    records.each do |r|
+      st_label = if r["status"] == "failed"
+                   r["failed_kind"] == "runner" ? "failed:runner" : "failed:package"
+                 elsif r["status"] == "cached"
+                   "skipped (cached)"
+                 else
+                   r["status"]
+                 end
+      extra = []
+      extra << "stage=#{r['failed_stage']}" if r["failed_stage"] && !r["failed_stage"].empty?
+      extra << "blocked_by=#{r['blocked_by'].join(',')}" if r["blocked_by"] && !r["blocked_by"].empty?
+      extra_s = extra.empty? ? "" : " #{extra.join(' ')}"
+      lines << format(
+        "  %-24s [T%d] %-16s %-10s %-12s patches=%d (%ds)%s",
+        st_label, r["tier"].to_i, r["name"], r["version"].to_s, r["policy_class"].to_s,
+        r["patch_count"].to_i, r["duration_seconds"].to_i, extra_s
+      )
+    end
+    lines << ("=" * 80)
+    File.write(File.join(work_dir, "ports-report.txt"), "#{lines.join("\n")}\n", encoding: "UTF-8")
+    report_obj
+  end
+
+  def main(argv)
+    repo_root = File.expand_path("..", __dir__)
+    default_par = Integer(ENV.fetch("FILC_PORTS_PARALLEL", "4"), 10).clamp(1, 8)
+    default_jobs = Integer(ENV.fetch("FILC_PORTS_JOBS", Etc.nprocessors.to_s), 10)
+    opts = {
+      repo_root: repo_root,
+      ports_dir: nil,
+      toolchain_root: nil,
+      work_dir: nil,
+      out_dir: nil,
+      ports_cache_dir: nil,
+      channel: nil,
+      arch: "x86_64-linux",
+      revision: 1,
+      parallel: default_par,
+      total_jobs: default_jobs,
+      pin_cpus: ENV.fetch("FILC_PORTS_PIN_CPUS", "0") == "1",
+      isolated_prefix: true,
+      schedule_order: "critical-path",
+      timings_file: "/ccache/ports-timings.json",
+      bootstrap_glob: "/ccache/reports/ports-*.json",
+      cache_manifest: nil,
+      local_artifact_cache: nil,
+      force_spec: ENV.fetch("FILC_PORTS_FORCE", ""),
+      upload: false,
+      upload_url: ENV.fetch("FILC_PORTS_UPLOAD_URL", ""),
+      ports_filter: ENV.fetch("FILC_PORTS", "").split(/[\s,]+/).reject(&:empty?),
+      leak_report: nil,
+      pubkey_file: nil,
+      exact_tokens_env: "FILC_LEAK_EXACT_TOKENS",
+      verify_smoke: true,
+      build_port_bin: nil,
+      package_port_bin: nil,
+      upload_ports_bin: nil,
+      source_date_epoch: ENV["SOURCE_DATE_EPOCH"]
+    }
+
+    parser = OptionParser.new do |o|
+      o.banner = "Usage: scripts/publish-ports-stream [options]"
+      o.on("--repo-root DIR", "Repository root") { |v| opts[:repo_root] = File.expand_path(v) }
+      o.on("--ports-dir DIR", "Ports recipe directory (default: <repo-root>/ports)") { |v| opts[:ports_dir] = File.expand_path(v) }
+      o.on("--toolchain-root DIR", "Pristine Fil-C toolchain root (e.g. /opt/filc/0.1.4)") { |v| opts[:toolchain_root] = File.expand_path(v) }
+      o.on("--work-dir DIR", "Work directory (e.g. /build/filc-ports)") { |v| opts[:work_dir] = File.expand_path(v) }
+      o.on("--out-dir DIR", "Output channel root directory") { |v| opts[:out_dir] = File.expand_path(v) }
+      o.on("--ports-cache-dir DIR", "Upstream source tarball cache directory") { |v| opts[:ports_cache_dir] = File.expand_path(v) }
+      o.on("--channel VERSION", "Toolchain release channel (e.g. 0.1.4)") { |v| opts[:channel] = v }
+      o.on("--arch ARCH", "Target architecture (default: x86_64-linux)") { |v| opts[:arch] = v }
+      o.on("--revision N", Integer, "Package revision number (default: 1)") { |v| opts[:revision] = v }
+      o.on("-j", "--parallel N", Integer, "Concurrent port slots (1..8, default: 4)") { |v| opts[:parallel] = v.clamp(1, 8) }
+      o.on("--total-jobs N", Integer, "Total CPU budget split evenly across slots (default: FILC_PORTS_JOBS)") { |v| opts[:total_jobs] = [v, 1].max }
+      o.on("--pin-cpus", "Pin each worker slot to a disjoint CPU slice via taskset") { opts[:pin_cpus] = true }
+      o.on("--no-pin-cpus", "Disable disjoint taskset CPU pinning") { opts[:pin_cpus] = false }
+      o.on("--isolated-prefix", "Build each port in an isolated prefix view (default)") { opts[:isolated_prefix] = true }
+      o.on("--no-isolated-prefix", "Disable isolated prefix views") { opts[:isolated_prefix] = false }
+      o.on("--schedule-order MODE", "Scheduler order: critical-path, reverse, name-asc, name-desc") { |v| opts[:schedule_order] = v }
+      o.on("--timings-file PATH", "Per-port timings JSON for critical-path scheduling") { |v| opts[:timings_file] = v.empty? ? nil : File.expand_path(v) }
+      o.on("--no-bootstrap-timings", "Disable bootstrapping timings from /ccache/reports/ports-*.json") { opts[:bootstrap_glob] = nil }
+      o.on("--cache-manifest PATH", "Incremental build-key cache manifest JSON (empty to disable)") { |v| opts[:cache_manifest] = v.empty? ? nil : File.expand_path(v) }
+      o.on("--local-artifact-cache DIR", "Local directory caching verified artifacts for skipped (cached) ports") { |v| opts[:local_artifact_cache] = v.empty? ? nil : File.expand_path(v) }
+      o.on("--force SPEC", "Force rebuild of specific port(s) or 'all' (overrides FILC_PORTS_FORCE)") { |v| opts[:force_spec] = v }
+      o.on("--upload", "Stage-upload each verified port immediately via upload-ports --stage-port-meta") { opts[:upload] = true }
+      o.on("--upload-url URL", "filc-live base URL for staged per-port uploads") { |v| opts[:upload_url] = v }
+      o.on("--ports LIST", "Comma/space-separated subset of ports (deps included automatically)") { |v| opts[:ports_filter] = v.split(/[\s,]+/).reject(&:empty?) }
+      o.on("--leak-report PATH", "Optional path to write consolidated leak-gate JSON report") { |v| opts[:leak_report] = File.expand_path(v) }
+      o.on("--pubkey-file PATH", "Optional minisign public key to copy as pubkey.pub on finalize") { |v| opts[:pubkey_file] = File.expand_path(v) }
+      o.on("--exact-tokens-env VAR", "Env var containing newline-separated exact infra tokens") { |v| opts[:exact_tokens_env] = v }
+      o.on("--skip-package-smoke", "Skip alternate-prefix PACKAGE_SMOKE during verify") { opts[:verify_smoke] = false }
+      o.on("--build-port-bin PATH", "Override build-port executable (tests)") { |v| opts[:build_port_bin] = File.expand_path(v) }
+      o.on("--package-port-bin PATH", "Override package-port executable (tests)") { |v| opts[:package_port_bin] = File.expand_path(v) }
+      o.on("--upload-ports-bin PATH", "Override upload-ports executable (tests)") { |v| opts[:upload_ports_bin] = File.expand_path(v) }
+      o.on("--source-date-epoch N", "Override SOURCE_DATE_EPOCH") { |v| opts[:source_date_epoch] = v }
+    end
+    parser.parse!(argv)
+
+    raise ArgumentError, "--toolchain-root is required" if opts[:toolchain_root].to_s.empty?
+    raise ArgumentError, "--work-dir is required" if opts[:work_dir].to_s.empty?
+    raise ArgumentError, "--out-dir is required" if opts[:out_dir].to_s.empty?
+    raise ArgumentError, "--channel invalid" unless CHANNEL_RE.match?(opts[:channel].to_s)
+    raise ArgumentError, "--arch invalid" unless ARCH_RE.match?(opts[:arch].to_s)
+    raise ArgumentError, "invalid --schedule-order #{opts[:schedule_order]}" unless VALID_SCHEDULES.include?(opts[:schedule_order])
+
+    ports_dir = opts[:ports_dir] || File.join(opts[:repo_root], "ports")
+    build_port_bin = opts[:build_port_bin] || File.join(opts[:repo_root], "scripts", "build-port")
+    package_port_bin = opts[:package_port_bin] || File.join(opts[:repo_root], "scripts", "package-port")
+    upload_ports_bin = opts[:upload_ports_bin] || File.join(opts[:repo_root], "scripts", "upload-ports")
+    cache_dir = opts[:ports_cache_dir] || File.join(opts[:work_dir], "ports-cache")
+    neutral_prefix = File.join(opts[:toolchain_root], "pizfix")
+    channel_dir = File.join(opts[:out_dir], opts[:channel], opts[:arch])
+    staged_dir = File.join(channel_dir, ".staged")
+    pkg_trees_dir = File.join(opts[:work_dir], "ports-pkg-trees")
+    logs_dir = File.join(opts[:work_dir], "ports-logs")
+    state_dir = File.join(opts[:work_dir], "ports-state")
+
+    FileUtils.mkdir_p(opts[:work_dir])
+    FileUtils.mkdir_p(cache_dir)
+    FileUtils.mkdir_p(logs_dir)
+    FileUtils.mkdir_p(state_dir)
+    FileUtils.rm_rf(staged_dir)
+    FileUtils.rm_rf(pkg_trees_dir)
+    FileUtils.mkdir_p(staged_dir)
+    FileUtils.mkdir_p(pkg_trees_dir)
+
+    all_ports = load_ports(ports_dir)
+    initial = opts[:ports_filter].empty? ? all_ports.keys.sort : opts[:ports_filter]
+    selected = select_with_deps(all_ports, initial)
+    topo_order = topo_sort(all_ports, selected)
+
+    timings = load_timings(opts[:timings_file], bootstrap_glob: opts[:bootstrap_glob])
+    cp_map = compute_critical_paths(all_ports, selected, timings)
+    downstream_counts = compute_downstream_counts(all_ports, selected)
+
+    parallel = [opts[:parallel], selected.size].min
+    parallel = 1 if parallel < 1
+    slot_cores = [opts[:total_jobs] / parallel, 1].max
+    host_cpus = begin
+      Etc.nprocessors
+    rescue StandardError
+      opts[:total_jobs]
+    end
+    pin_ranges = if opts[:pin_cpus] && cmd_available?("taskset") && (parallel * slot_cores) <= host_cpus
+                   Array.new(parallel) do |idx|
+                     lo = idx * slot_cores
+                     hi = lo + slot_cores - 1
+                     lo == hi ? lo.to_s : "#{lo}-#{hi}"
+                   end
+                 else
+                   Array.new(parallel, nil)
+                 end
+
+    $stdout.puts("FILC_PHASE stream-ports running")
+    $stdout.puts("FILC_PORTS_PARALLEL=#{parallel}")
+    $stdout.puts("FILC_PORTS_TOTAL #{selected.size}")
+    unless opts[:ports_filter].empty?
+      $stdout.puts("FILC_PORTS_FILTER=#{opts[:ports_filter].join(',')} selected=#{selected.size} (#{topo_order.join(',')})")
+    end
+    $stdout.puts(
+      "PUBLISH_PORTS_STREAM: parallel=#{parallel} total_jobs=#{opts[:total_jobs]} slot_cores=#{slot_cores} " \
+      "isolated_prefix=#{opts[:isolated_prefix]} schedule=#{opts[:schedule_order]} upload=#{opts[:upload]} " \
+      "pin_cpus=#{pin_ranges.any? ? pin_ranges.join(',') : 'off'} ports=#{selected.size}"
+    )
+    $stdout.flush
+
+    write_json(File.join(state_dir, "ports-plan.json"), {
+      "total" => selected.size,
+      "parallel" => parallel,
+      "slot_cores" => slot_cores,
+      "schedule_order" => opts[:schedule_order],
+      "critical_paths" => cp_map
+    })
+
+    indeg = {}
+    rdeps = Hash.new { |h, k| h[k] = [] }
+    selected.each { |n| indeg[n] = 0 }
+    selected.each do |n|
+      all_ports[n]["deps"].each do |d|
+        next unless selected.include?(d)
+
+        indeg[n] += 1
+        rdeps[d] << n
+      end
+    end
+
+    ready = indeg.select { |_k, v| v.zero? }.keys
+    ready.sort_by! { |n| schedule_sort_key(n, opts[:schedule_order], cp_map, downstream_counts, all_ports) }
+
+    mu = Mutex.new
+    cv = ConditionVariable.new
+    active_count = 0
+    done_count = 0
+    verified_count = 0
+    uploaded_count = 0
+    cached_count = 0
+    results = {}
+    failures = []
+    start_sequence = []
+    measured_durations = {}
+    built_pkg_hashes = {}
+    toolchain_id = compute_toolchain_identity(
+      toolchain_root: opts[:toolchain_root],
+      repo_root: opts[:repo_root],
+      channel: opts[:channel],
+      arch: opts[:arch]
+    )
+    cache_entries = load_cache_manifest(opts[:cache_manifest])
+    updated_cache_entries = cache_entries.dup
+    force_mode, force_set = parse_force_spec(opts[:force_spec])
+    t_run_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+
+    propagate_blocked = lambda do |failed_port|
+      q = rdeps[failed_port].dup
+      until q.empty?
+        dep_child = q.shift
+        next if results.key?(dep_child)
+
+        blockers = find_root_blockers(dep_child, all_ports, results)
+        blockers = [failed_port] if blockers.empty?
+        meta = all_ports[dep_child]
+        results[dep_child] = {
+          "name" => dep_child,
+          "version" => meta["version"],
+          "tier" => meta["tier"],
+          "status" => "blocked",
+          "policy_class" => meta["policy_class"],
+          "deps" => meta["deps"],
+          "blocked_by" => blockers,
+          "duration_seconds" => 0,
+          "patch_count" => meta["patch_count"],
+          "added_lines" => meta["added_lines"],
+          "removed_lines" => meta["removed_lines"],
+          "files_changed" => meta["files_changed"]
+        }
+        done_count += 1
+        $stdout.puts("FILC_PORT #{dep_child} blocked policy=#{meta['policy_class']} blocked_by=#{blockers.join(',')}")
+        $stdout.flush
+        q.concat(rdeps[dep_child])
+      end
+    end
+
+    workers = Array.new(parallel) do |slot_idx|
+      Thread.new do
+        cpu_range = pin_ranges[slot_idx]
+        loop do
+          pname = nil
+          mu.synchronize do
+            while ready.empty? && (active_count > 0 || done_count < selected.size)
+              break if ready.empty? && active_count == 0
+
+              cv.wait(mu)
+            end
+            unless ready.empty?
+              pname = ready.shift
+              active_count += 1
+              start_sequence << pname
+            end
+          end
+          break unless pname
+
+          meta = all_ports[pname]
+          tdeps = transitive_deps_topo(all_ports, pname)
+          log_file = File.join(logs_dir, "#{pname}.log")
+          File.write(log_file, "", encoding: "UTF-8")
+          t_port_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          view_info = nil
+
+          tdep_hashes = mu.synchronize do
+            tdeps.each_with_object({}) { |d, hh| hh[d] = built_pkg_hashes[d].to_s }
+          end
+          build_key = compute_port_build_key(
+            port_meta: meta,
+            channel: opts[:channel],
+            arch: opts[:arch],
+            revision: opts[:revision],
+            toolchain_id: toolchain_id,
+            tdep_pkg_hashes: tdep_hashes
+          )
+          forced = (force_mode == :all) || force_set.include?(pname)
+
+          # Incremental cache check: skip build & upload when build_key matches AND
+          # artifacts are verified present via HEAD + X-Content-SHA256 (zero GET/downloads).
+          cache_hit = false
+          cached_rec = (!forced && opts[:cache_manifest]) ? cache_entries[pname] : nil
+          if cached_rec.is_a?(Hash) && cached_rec["build_key"] == build_key &&
+             cached_rec["channel"] == opts[:channel] && cached_rec["arch"] == opts[:arch] &&
+             cached_rec["package"].is_a?(Hash)
+            cached_pkg = cached_rec["package"]
+            staged_meta_path = File.join(staged_dir, "#{pname}.json")
+            staged_payload = {
+              "channel" => opts[:channel],
+              "arch" => opts[:arch],
+              "name" => pname,
+              "package" => cached_pkg,
+              "sums" => cached_rec["sums"] || {},
+              "provenance_allowed" => cached_rec["provenance_allowed"] || {},
+              "size_record" => cached_rec["size_record"],
+              "smoke" => cached_rec["smoke"] || { "ran_smoke" => false, "symlinks" => 0, "hardlinks" => 0 },
+              "cached" => true
+            }
+            tmp_probe = "#{staged_meta_path}.probe.#{Process.pid}.#{Thread.current.object_id}"
+            File.write(tmp_probe, "#{JSON.pretty_generate(sort_json(staged_payload))}\n", encoding: "UTF-8")
+            begin
+              local_ok = restore_cached_artifacts!(
+                channel_dir: channel_dir,
+                local_cache_dir: opts[:local_artifact_cache],
+                pkg_entry: cached_pkg
+              )
+              if local_ok
+                remote_ok = true
+                if opts[:upload]
+                  up_env = clean_env_without(%w[FILC_PORTS_MINISIGN_KEY FILC_PORTS_MINISIGN_PASSWORD FILC_LEAK_EXACT_TOKENS FILC_LIVE_TOKEN])
+                  hv_cmd = [
+                    upload_ports_bin,
+                    "--channel-dir", channel_dir,
+                    "--channel", opts[:channel],
+                    "--arch", opts[:arch],
+                    "--base-url", opts[:upload_url],
+                    "--head-verify-meta", tmp_probe
+                  ]
+                  rc_hv, _out_hv = run_logged_cmd(hv_cmd, env: up_env, log_file: log_file)
+                  remote_ok = (rc_hv == 0)
+                end
+                if remote_ok
+                  bin_abs = File.join(channel_dir, cached_pkg.dig("binary", "path"))
+                  if opts[:isolated_prefix]
+                    cache_verified_package_tree!(
+                      bin_tar_xz: bin_abs,
+                      pkg_trees_dir: pkg_trees_dir,
+                      port_name: pname
+                    )
+                  end
+                  File.rename(tmp_probe, staged_meta_path)
+                  tmp_probe = nil
+                  cache_hit = true
+                end
+              end
+            rescue StandardError
+              cache_hit = false
+            ensure
+              File.unlink(tmp_probe) if tmp_probe && File.exist?(tmp_probe)
+            end
+          end
+
+          if cache_hit
+            bin_sha = cached_rec.dig("package", "binary", "sha256").to_s
+            mu.synchronize do
+              built_pkg_hashes[pname] = bin_sha
+              verified_count += 1
+              uploaded_count += 1 if opts[:upload]
+              cached_count += 1
+              active_count -= 1
+              done_count += 1
+              results[pname] = {
+                "name" => pname,
+                "version" => meta["version"],
+                "tier" => meta["tier"],
+                "status" => "cached",
+                "cached" => true,
+                "policy_class" => meta["policy_class"],
+                "deps" => meta["deps"],
+                "blocked_by" => [],
+                "duration_seconds" => 0,
+                "patch_count" => meta["patch_count"],
+                "added_lines" => meta["added_lines"],
+                "removed_lines" => meta["removed_lines"],
+                "files_changed" => meta["files_changed"]
+              }
+              $stdout.puts("STREAM_SLOT[#{slot_idx}] CACHED #{pname} (skipped (cached), build_key=#{build_key[0, 12]})")
+              $stdout.puts("FILC_PORT #{pname} cached policy=#{meta['policy_class']} reason=cached")
+              rdeps[pname].each do |child|
+                indeg[child] -= 1
+                if indeg[child].zero? && !results.key?(child)
+                  ready << child
+                  ready.sort_by! { |n| schedule_sort_key(n, opts[:schedule_order], cp_map, downstream_counts, all_ports) }
+                end
+              end
+              $stdout.flush
+              cv.broadcast
+            end
+            next
+          end
+
+          mu.synchronize do
+            $stdout.puts(
+              "STREAM_SLOT[#{slot_idx}] START #{pname} (cp=#{cp_map[pname]}s cores=#{slot_cores}" \
+              "#{cpu_range ? " cpus=#{cpu_range}" : ''} deps=#{tdeps.length}#{forced ? ' forced=1' : ''})"
+            )
+            $stdout.puts("FILC_PORT #{pname} building policy=#{meta['policy_class']} stage=build")
+            $stdout.flush
+          end
+
+          build_ok = false
+          verify_ok = false
+          upload_ok = !opts[:upload]
+          fail_stage = nil
+          fail_kind = nil
+          fail_reason = nil
+          build_status = "tested"
+          staged_rec = nil
+
+          begin
+            # Stage 1: Isolated per-port prefix view + build-port (ZERO secrets in scope)
+            build_pizfix = neutral_prefix
+            wrapper_dir = nil
+            if opts[:isolated_prefix]
+              view_info = prepare_isolated_view!(
+                port_name: pname,
+                toolchain_root: opts[:toolchain_root],
+                neutral_prefix: neutral_prefix,
+                tdeps: tdeps,
+                pkg_trees_dir: pkg_trees_dir
+              )
+              build_pizfix = view_info[:port_view]
+              wrapper_dir = view_info[:wrapper_dir]
+            end
+
+            build_env = clean_env_without(SECRET_ENV_KEYS + %w[CCACHE_DIR CCACHE_BASEDIR CCACHE_NOHASHDIR])
+            build_env["FILC_TOOLCHAIN_ROOT"] = opts[:toolchain_root]
+            build_env["FILC_PIZFIX"] = build_pizfix
+            build_env["FILC_PORTS_DIR"] = ports_dir
+            build_env["FILC_PORTS_CACHE_DIR"] = cache_dir
+            build_env["FILC_PORTS_JOBS"] = slot_cores.to_s
+            build_env["FILC_PORT_SKIP_DEPS"] = "1"
+            if wrapper_dir
+              build_env["FILC_CLANG"] = File.join(wrapper_dir, "clang")
+              build_env["FILC_CLANGXX"] = File.join(wrapper_dir, "clang++")
+              prefix_map = "-ffile-prefix-map=#{build_pizfix}=#{neutral_prefix}"
+              build_env["CFLAGS"] = "-O2 -g #{prefix_map}"
+              build_env["CXXFLAGS"] = "-O2 -g #{prefix_map}"
+            end
+            build_env["SOURCE_DATE_EPOCH"] = opts[:source_date_epoch].to_s if opts[:source_date_epoch]
+
+            rc_b, out_b = run_logged_cmd(
+              [build_port_bin, pname, opts[:work_dir]],
+              env: build_env,
+              log_file: log_file,
+              cpu_range: cpu_range
+            )
+            state_json_path = File.join(state_dir, "#{pname}.json")
+            state_rec = File.file?(state_json_path) ? (JSON.parse(File.read(state_json_path, encoding: "UTF-8")) rescue nil) : nil
+            if rc_b == 0 && state_rec && %w[tested built].include?(state_rec["status"])
+              build_ok = true
+              build_status = state_rec["status"]
+            elsif rc_b == 0
+              build_ok = true
+              build_status = "tested"
+            else
+              fail_stage = (state_rec && state_rec["failed_stage"]) || "build"
+              fail_kind = (state_rec && state_rec["failed_kind"]) || "package"
+              fail_reason = extract_short_reason(out_b, "build-port exited with code #{rc_b}")
+            end
+
+            # Stage 2: Verify (package + relocate + leak-gate + 512-MiB limit + alt-prefix smoke)
+            if build_ok
+              mu.synchronize do
+                $stdout.puts("FILC_PORT #{pname} verifying policy=#{meta['policy_class']} stage=verify")
+                $stdout.flush
+              end
+
+              pkg_env = clean_env_without(%w[FILC_PORTS_MINISIGN_KEY FILC_PORTS_MINISIGN_PASSWORD FILC_PORTS_UPLOAD_TOKEN FILC_LIVE_TOKEN])
+              pkg_env["SOURCE_DATE_EPOCH"] = opts[:source_date_epoch].to_s if opts[:source_date_epoch]
+              pkg_cmd = [
+                package_port_bin,
+                "--repo-root", opts[:repo_root],
+                "--ports-dir", ports_dir,
+                "--work-dir", opts[:work_dir],
+                "--pizfix", build_pizfix,
+                "--neutral-prefix", neutral_prefix,
+                "--ports-cache-dir", cache_dir,
+                "--out-dir", opts[:out_dir],
+                "--staged-dir", staged_dir,
+                "--channel", opts[:channel],
+                "--arch", opts[:arch],
+                "--revision", opts[:revision].to_s,
+                "--xz-threads", slot_cores.to_s,
+                "--exact-tokens-env", opts[:exact_tokens_env],
+                "--single-port", pname
+              ]
+              if opts[:work_dir].start_with?("/build/filc-ports")
+                pkg_cmd.concat(["--neutral-build-dir", opts[:work_dir]])
+              end
+              pkg_cmd.concat(["--wrapper-dir", wrapper_dir]) if wrapper_dir
+              pkg_cmd << "--skip-package-smoke" unless opts[:verify_smoke]
+
+              rc_p, out_p = run_logged_cmd(
+                pkg_cmd,
+                env: pkg_env,
+                log_file: log_file,
+                cpu_range: cpu_range
+              )
+              if rc_p == 0
+                staged_meta_path = File.join(staged_dir, "#{pname}.json")
+                staged_rec = JSON.parse(File.read(staged_meta_path, encoding: "UTF-8"))
+                bin_rel = staged_rec.dig("package", "binary", "path")
+                bin_abs = File.join(channel_dir, bin_rel)
+                store_artifacts_in_local_cache!(
+                  channel_dir: channel_dir,
+                  local_cache_dir: opts[:local_artifact_cache],
+                  pkg_entry: staged_rec["package"]
+                )
+                if opts[:isolated_prefix]
+                  cache_verified_package_tree!(
+                    bin_tar_xz: bin_abs,
+                    pkg_trees_dir: pkg_trees_dir,
+                    port_name: pname
+                  )
+                end
+                verify_ok = true
+              else
+                fail_stage = "verify"
+                fail_kind = "package"
+                fail_reason = extract_short_reason(out_p, "package-port --single-port exited with code #{rc_p}")
+              end
+            end
+          rescue StandardError => e
+            fail_stage ||= build_ok ? "verify" : "build"
+            fail_kind ||= "runner"
+            fail_reason = e.message.to_s
+          ensure
+            FileUtils.rm_rf(view_info[:view_root]) if view_info && view_info[:view_root]
+          end
+
+          # Unlock downstream DAG dependents immediately once build + verify + tree cache succeeded!
+          if verify_ok
+            bin_sha = staged_rec.dig("package", "binary", "sha256").to_s
+            mu.synchronize do
+              built_pkg_hashes[pname] = bin_sha
+              verified_count += 1
+              $stdout.puts("FILC_STAGE_PROGRESS verify #{verified_count}/#{selected.size} #{pname}")
+              rdeps[pname].each do |child|
+                indeg[child] -= 1
+                if indeg[child].zero? && !results.key?(child)
+                  ready << child
+                  ready.sort_by! { |n| schedule_sort_key(n, opts[:schedule_order], cp_map, downstream_counts, all_ports) }
+                end
+              end
+              cv.broadcast
+            end
+
+            # Stage 3: Per-port staged upload (artifacts only; NEVER commits index.json)
+            if opts[:upload]
+              mu.synchronize do
+                $stdout.puts("FILC_PORT #{pname} uploading policy=#{meta['policy_class']} stage=upload")
+                $stdout.flush
+              end
+              up_env = clean_env_without(%w[FILC_PORTS_MINISIGN_KEY FILC_PORTS_MINISIGN_PASSWORD FILC_LEAK_EXACT_TOKENS FILC_LIVE_TOKEN])
+              up_cmd = [
+                upload_ports_bin,
+                "--channel-dir", channel_dir,
+                "--channel", opts[:channel],
+                "--arch", opts[:arch],
+                "--base-url", opts[:upload_url],
+                "--stage-port-meta", File.join(staged_dir, "#{pname}.json")
+              ]
+              rc_u, out_u = run_logged_cmd(up_cmd, env: up_env, log_file: log_file)
+              if rc_u == 0
+                upload_ok = true
+              else
+                upload_ok = false
+                fail_stage = "upload"
+                fail_kind = "runner"
+                fail_reason = extract_short_reason(out_u, "upload-ports --stage-port-meta exited with code #{rc_u}")
+              end
+            end
+          end
+
+          port_dur = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - t_port_start).round(3)
+
+          mu.synchronize do
+            active_count -= 1
+            done_count += 1
+            measured_durations[pname] = port_dur if verify_ok
+
+            if build_ok && verify_ok && upload_ok
+              if staged_rec
+                updated_cache_entries[pname] = {
+                  "build_key" => build_key,
+                  "toolchain_id" => toolchain_id,
+                  "channel" => opts[:channel],
+                  "arch" => opts[:arch],
+                  "package" => staged_rec["package"],
+                  "sums" => staged_rec["sums"],
+                  "provenance_allowed" => staged_rec["provenance_allowed"],
+                  "size_record" => staged_rec["size_record"],
+                  "smoke" => staged_rec["smoke"]
+                }
+              end
+              results[pname] = {
+                "name" => pname,
+                "version" => meta["version"],
+                "tier" => meta["tier"],
+                "status" => build_status,
+                "policy_class" => meta["policy_class"],
+                "deps" => meta["deps"],
+                "blocked_by" => [],
+                "duration_seconds" => port_dur.round,
+                "patch_count" => meta["patch_count"],
+                "added_lines" => meta["added_lines"],
+                "removed_lines" => meta["removed_lines"],
+                "files_changed" => meta["files_changed"]
+              }
+              if opts[:upload]
+                uploaded_count += 1
+                $stdout.puts("FILC_PORT #{pname} uploaded policy=#{meta['policy_class']} stage=upload duration=#{port_dur.round}")
+                $stdout.puts("FILC_STAGE_PROGRESS upload #{uploaded_count}/#{selected.size} #{pname}")
+              else
+                $stdout.puts("FILC_PORT #{pname} #{build_status} policy=#{meta['policy_class']} duration=#{port_dur.round}")
+              end
+            else
+              fk = fail_kind == "runner" ? "runner" : "package"
+              results[pname] = {
+                "name" => pname,
+                "version" => meta["version"],
+                "tier" => meta["tier"],
+                "status" => "failed",
+                "failed_stage" => fail_stage || "build",
+                "failed_kind" => fk,
+                "failure_reason" => fail_reason || "unknown failure",
+                "policy_class" => meta["policy_class"],
+                "deps" => meta["deps"],
+                "blocked_by" => [],
+                "duration_seconds" => port_dur.round,
+                "patch_count" => meta["patch_count"],
+                "added_lines" => meta["added_lines"],
+                "removed_lines" => meta["removed_lines"],
+                "files_changed" => meta["files_changed"]
+              }
+              failures << {
+                "name" => pname,
+                "stage" => fail_stage || "build",
+                "kind" => fk,
+                "reason" => fail_reason || "unknown failure",
+                "log_file" => log_file
+              }
+              $stdout.puts("FILC_PORT #{pname} failed:#{fk} policy=#{meta['policy_class']} stage=#{fail_stage || 'build'} duration=#{port_dur.round}")
+              # Only build/verify failures block downstream builds (upload failure leaves verified tree intact)
+              propagate_blocked.call(pname) unless verify_ok
+            end
+            $stdout.flush
+            cv.broadcast
+          end
+        end
+      end
+    end
+
+    workers.each(&:join)
+    total_duration = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - t_run_start).round(3)
+
+    save_timings!(opts[:timings_file], measured_durations)
+    save_cache_manifest!(opts[:cache_manifest], updated_cache_entries) if opts[:cache_manifest]
+    report_obj = write_ports_reports!(
+      work_dir: opts[:work_dir],
+      ports: all_ports,
+      selected: selected,
+      results: results,
+      duration_total: total_duration
+    )
+
+    blocked_records = results.values.select { |r| r["status"] == "blocked" }.sort_by { |r| r["name"] }
+    cached_records = results.values.select { |r| r["status"] == "cached" }.sort_by { |r| r["name"] }
+    commit_allowed = failures.empty? && blocked_records.empty?
+
+    summary_obj = {
+      "channel" => opts[:channel],
+      "arch" => opts[:arch],
+      "parallel" => parallel,
+      "total_jobs" => opts[:total_jobs],
+      "slot_cores" => slot_cores,
+      "isolated_prefix" => opts[:isolated_prefix],
+      "schedule_order" => opts[:schedule_order],
+      "start_sequence" => start_sequence,
+      "critical_paths" => cp_map,
+      "toolchain_id" => toolchain_id,
+      "cached_ports" => cached_records.map { |r| r["name"] },
+      "duration_seconds" => total_duration,
+      "commit_allowed" => commit_allowed,
+      "failed_ports" => failures.sort_by { |f| f["name"] },
+      "blocked_ports" => blocked_records.map { |r| { "name" => r["name"], "blocked_by" => r["blocked_by"] } },
+      "summary" => report_obj["summary"]
+    }
+    write_json(File.join(opts[:work_dir], "publish-summary.json"), summary_obj)
+
+    unless commit_allowed
+      $stdout.puts("FILC_PHASE stream-ports failure #{total_duration.round}")
+      $stdout.puts("=" * 80)
+      $stdout.puts(
+        "PUBLISH_PORTS_COMMIT_BLOCKED: index commit prevented by #{failures.length} failed port(s) " \
+        "and #{blocked_records.length} blocked port(s)"
+      )
+      $stdout.puts("FAILED PORTS PREVENTING INDEX COMMIT:")
+      failures.sort_by { |f| f["name"] }.each do |f|
+        $stdout.puts("  - #{f['name']} (stage=#{f['stage']}, kind=#{f['kind']}): #{f['reason']}")
+      end
+      unless blocked_records.empty?
+        $stdout.puts("BLOCKED PORTS:")
+        blocked_records.each do |r|
+          $stdout.puts("  - #{r['name']} (blocked_by=#{r['blocked_by'].join(',')})")
+        end
+      end
+      $stdout.puts("=" * 80)
+      $stdout.flush
+      return 1
+    end
+
+    # All 100% of selected ports passed build + verify (+ staged upload if enabled):
+    # finalize deterministic index.json + SHA256SUMS (still unsigned in Step 1).
+    fin_env = clean_env_without(%w[FILC_PORTS_MINISIGN_KEY FILC_PORTS_MINISIGN_PASSWORD FILC_PORTS_UPLOAD_TOKEN FILC_LIVE_TOKEN])
+    fin_cmd = [
+      package_port_bin,
+      "--repo-root", opts[:repo_root],
+      "--ports-dir", ports_dir,
+      "--work-dir", opts[:work_dir],
+      "--pizfix", neutral_prefix,
+      "--neutral-prefix", neutral_prefix,
+      "--ports-cache-dir", cache_dir,
+      "--out-dir", opts[:out_dir],
+      "--staged-dir", staged_dir,
+      "--channel", opts[:channel],
+      "--arch", opts[:arch],
+      "--exact-tokens-env", opts[:exact_tokens_env],
+      "--ports", topo_order.join(","),
+      "--finalize-index"
+    ]
+    fin_cmd.concat(["--neutral-build-dir", opts[:work_dir]]) if opts[:work_dir].start_with?("/build/filc-ports")
+    fin_cmd.concat(["--leak-report", opts[:leak_report]]) if opts[:leak_report]
+    fin_cmd.concat(["--pubkey-file", opts[:pubkey_file]]) if opts[:pubkey_file]
+
+    fin_out, fin_err, fin_st = Open3.capture3(fin_env, *fin_cmd)
+    $stdout.puts(fin_out) unless fin_out.empty?
+    unless fin_st.success?
+      $stderr.puts(fin_err) unless fin_err.empty?
+      $stdout.puts("FILC_PHASE stream-ports failure #{total_duration.round}")
+      $stdout.puts("PUBLISH_PORTS_COMMIT_BLOCKED: index finalization failed")
+      return 1
+    end
+
+    $stdout.puts("FILC_PHASE stream-ports success #{total_duration.round}")
+    $stdout.puts(
+      "PUBLISH_PORTS_STREAM_RESULT: PASS ports=#{selected.size} parallel=#{parallel} " \
+      "slot_cores=#{slot_cores} duration=#{total_duration}s commit_ready=true"
+    )
+    $stdout.flush
+    0
+  end
+end
+
+exit(PublishPortsStream.main(ARGV)) if $PROGRAM_NAME == __FILE__

@@ -239,7 +239,7 @@ module PortPackager
     [count, added, removed]
   end
 
-  def build_forbidden_literals(work_dir:, repo_root:, pizfix:, neutral_prefix: nil, neutral_build_dir: nil)
+  def build_forbidden_literals(work_dir:, repo_root:, pizfix:, neutral_prefix: nil, neutral_build_dir: nil, wrapper_dir: nil)
     lits = []
     neutral = neutral_prefix.to_s.strip
     neutral_build = neutral_build_dir.to_s.strip
@@ -250,6 +250,7 @@ module PortPackager
     candidates = [repo_root, ENV["HOSTNAME"]]
     candidates << work_dir unless !neutral_build.empty? && work_dir.to_s.strip == neutral_build
     candidates << pizfix unless !neutral.empty? && pizfix.to_s.strip == neutral
+    candidates << wrapper_dir unless wrapper_dir.to_s.strip.empty?
     candidates.each do |v|
       s = v.to_s.strip
       lits << s if s.length >= 6 && !%w[localhost debian linux].include?(s) && s != neutral && s != neutral_build
@@ -584,10 +585,14 @@ module PortPackager
     end
   end
 
-  def relocate_stage!(prefix_dir, pizfix, src_inode_map: {}, throttle_fn: nil)
+  def relocate_stage!(prefix_dir, pizfix, src_inode_map: {}, throttle_fn: nil, neutral_prefix: nil, wrapper_dir: nil)
     has_patchelf = cmd_available?("patchelf")
     has_strip = cmd_available?("strip")
     processed_elfs = {}
+    neutral = neutral_prefix.to_s.strip
+    rewrite_view = !neutral.empty? && !pizfix.to_s.empty? && pizfix != neutral
+    wrapper = wrapper_dir.to_s.strip
+    neutral_bin_dir = (!neutral.empty? && !wrapper.empty?) ? File.expand_path("../build/bin", neutral) : nil
     stats = {
       elf_count: 0,
       unique_elf_count: 0,
@@ -616,12 +621,38 @@ module PortPackager
         rel_prefix = "${pcfiledir}" + ("/.." * depth)
         updated = raw.gsub(/^prefix=.*$/, "prefix=#{rel_prefix}")
         updated = updated.gsub(pizfix, "${prefix}") unless pizfix.empty?
+        updated = updated.gsub(wrapper, neutral_bin_dir) if !wrapper.empty? && neutral_bin_dir
         File.write(path, updated, encoding: "UTF-8")
         next
       end
 
       # Relocate ALL ELF binaries, shared libraries, and loadable modules (e.g. lib/bash/*)
-      next unless elf_file?(path)
+      unless elf_file?(path)
+        # When building inside an isolated per-port prefix view, normalize view-specific
+        # prefix/wrapper paths in text files (e.g. *-config scripts, CMake configs, headers)
+        # back to the neutral public prefix so archives stay bit-for-bit identical.
+        if rewrite_view || (!wrapper.empty? && neutral_bin_dir)
+          raw = File.binread(path)
+          unless raw.include?("\x00".b)
+            updated = raw.dup
+            changed = false
+            if rewrite_view && updated.include?(pizfix.b)
+              updated.gsub!(pizfix.b, neutral.b)
+              changed = true
+            end
+            if !wrapper.empty? && neutral_bin_dir && updated.include?(wrapper.b)
+              updated.gsub!(wrapper.b, neutral_bin_dir.b)
+              changed = true
+            end
+            if changed
+              mode = File.stat(path).mode & 0o777
+              File.binwrite(path, updated)
+              File.chmod(mode, path)
+            end
+          end
+        end
+        next
+      end
 
       stats[:elf_count] += 1
       rpath = has_patchelf ? compute_elf_rpath(rel) : nil
@@ -650,9 +681,19 @@ module PortPackager
           $stderr.puts("warning: strip --strip-debug failed for #{rel}: #{serr.strip}")
         end
       end
-      if has_patchelf && rpath
-        capture3_cmd(["patchelf", "--set-rpath", rpath, path], throttle_fn: throttle_fn)
-        stats[:patchelf_count] += 1
+      if has_patchelf
+        if rpath
+          capture3_cmd(["patchelf", "--set-rpath", rpath, path], throttle_fn: throttle_fn)
+          stats[:patchelf_count] += 1
+        end
+        if rewrite_view
+          interp_out, _ie, ist = capture3_cmd(["patchelf", "--print-interpreter", path], throttle_fn: throttle_fn)
+          cur_interp = ist.success? ? interp_out.strip : ""
+          if cur_interp.start_with?("#{pizfix}/")
+            new_interp = "#{neutral}/#{cur_interp.sub("#{pizfix}/", "")}"
+            capture3_cmd(["patchelf", "--set-interpreter", new_interp, path], throttle_fn: throttle_fn)
+          end
+        end
       end
       processed_elfs[elf_key] = path if elf_key
     end
@@ -728,6 +769,25 @@ module PortPackager
     }
   end
 
+  def clamp_stage_mtimes!(stage_dir, epoch)
+    paths = Dir.glob(File.join(stage_dir, "**", "*"), File::FNM_DOTMATCH).reject do |p|
+      b = File.basename(p)
+      b == "." || b == ".."
+    end
+    # Deepest entries first so setting child mtimes doesn't bump parent dir mtimes.
+    paths.sort_by! { |p| [-p.count("/"), p] }
+    paths << stage_dir
+    paths.each do |p|
+      if File.symlink?(p)
+        File.lutime(epoch, epoch, p) if File.respond_to?(:lutime)
+      else
+        File.utime(epoch, epoch, p)
+      end
+    rescue NotImplementedError, SystemCallError
+      nil
+    end
+  end
+
   def create_deterministic_tar_xz(stage_dir, out_tar_xz, source_date_epoch, xz_threads: 1, throttle_fn: nil)
     FileUtils.mkdir_p(File.dirname(out_tar_xz))
     entries = Dir.children(stage_dir).sort
@@ -736,6 +796,7 @@ module PortPackager
     tar_bin = cmd_available?("gtar") ? "gtar" : "tar"
     ver_out, _ve, _vst = Open3.capture3(tar_bin, "--version")
     gnu_tar = ver_out.include?("GNU tar")
+    clamp_stage_mtimes!(stage_dir, source_date_epoch)
 
     tmp_tar = "#{out_tar_xz}.tmp.tar"
     begin
@@ -746,10 +807,25 @@ module PortPackager
           "--owner=0", "--group=0", "--numeric-owner",
           "-cf", tmp_tar, "-C", stage_dir, *entries
         ]
+        _o, err, st = capture3_cmd(cmd, throttle_fn: throttle_fn)
       else
-        cmd = [tar_bin, "-cf", tmp_tar, "-C", stage_dir, *entries]
+        rel_list = Dir.glob(File.join(stage_dir, "**", "*"), File::FNM_DOTMATCH).reject do |p|
+          b = File.basename(p)
+          b == "." || b == ".."
+        end.map { |p| p.sub("#{stage_dir}/", "") }.sort
+        cmd = [
+          tar_bin, "--no-recursion", "--format", "ustar",
+          "--uid", "0", "--gid", "0", "--uname", "", "--gname", "",
+          "-cf", tmp_tar, "-C", stage_dir, *rel_list
+        ]
+        prev_cf = ENV["COPYFILE_DISABLE"]
+        ENV["COPYFILE_DISABLE"] = "1"
+        begin
+          _o, err, st = capture3_cmd(cmd, throttle_fn: throttle_fn)
+        ensure
+          prev_cf.nil? ? ENV.delete("COPYFILE_DISABLE") : ENV["COPYFILE_DISABLE"] = prev_cf
+        end
       end
-      _o, err, st = capture3_cmd(cmd, throttle_fn: throttle_fn)
       raise "tar failed: #{err.strip}" unless st.success?
 
       threads = Integer(xz_threads.to_s, 10).clamp(0, 8)
@@ -1027,6 +1103,7 @@ module PortPackager
     repo_root = File.expand_path("..", __dir__)
     opts = {
       repo_root: repo_root,
+      ports_dir: nil,
       work_dir: File.join(repo_root, ".work", "ports"),
       pizfix: nil,
       neutral_prefix: nil,
@@ -1043,6 +1120,10 @@ module PortPackager
       leak_report: nil,
       pubkey_file: nil,
       sign_only: false,
+      single_port: nil,
+      wrapper_dir: nil,
+      staged_dir: nil,
+      finalize_index: false,
       parallel: 1,
       bg_parallel: nil,
       xz_threads: Integer(ENV.fetch("FILC_PACKAGE_XZ_THREADS", "1"), 10).clamp(0, 8),
@@ -1059,6 +1140,7 @@ module PortPackager
     parser = OptionParser.new do |o|
       o.banner = "Usage: scripts/package-port [options]"
       o.on("--repo-root DIR", "Repository root") { |v| opts[:repo_root] = File.expand_path(v) }
+      o.on("--ports-dir DIR", "Ports recipe directory (default: <repo-root>/ports)") { |v| opts[:ports_dir] = File.expand_path(v) }
       o.on("--work-dir DIR", "build-ports work root (contains ports-state/)") { |v| opts[:work_dir] = File.expand_path(v) }
       o.on("--pizfix DIR", "Fil-C pizfix sysroot directory") { |v| opts[:pizfix] = File.expand_path(v) }
       o.on("--neutral-prefix DIR", "Fixed public install prefix allowed in staged files (default: /opt/filc/<channel>/pizfix)") { |v| opts[:neutral_prefix] = File.expand_path(v) }
@@ -1088,14 +1170,22 @@ module PortPackager
       o.on("--sign-key-env VAR", "Env var containing minisign secret key (default: FILC_PORTS_MINISIGN_KEY)") { |v| opts[:sign_key_env] = v }
       o.on("--pubkey-file PATH", "Optional minisign public key file to copy as pubkey.pub") { |v| opts[:pubkey_file] = v }
       o.on("--sign-only", "Only sign existing index.json and SHA256SUMS in --out-dir/<channel>/<arch>") { opts[:sign_only] = true }
+      o.on("--single-port NAME", "Package, leak-gate, and smoke-verify a single port, writing staged metadata without index.json") { |v| opts[:single_port] = v.strip }
+      o.on("--wrapper-dir DIR", "Optional per-port compiler wrapper directory to normalize and leak-gate") { |v| opts[:wrapper_dir] = File.expand_path(v) }
+      o.on("--staged-dir DIR", "Directory for per-port staged JSON metadata (default: <out-dir>/<channel>/<arch>/.staged)") { |v| opts[:staged_dir] = File.expand_path(v) }
+      o.on("--finalize-index", "Assemble and leak-gate index.json + SHA256SUMS from --staged-dir/*.json") { opts[:finalize_index] = true }
     end
     parser.parse!(argv)
 
     raise ArgumentError, "--channel is required (e.g. 0.1.3)" unless CHANNEL_RE.match?(opts[:channel].to_s)
     raise ArgumentError, "--arch must match #{ARCH_RE.source}" unless ARCH_RE.match?(opts[:arch].to_s)
     raise ArgumentError, "--out-dir is required" if opts[:out_dir].nil? || opts[:out_dir].empty?
+    if [opts[:sign_only], !opts[:single_port].nil?, opts[:finalize_index]].count(true) > 1
+      raise ArgumentError, "--sign-only, --single-port, and --finalize-index are mutually exclusive"
+    end
 
     channel_dir = File.join(opts[:out_dir], opts[:channel], opts[:arch])
+    staged_dir = opts[:staged_dir] || File.join(channel_dir, ".staged")
     if opts[:sign_only]
       index_path = File.join(channel_dir, "index.json")
       sums_path = File.join(channel_dir, "SHA256SUMS")
@@ -1181,7 +1271,7 @@ module PortPackager
     pizfix = opts[:pizfix] || File.join(repo_root, ".work", "toolchain", "pizfix")
     cache_dir = opts[:ports_cache_dir] || File.join(work_dir, "ports-cache")
     state_dir = File.join(work_dir, "ports-state")
-    ports_dir = File.join(repo_root, "ports")
+    ports_dir = opts[:ports_dir] || File.join(repo_root, "ports")
 
     upstream = File.file?(File.join(repo_root, "UPSTREAM")) ? parse_kv_file(File.join(repo_root, "UPSTREAM")) : {}
     all_ports = load_all_ports(ports_dir)
@@ -1192,8 +1282,148 @@ module PortPackager
       repo_root: repo_root,
       pizfix: pizfix,
       neutral_prefix: neutral_prefix,
-      neutral_build_dir: opts[:neutral_build_dir]
+      neutral_build_dir: opts[:neutral_build_dir],
+      wrapper_dir: opts[:wrapper_dir]
     )
+
+    if opts[:finalize_index]
+      raise "staged metadata directory not found: #{staged_dir}" unless File.directory?(staged_dir)
+
+      filter_set = opts[:ports_filter] && !opts[:ports_filter].empty? ? Set.new(opts[:ports_filter]) : nil
+      meta_files = Dir.glob(File.join(staged_dir, "*.json")).sort
+      raise "no staged port metadata found in #{staged_dir}" if meta_files.empty?
+
+      fin_packages = {}
+      fin_sums = {}
+      fin_provenance = {}
+      fin_sizes = []
+
+      meta_files.each do |mpath|
+        rec = JSON.parse(File.read(mpath, encoding: "UTF-8"))
+        pname = rec["name"].to_s
+        next if pname.empty?
+        next if filter_set && !filter_set.include?(pname)
+
+        raise "staged channel mismatch in #{mpath}" unless rec["channel"] == opts[:channel]
+        raise "staged arch mismatch in #{mpath}" unless rec["arch"] == opts[:arch]
+
+        pkg_entry = rec["package"]
+        raise "missing package entry in #{mpath}" unless pkg_entry.is_a?(Hash)
+
+        %w[binary source recipe].each do |kind|
+          art = pkg_entry[kind]
+          rel = art && art["path"]
+          expected_sha = art && art["sha256"]
+          full = rel ? File.join(channel_dir, rel) : nil
+          raise "missing artifact #{rel} referenced by #{mpath}" unless full && File.file?(full)
+
+          actual_sha = file_sha256(full)
+          raise "SHA-256 mismatch for #{rel} during finalize-index" unless actual_sha == expected_sha
+
+          fin_sums[rel] = actual_sha
+        end
+
+        fin_packages[pname] = pkg_entry
+        if rec["provenance_allowed"].is_a?(Hash)
+          rec["provenance_allowed"].each { |k, v| fin_provenance[k] = v unless Array(v).empty? }
+        end
+        if rec["size_record"].is_a?(Hash)
+          sr = rec["size_record"]
+          fin_sizes << {
+            name: pname,
+            version: sr["version"].to_s,
+            bin_size: sr["bin_size"].to_i,
+            src_size: sr["src_size"].to_i,
+            rec_size: sr["rec_size"].to_i,
+            hardlinks: sr["hardlinks"].to_i,
+            saved_bytes: sr["saved_bytes"].to_i,
+            stripped_count: sr["stripped_count"].to_i,
+            unique_elf_count: sr["unique_elf_count"].to_i
+          }
+        end
+      end
+
+      if filter_set
+        missing_ports = (filter_set.to_a - fin_packages.keys).sort
+        raise "finalize-index missing staged metadata for: #{missing_ports.join(', ')}" unless missing_ports.empty?
+      end
+      raise "no packages matched in #{staged_dir}" if fin_packages.empty?
+
+      if opts[:leak_report]
+        FileUtils.mkdir_p(File.dirname(opts[:leak_report]))
+        report_obj = {
+          "channel" => opts[:channel],
+          "arch" => opts[:arch],
+          "exact_token_rules_loaded" => exact_rules.length,
+          "failed_packages" => [],
+          "failed_hits_total" => 0,
+          "provenance_allowed_total" => fin_provenance.values.sum(&:length),
+          "provenance_allowed" => sort_json(fin_provenance)
+        }
+        File.write(opts[:leak_report], "#{JSON.pretty_generate(report_obj)}\n", encoding: "UTF-8")
+      end
+
+      unless fin_sizes.empty?
+        sorted_sizes = fin_sizes.sort_by { |r| [-r[:bin_size], r[:name]] }
+        total_bin_bytes = sorted_sizes.sum { |r| r[:bin_size] }
+        max_bin_bytes = sorted_sizes.first[:bin_size]
+        total_hardlinks = sorted_sizes.sum { |r| r[:hardlinks] }
+        total_saved_bytes = sorted_sizes.sum { |r| r[:saved_bytes] }
+        puts "PACKAGE_SIZES: packages=#{sorted_sizes.length} total_bin=#{format_mib(total_bin_bytes)} " \
+             "max_bin=#{format_mib(max_bin_bytes)} limit=#{format_mib(opts[:max_artifact_bytes])} " \
+             "hardlinks=#{total_hardlinks} dedup_saved=#{format_mib(total_saved_bytes)}"
+        puts "TOP_10_LARGEST_PACKAGES:"
+        sorted_sizes.first(10).each_with_index do |r, idx|
+          puts format(
+            "  %2d. %-16s %s bin=%s src=%s hardlinks=%d saved=%s stripped=%d/%d",
+            idx + 1, r[:name], r[:version], format_mib(r[:bin_size]), format_mib(r[:src_size]),
+            r[:hardlinks], format_mib(r[:saved_bytes]), r[:stripped_count], r[:unique_elf_count]
+          )
+        end
+      end
+
+      index_obj = {
+        "schema_version" => 1,
+        "channel" => opts[:channel],
+        "arch" => opts[:arch],
+        "generated_at" => Time.now.utc.iso8601,
+        "toolchain" => {
+          "version" => opts[:channel],
+          "llvm_tag" => upstream["LLVM_TAG"],
+          "filc_commit" => upstream["FILC_COMMIT"],
+          "musl_commit" => upstream["MUSL_COMMIT"]
+        }.compact,
+        "packages" => fin_packages
+      }
+      index_path = File.join(channel_dir, "index.json")
+      index_json = "#{JSON.pretty_generate(sort_json(index_obj))}\n"
+      idx_hard, idx_gen = scan_text_for_leaks("index.json", index_json, literals, exact_rules: exact_rules)
+      idx_leaks = idx_hard + idx_gen.map { |g| "#{g[:file]}: forbidden generic #{g[:pattern]} #{g[:token].inspect}" }
+      raise "LEAK_GATE FAILED on index.json:\n  #{idx_leaks.join("\n  ")}" unless idx_leaks.empty?
+
+      File.write(index_path, index_json, encoding: "UTF-8")
+      fin_sums["index.json"] = file_sha256(index_path)
+      sums_text = fin_sums.keys.sort.map { |rel| "#{fin_sums[rel]}  #{rel}\n" }.join
+      sums_path = File.join(channel_dir, "SHA256SUMS")
+      File.write(sums_path, sums_text, encoding: "UTF-8")
+
+      if opts[:pubkey_file] && File.file?(opts[:pubkey_file])
+        FileUtils.cp(opts[:pubkey_file], File.join(channel_dir, "pubkey.pub"))
+      end
+
+      signed_idx = sign_with_minisign!(
+        index_path, "#{index_path}.minisig",
+        trusted_comment: "channel:#{opts[:channel]} arch:#{opts[:arch]} file:index.json",
+        key_file: opts[:sign_key_file], key_env: opts[:sign_key_env]
+      )
+      signed_sums = sign_with_minisign!(
+        sums_path, "#{sums_path}.minisig",
+        trusted_comment: "channel:#{opts[:channel]} arch:#{opts[:arch]} file:SHA256SUMS",
+        key_file: opts[:sign_key_file], key_env: opts[:sign_key_env]
+      )
+      puts "PACKAGE_PORT: FINALIZED channel=#{opts[:channel]} arch=#{opts[:arch]} packages=#{fin_packages.size} signed=#{signed_idx && signed_sums}"
+      return 0
+    end
 
     channel_dir = File.join(opts[:out_dir], opts[:channel], opts[:arch])
     FileUtils.mkdir_p(File.join(channel_dir, "bin"))
@@ -1269,7 +1499,11 @@ module PortPackager
       raise "empty install manifest for #{name}" if files.empty?
 
       mu.synchronize do
-        $stdout.puts("FILC_PORT #{name} packaging policy=#{meta['policy_class']} stage=package")
+        if opts[:single_port]
+          $stdout.puts("FILC_PORT #{name} verifying policy=#{meta['policy_class']} stage=verify")
+        else
+          $stdout.puts("FILC_PORT #{name} packaging policy=#{meta['policy_class']} stage=package")
+        end
         $stdout.flush
       end
 
@@ -1319,7 +1553,13 @@ module PortPackager
           end
         end
 
-        reloc_stats = relocate_stage!(prefix_stage, pizfix, src_inode_map: src_inode_map, throttle_fn: throttle_fn)
+        reloc_stats = relocate_stage!(
+          prefix_stage, pizfix,
+          src_inode_map: src_inode_map,
+          throttle_fn: throttle_fn,
+          neutral_prefix: neutral_prefix,
+          wrapper_dir: opts[:wrapper_dir]
+        )
         dedup_stats = deduplicate_stage_hardlinks!(prefix_stage)
 
         pkg_files = {}
@@ -1500,17 +1740,113 @@ module PortPackager
             bin_out: bin_out,
             expected_hardlinks: dedup_stats ? dedup_stats[:hardlinks] : 0
           }
-          $stdout.puts(
-            "FILC_PORT #{name} packaged policy=#{meta['policy_class']} stage=package " \
-            "size_bytes=#{bin_size} hardlinks=#{dedup_stats[:hardlinks]} " \
-            "dedup_saved=#{dedup_stats[:saved_bytes]} stripped=#{reloc_stats[:stripped_count]}/#{reloc_stats[:unique_elf_count]}"
-          )
+          if opts[:single_port]
+            $stdout.puts(
+              "PACKAGE_PORT_STAGED: port=#{name} size_bytes=#{bin_size} hardlinks=#{dedup_stats[:hardlinks]} " \
+              "dedup_saved=#{dedup_stats[:saved_bytes]} stripped=#{reloc_stats[:stripped_count]}/#{reloc_stats[:unique_elf_count]}"
+            )
+          else
+            $stdout.puts(
+              "FILC_PORT #{name} packaged policy=#{meta['policy_class']} stage=package " \
+              "size_bytes=#{bin_size} hardlinks=#{dedup_stats[:hardlinks]} " \
+              "dedup_saved=#{dedup_stats[:saved_bytes]} stripped=#{reloc_stats[:stripped_count]}/#{reloc_stats[:unique_elf_count]}"
+            )
+          end
         else
-          $stdout.puts("FILC_PORT #{name} failed:package policy=#{meta['policy_class']} stage=package")
+          fail_stage = opts[:single_port] ? "verify" : "package"
+          $stdout.puts("FILC_PORT #{name} failed:package policy=#{meta['policy_class']} stage=#{fail_stage}")
         end
-        $stdout.puts("FILC_STAGE_PROGRESS package #{packaged_done}/#{eff_total} #{name}")
+        unless opts[:single_port]
+          $stdout.puts("FILC_STAGE_PROGRESS package #{packaged_done}/#{eff_total} #{name}")
+        end
         $stdout.flush
       end
+    end
+
+    if opts[:single_port]
+      pname = opts[:single_port]
+      planned_total = 1
+      process_port.call(pname)
+
+      unless all_leaks.empty?
+        created_archives.each { |p| File.unlink(p) if File.exist?(p) }
+        total_hits = all_leaks.values.sum(&:length)
+        lines = ["LEAK_GATE FAILED for #{pname} (#{total_hits} hit(s)):"]
+        all_leaks.each do |pkg_key, pkg_hits|
+          lines << "  [#{pkg_key}] (#{pkg_hits.length} hit(s)):"
+          pkg_hits.first(50).each { |h| lines << "    - #{h}" }
+        end
+        raise lines.join("\n")
+      end
+
+      unless all_size_violations.empty?
+        created_archives.each { |p| File.unlink(p) if File.exist?(p) }
+        lines = ["SIZE_LIMIT FAILED for #{pname}:"]
+        all_size_violations.each { |k, vs| vs.each { |v| lines << "  [#{k}] #{v}" } }
+        raise lines.join("\n")
+      end
+
+      target = packaged_targets.fetch(pname)
+      smoke_res = { errors: [], symlinks: 0, hardlinks: 0, ran_smoke: false }
+      if opts[:verify_smoke]
+        dep_bin_outs = {}
+        target[:tdeps].each do |dep|
+          dep_meta_file = File.join(staged_dir, "#{dep}.json")
+          if File.file?(dep_meta_file)
+            dep_rec = JSON.parse(File.read(dep_meta_file, encoding: "UTF-8"))
+            dep_rel = dep_rec.dig("package", "binary", "path")
+            dep_bin_outs[dep] = File.join(channel_dir, dep_rel) if dep_rel
+          else
+            cand = Dir.glob(File.join(channel_dir, "bin", "#{dep}-*.tar.xz")).sort.last
+            dep_bin_outs[dep] = cand if cand
+          end
+        end
+        dep_bin_outs[pname] = target[:bin_out]
+        smoke_res = verify_packaged_archive!(
+          name: pname,
+          meta: target[:meta],
+          tdeps: target[:tdeps],
+          bin_out: target[:bin_out],
+          bin_outs: dep_bin_outs,
+          expected_hardlinks: target[:expected_hardlinks],
+          pizfix: pizfix,
+          neutral_prefix: neutral_prefix,
+          work_dir: work_dir,
+          throttle_fn: nil
+        )
+        unless smoke_res[:errors].empty?
+          created_archives.each { |p| File.unlink(p) if File.exist?(p) }
+          $stdout.puts("FILC_PORT #{pname} failed:package policy=#{target[:meta]['policy_class']} stage=verify")
+          $stdout.flush
+          raise "PACKAGE_SMOKE FAILED for #{pname}:\n  #{smoke_res[:errors].join("\n  ")}"
+        end
+      end
+
+      FileUtils.mkdir_p(staged_dir)
+      sr = package_size_records.first
+      staged_payload = {
+        "channel" => opts[:channel],
+        "arch" => opts[:arch],
+        "name" => pname,
+        "package" => packages_index.fetch(pname),
+        "sums" => sums_entries,
+        "provenance_allowed" => sort_json(all_provenance_allowed),
+        "size_record" => sr ? sr.transform_keys(&:to_s) : nil,
+        "smoke" => {
+          "ran_smoke" => smoke_res[:ran_smoke],
+          "symlinks" => smoke_res[:symlinks],
+          "hardlinks" => smoke_res[:hardlinks]
+        }
+      }
+      staged_path = File.join(staged_dir, "#{pname}.json")
+      tmp_staged = "#{staged_path}.tmp.#{Process.pid}"
+      File.write(tmp_staged, "#{JSON.pretty_generate(sort_json(staged_payload))}\n", encoding: "UTF-8")
+      File.rename(tmp_staged, staged_path)
+
+      bin_art = packages_index[pname]["binary"]
+      puts "PACKAGE_PORT_SINGLE: OK port=#{pname} channel=#{opts[:channel]} arch=#{opts[:arch]} " \
+           "bin=#{bin_art['path']} sha256=#{bin_art['sha256']} smoke=#{smoke_res[:ran_smoke]}"
+      return 0
     end
 
     worker_error = nil

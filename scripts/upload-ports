@@ -140,6 +140,46 @@ module PortsUploader
     }
   end
 
+  def verify_staged_port_before_upload!(channel_dir, meta_path, channel, arch, max_artifact_bytes: MAX_ARTIFACT_BYTES)
+    raise "refusing staged upload: missing port metadata file #{meta_path}" unless File.file?(meta_path)
+
+    raw = File.read(meta_path, encoding: "UTF-8")
+    leak_check_text!(File.basename(meta_path), raw)
+    parsed = JSON.parse(raw)
+    raise "staged meta channel mismatch (#{parsed['channel']} != #{channel})" unless parsed["channel"] == channel
+    raise "staged meta arch mismatch (#{parsed['arch']} != #{arch})" unless parsed["arch"] == arch
+
+    pkg_name = parsed["name"].to_s
+    entry = parsed["package"]
+    raise "staged meta missing package entry" unless !pkg_name.empty? && entry.is_a?(Hash)
+
+    items = []
+    %w[source recipe binary].each do |kind|
+      art = entry[kind]
+      raise "staged package #{pkg_name} missing #{kind} entry" unless art.is_a?(Hash) && art["path"].is_a?(String) && SHA256_RE.match?(art["sha256"].to_s)
+
+      rel = art["path"]
+      bucket = rel.split("/", 2).first
+      full = File.join(channel_dir, rel)
+      raise "missing staged artifact file #{full}" unless File.file?(full)
+
+      actual = file_sha256(full)
+      raise "SHA-256 mismatch for #{rel} (meta=#{art['sha256']}, disk=#{actual})" unless actual == art["sha256"]
+
+      size = File.size(full)
+      if size > max_artifact_bytes
+        raise format(
+          "SIZE_LIMIT FAILED: refusing upload of %s (%d bytes / %.2f MiB exceeds %d bytes / %.2f MiB limit)",
+          rel, size, size.to_f / (1024 * 1024), max_artifact_bytes, max_artifact_bytes.to_f / (1024 * 1024)
+        )
+      end
+
+      items << { rel: rel, full: full, sha256: actual, size: size, bucket: bucket }
+    end
+
+    { name: pkg_name, items: items }
+  end
+
   def http_for(uri)
     http = Net::HTTP.new(uri.host, uri.port)
     http.use_ssl = uri.scheme == "https"
@@ -147,6 +187,17 @@ module PortsUploader
     http.read_timeout = 300
     http.write_timeout = 300 if http.respond_to?(:write_timeout=)
     http
+  end
+
+  def head_verify_artifact(base_uri, channel, arch, item, token)
+    path = "/api/ports-artifacts/#{channel}/#{arch}/#{item[:rel]}"
+    http = http_for(base_uri)
+    head_req = Net::HTTP::Head.new(path)
+    head_req["Authorization"] = "Bearer #{token}"
+    head_res = http.request(head_req)
+    head_res.code == "200" && head_res["x-content-sha256"] == item[:sha256]
+  rescue StandardError
+    false
   end
 
   def upload_artifact(base_uri, channel, arch, item, token)
@@ -208,6 +259,9 @@ module PortsUploader
       verify_sig: true,
       dry_run: false,
       parallel: 4,
+      stage_port_meta: nil,
+      head_verify_meta: nil,
+      commit_only: false,
       max_artifact_bytes: MAX_ARTIFACT_BYTES
     }
 
@@ -219,6 +273,9 @@ module PortsUploader
       o.on("--base-url URL", "filc-live base URL") { |v| opts[:base_url] = v }
       o.on("--token-env VAR", "Env var containing upload token (default: FILC_PORTS_UPLOAD_TOKEN)") { |v| opts[:token_env] = v }
       o.on("--pubkey PATH", "Minisign public key file to verify channel signatures (default: ports/ports-pubkey.pub)") { |v| opts[:pubkey_path] = File.expand_path(v) }
+      o.on("--stage-port-meta PATH", "Upload one verified port's artifacts (src/recipes/bin) without committing index.json") { |v| opts[:stage_port_meta] = File.expand_path(v) }
+      o.on("--head-verify-meta PATH", "Check via HEAD + X-Content-SHA256 only that a cached port's artifacts exist on server (zero GET/PUT)") { |v| opts[:head_verify_meta] = File.expand_path(v) }
+      o.on("--commit-only", "Verify signed index.json + SHA256SUMS, ensure all artifacts exist on server, and commit index atomically") { opts[:commit_only] = true }
       o.on("--max-artifact-bytes N", Integer, "Maximum allowed artifact size in bytes (default: 536870912 / 512 MiB)") do |v|
         raise OptionParser::InvalidArgument, "--max-artifact-bytes must be >= 1" if v < 1
 
@@ -233,6 +290,71 @@ module PortsUploader
     raise ArgumentError, "--channel-dir is required" if opts[:channel_dir].nil? || opts[:channel_dir].empty?
     raise ArgumentError, "--channel invalid" unless CHANNEL_RE.match?(opts[:channel].to_s)
     raise ArgumentError, "--arch invalid" unless ARCH_RE.match?(opts[:arch].to_s)
+    if [opts[:stage_port_meta], opts[:head_verify_meta], opts[:commit_only]].count { |v| v } > 1
+      raise ArgumentError, "--stage-port-meta, --head-verify-meta, and --commit-only are mutually exclusive"
+    end
+
+    if opts[:head_verify_meta]
+      raise "missing metadata file #{opts[:head_verify_meta]}" unless File.file?(opts[:head_verify_meta])
+
+      parsed = JSON.parse(File.read(opts[:head_verify_meta], encoding: "UTF-8"))
+      raise "channel mismatch" unless parsed["channel"] == opts[:channel]
+      raise "arch mismatch" unless parsed["arch"] == opts[:arch]
+
+      pkg_name = parsed["name"].to_s
+      entry = parsed["package"]
+      raise "invalid package metadata" unless !pkg_name.empty? && entry.is_a?(Hash)
+
+      items = %w[source recipe binary].map do |kind|
+        art = entry[kind]
+        raise "missing #{kind} entry" unless art.is_a?(Hash) && art["path"].is_a?(String) && SHA256_RE.match?(art["sha256"].to_s)
+
+        { rel: art["path"], sha256: art["sha256"] }
+      end
+
+      token = ENV[opts[:token_env]].to_s.strip
+      raise "missing upload token in env #{opts[:token_env]}" if token.empty?
+      raise ArgumentError, "--base-url or FILC_PORTS_UPLOAD_URL is required" if opts[:base_url].empty?
+
+      base_uri = URI.parse(opts[:base_url])
+      all_present = items.all? { |item| head_verify_artifact(base_uri, opts[:channel], opts[:arch], item, token) }
+      if all_present
+        puts "UPLOAD_PORTS_HEAD_VERIFY: HIT port=#{pkg_name} channel=#{opts[:channel]} arch=#{opts[:arch]} files=#{items.length}"
+        return 0
+      else
+        puts "UPLOAD_PORTS_HEAD_VERIFY: MISS port=#{pkg_name} channel=#{opts[:channel]} arch=#{opts[:arch]}"
+        return 1
+      end
+    end
+
+    if opts[:stage_port_meta]
+      staged = verify_staged_port_before_upload!(
+        opts[:channel_dir], opts[:stage_port_meta], opts[:channel], opts[:arch],
+        max_artifact_bytes: opts[:max_artifact_bytes]
+      )
+      if opts[:dry_run]
+        puts "UPLOAD_PORTS_STAGE: DRY_RUN OK port=#{staged[:name]} channel=#{opts[:channel]} arch=#{opts[:arch]} files=#{staged[:items].length}"
+        return 0
+      end
+
+      token = ENV[opts[:token_env]].to_s.strip
+      raise "missing upload token in env #{opts[:token_env]}" if token.empty?
+      raise ArgumentError, "--base-url or FILC_PORTS_UPLOAD_URL is required" if opts[:base_url].empty?
+
+      base_uri = URI.parse(opts[:base_url])
+      uploaded = 0
+      skipped = 0
+      staged[:items].each do |item|
+        st = upload_artifact(base_uri, opts[:channel], opts[:arch], item, token)
+        if st == :uploaded
+          uploaded += 1
+        else
+          skipped += 1
+        end
+      end
+      puts "UPLOAD_PORTS_STAGE: OK port=#{staged[:name]} channel=#{opts[:channel]} arch=#{opts[:arch]} uploaded=#{uploaded} skipped=#{skipped}"
+      return 0
+    end
 
     verified = verify_channel_before_upload!(
       opts[:channel_dir], opts[:channel], opts[:arch],
@@ -271,13 +393,16 @@ module PortsUploader
           break if mu.synchronize { !first_error.nil? }
 
           pkg_name = pkg[:name]
-          mu.synchronize do
-            $stdout.puts("FILC_PORT #{pkg_name} uploading stage=upload")
-            $stdout.flush
+          unless opts[:commit_only]
+            mu.synchronize do
+              $stdout.puts("FILC_PORT #{pkg_name} uploading stage=upload")
+              $stdout.flush
+            end
           end
 
           begin
             # Strictly preserve per-package src -> recipes -> bin upload order
+            # (idempotent via HEAD: already-staged ports skip immediately in --commit-only mode).
             pkg[:items].each do |item|
               rel = item[:rel]
               already = mu.synchronize do
@@ -303,9 +428,11 @@ module PortsUploader
 
             mu.synchronize do
               done_pkgs += 1
-              $stdout.puts("FILC_PORT #{pkg_name} uploaded stage=upload")
-              $stdout.puts("FILC_STAGE_PROGRESS upload #{done_pkgs}/#{total_pkgs} #{pkg_name}")
-              $stdout.flush
+              unless opts[:commit_only]
+                $stdout.puts("FILC_PORT #{pkg_name} uploaded stage=upload")
+                $stdout.puts("FILC_STAGE_PROGRESS upload #{done_pkgs}/#{total_pkgs} #{pkg_name}")
+                $stdout.flush
+              end
             end
           rescue StandardError => e
             mu.synchronize { first_error ||= e }
@@ -318,7 +445,8 @@ module PortsUploader
 
     # Atomic publish boundary: commit-index is ONLY invoked once 100% of packages succeeded.
     result = commit_index(base_uri, opts[:channel], opts[:arch], verified, token)
-    puts "UPLOAD_PORTS: OK channel=#{opts[:channel]} arch=#{opts[:arch]} packages=#{result['packages']} uploaded=#{uploaded} skipped=#{skipped}"
+    mode_tag = opts[:commit_only] ? "COMMIT_ONLY " : ""
+    puts "UPLOAD_PORTS: #{mode_tag}OK channel=#{opts[:channel]} arch=#{opts[:arch]} packages=#{result['packages']} uploaded=#{uploaded} skipped=#{skipped}"
     0
   end
 end

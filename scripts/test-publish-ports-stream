@@ -1,0 +1,521 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Offline unit & determinism proof suite for scripts/publish-ports-stream,
+# scripts/package-port (--single-port / --finalize-index), and verifying live
+# markers in scripts/report-live.rb / scripts/report-live.
+#
+# Zero network sockets, zero ports bound, runs in a few seconds.
+
+require "digest/sha2"
+require "fileutils"
+require "json"
+require "open3"
+require "tmpdir"
+
+REPO_ROOT = File.expand_path("..", __dir__)
+STREAM_BIN = File.join(REPO_ROOT, "scripts", "publish-ports-stream")
+REPORT_RB = File.join(REPO_ROOT, "scripts", "report-live.rb")
+REPORT_PY = File.join(REPO_ROOT, "scripts", "report-live")
+
+def assert(cond, msg)
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def sha256_file(path)
+  Digest::SHA256.file(path).hexdigest
+end
+
+def make_source_tarball(cache_dir, name, version)
+  Dir.mktmpdir("filc-src-") do |td|
+    src_dir = File.join(td, "#{name}-#{version}")
+    FileUtils.mkdir_p(src_dir)
+    File.write(File.join(src_dir, "README"), "#{name} #{version} clean upstream source\n", encoding: "UTF-8")
+    tar_path = File.join(cache_dir, "#{name}-#{version}.tar.gz")
+    _o, err, st = Open3.capture3("tar", "-czf", tar_path, "-C", td, "#{name}-#{version}")
+    raise "tar failed: #{err}" unless st.success?
+
+    sha = sha256_file(tar_path)
+    named = File.join(cache_dir, "#{name}-#{version}-#{sha[0, 12]}-#{name}-#{version}.tar.gz")
+    FileUtils.mv(tar_path, named)
+    [named, sha]
+  end
+end
+
+def write_mock_port(ports_dir, cache_dir, name:, version:, tier:, deps:, policy: "P0-Clean")
+  _tar, sha = make_source_tarball(cache_dir, name, version)
+  pdir = File.join(ports_dir, name)
+  FileUtils.mkdir_p(pdir)
+  port_content = <<~PORT
+    NAME="#{name}"
+    VERSION="#{version}"
+    LICENSE="MIT"
+    UPSTREAM_URL="https://example.invalid/#{name}-#{version}.tar.gz"
+    UPSTREAM_SHA256="#{sha}"
+    EXTRACT_DIR="#{name}-#{version}"
+    TIER=#{tier}
+    DEPS="#{deps.join(' ')}"
+    BUILD_SYSTEM="custom"
+    POLICY_CLASS="#{policy}"
+
+    port_package_smoke() {
+      test -x "$PKG_PREFIX/bin/#{name}-config"
+      test -f "$PKG_PREFIX/include/#{name}.h"
+      "$PKG_PREFIX/bin/#{name}-config" --prefix | grep -Fq "opt-filc/0.1.4/pizfix"
+      ! "$PKG_PREFIX/bin/#{name}-config" --prefix | grep -Fq "/views/"
+    }
+  PORT
+  File.write(File.join(pdir, "PORT"), port_content, encoding: "UTF-8")
+end
+
+def write_mock_build_port(path)
+  script = <<~'SH'
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    PORT_NAME="$1"
+    WORK_ROOT="$2"
+    PORTS_DIR="${FILC_PORTS_DIR:?}"
+    PIZFIX="${FILC_PIZFIX:?}"
+    STATE_DIR="$WORK_ROOT/ports-state"
+    mkdir -p "$STATE_DIR" "$PIZFIX/bin" "$PIZFIX/include" "$PIZFIX/lib/pkgconfig"
+
+    # Strict secret isolation check: none of these secrets may ever enter build-port
+    for secret_var in FILC_LEAK_EXACT_TOKENS FILC_PORTS_MINISIGN_KEY FILC_PORTS_UPLOAD_TOKEN FILC_LIVE_TOKEN; do
+      if [[ -n "${!secret_var:-}" ]]; then
+        echo "ERROR: secret env leaked into build-port: $secret_var" >&2
+        exit 99
+      fi
+    done
+
+    # Record observed FILC_PORTS_JOBS for budget verification
+    mkdir -p "$WORK_ROOT/observed-jobs"
+    printf '%s\n' "${FILC_PORTS_JOBS:-unset}" > "$WORK_ROOT/observed-jobs/$PORT_NAME"
+
+    # Read recipe metadata
+    source "$PORTS_DIR/$PORT_NAME/PORT"
+
+    # Verify every declared dependency header IS visible in the isolated view
+    for dep in $DEPS; do
+      if [[ ! -f "$PIZFIX/include/${dep}.h" ]]; then
+        echo "ERROR: missing declared dependency header $PIZFIX/include/${dep}.h for $PORT_NAME" >&2
+        exit 1
+      fi
+    done
+
+    # Deliberately test isolation: if an undeclared sibling 'libc' header exists, record it!
+    # In a shared mutable prefix, this would flip depending on build order and break determinism.
+    HAS_SIBLING=0
+    if [[ "$PORT_NAME" != "libc" && -f "$PIZFIX/include/optional_sibling.h" ]]; then
+      HAS_SIBLING=1
+      echo "ERROR: undeclared sibling libc leaked into isolated view for $PORT_NAME!" >&2
+      exit 1
+    fi
+
+    # Optional failure injection for error-isolation test
+    if [[ "${MOCK_FAIL_PORT:-}" == "$PORT_NAME" ]]; then
+      echo "error: injected build failure in $PORT_NAME" >&2
+      printf '{"name":"%s","version":"%s","tier":%s,"status":"failed","failed_stage":"build","failed_kind":"package","policy_class":"%s","deps":[],"duration_seconds":1,"patch_count":0,"added_lines":0,"removed_lines":0,"files_changed":0}\n' \
+        "$PORT_NAME" "$VERSION" "$TIER" "$POLICY_CLASS" > "$STATE_DIR/$PORT_NAME.json"
+      exit 1
+    fi
+
+    # Install port artifacts (header, pkg-config .pc, and *-config script containing $PIZFIX)
+    cat > "$PIZFIX/include/${PORT_NAME}.h" <<HDR
+    /* ${PORT_NAME} ${VERSION} sibling=${HAS_SIBLING} */
+    #define PORT_${PORT_NAME}_VER "${VERSION}"
+    HDR
+
+    manifest_files="\"include/${PORT_NAME}.h\", \"bin/${PORT_NAME}-config\", \"lib/pkgconfig/${PORT_NAME}.pc\""
+    if [[ "$PORT_NAME" == "libc" ]]; then
+      echo "/* optional sibling marker */" > "$PIZFIX/include/optional_sibling.h"
+      manifest_files="$manifest_files, \"include/optional_sibling.h\""
+    fi
+
+    cat > "$PIZFIX/bin/${PORT_NAME}-config" <<CFG
+    #!/bin/sh
+    prefix="$PIZFIX"
+    if [ "\${1:-}" = "--prefix" ]; then
+      echo "\$prefix"
+    else
+      echo "${PORT_NAME} ${VERSION} sibling=${HAS_SIBLING}"
+    fi
+    CFG
+    chmod 0755 "$PIZFIX/bin/${PORT_NAME}-config"
+
+    cat > "$PIZFIX/lib/pkgconfig/${PORT_NAME}.pc" <<PC
+    prefix=$PIZFIX
+    includedir=\${prefix}/include
+    Name: ${PORT_NAME}
+    Version: ${VERSION}
+    Cflags: -I\${includedir}
+    PC
+
+    cat > "$STATE_DIR/$PORT_NAME.manifest.json" <<JSON
+    {
+      "name": "$PORT_NAME",
+      "files": [$manifest_files]
+    }
+    JSON
+
+    cat > "$STATE_DIR/$PORT_NAME.json" <<JSON
+    {
+      "name": "$PORT_NAME",
+      "version": "$VERSION",
+      "tier": $TIER,
+      "status": "tested",
+      "policy_class": "$POLICY_CLASS",
+      "deps": [],
+      "duration_seconds": 1,
+      "patch_count": 0,
+      "added_lines": 0,
+      "removed_lines": 0,
+      "files_changed": 0
+    }
+    JSON
+    touch "$STATE_DIR/$PORT_NAME.installed"
+  SH
+  File.write(path, script, encoding: "UTF-8")
+  File.chmod(0o755, path)
+end
+
+def setup_fixture(root)
+  tc_root = File.join(root, "opt-filc", "0.1.4")
+  FileUtils.mkdir_p(File.join(tc_root, "pizfix", "include"))
+  FileUtils.mkdir_p(File.join(tc_root, "pizfix", "lib"))
+  FileUtils.mkdir_p(File.join(tc_root, "build", "bin"))
+  File.write(File.join(tc_root, "pizfix", "include", "base_musl.h"), "/* pristine base */\n", encoding: "UTF-8")
+  %w[clang clang++ ld.lld llvm-ar llvm-ranlib llvm-nm].each do |tool|
+    p = File.join(tc_root, "build", "bin", tool)
+    File.write(p, "#!/bin/sh\necho mock-#{tool}\n", encoding: "UTF-8")
+    File.chmod(0o755, p)
+  end
+
+  ports_dir = File.join(root, "ports")
+  cache_dir = File.join(root, "ports-cache")
+  FileUtils.mkdir_p(ports_dir)
+  FileUtils.mkdir_p(cache_dir)
+
+  # 6-port diamond + sibling DAG
+  write_mock_port(ports_dir, cache_dir, name: "liba", version: "1.0.0", tier: 0, deps: [])
+  write_mock_port(ports_dir, cache_dir, name: "libb", version: "1.0.0", tier: 0, deps: [])
+  write_mock_port(ports_dir, cache_dir, name: "libc", version: "1.0.0", tier: 0, deps: [])
+  write_mock_port(ports_dir, cache_dir, name: "mid1", version: "2.0.0", tier: 1, deps: %w[liba])
+  write_mock_port(ports_dir, cache_dir, name: "mid2", version: "2.0.0", tier: 1, deps: %w[liba libb])
+  write_mock_port(ports_dir, cache_dir, name: "app",  version: "3.0.0", tier: 2, deps: %w[mid1 mid2])
+
+  mock_bp = File.join(root, "mock-build-port")
+  write_mock_build_port(mock_bp)
+
+  { tc_root: tc_root, ports_dir: ports_dir, cache_dir: cache_dir, mock_bp: mock_bp }
+end
+
+Dir.mktmpdir("filc-stream-test-") do |tmp|
+  fix = setup_fixture(tmp)
+  base_snapshot = Dir.glob(File.join(fix[:tc_root], "pizfix", "**", "*")).sort
+
+  # Seed historical timings making liba -> mid1 -> app the longest critical path:
+  # cp(liba) = 5 + 60 + 30 = 95, cp(libb) = 5 + 10 + 30 = 45, cp(libc) = 12
+  timings_seed = File.join(tmp, "timings-seed.json")
+  File.write(timings_seed, JSON.pretty_generate({
+    "schema_version" => 1,
+    "durations" => { "liba" => 5, "mid1" => 60, "app" => 30, "libb" => 5, "mid2" => 10, "libc" => 12 }
+  }) + "\n", encoding: "UTF-8")
+
+  common_env = ENV.to_h.merge(
+    "FILC_LEAK_EXACT_TOKENS" => "198.51.100.42\nforbidden-ci-secret-token\n",
+    "FILC_PORTS_MINISIGN_KEY" => "must-never-leak-to-build-port",
+    "FILC_PORTS_UPLOAD_TOKEN" => "must-never-leak-to-build-port",
+    "FILC_LIVE_TOKEN" => "must-never-leak-to-build-port"
+  )
+
+  puts "=== [1/4] Determinism proof (6-port diamond DAG: critical-path vs reverse order) ==="
+  run_hashes = {}
+  run_sequences = {}
+
+  %w[critical-path reverse].each do |order|
+    work_dir = File.join(tmp, "work-#{order}")
+    out_dir = File.join(tmp, "out-#{order}")
+    timings_out = File.join(tmp, "timings-#{order}.json")
+    FileUtils.cp(timings_seed, timings_out)
+
+    cmd = [
+      STREAM_BIN,
+      "--repo-root", REPO_ROOT,
+      "--ports-dir", fix[:ports_dir],
+      "--toolchain-root", fix[:tc_root],
+      "--work-dir", work_dir,
+      "--out-dir", out_dir,
+      "--ports-cache-dir", fix[:cache_dir],
+      "--channel", "0.1.4",
+      "--arch", "x86_64-linux",
+      "--revision", "1",
+      "--parallel", "4",
+      "--total-jobs", "16",
+      "--no-pin-cpus",
+      "--isolated-prefix",
+      "--schedule-order", order,
+      "--timings-file", timings_out,
+      "--no-bootstrap-timings",
+      "--build-port-bin", fix[:mock_bp],
+      "--source-date-epoch", "1700000000"
+    ]
+    out, err, st = Open3.capture3(common_env, *cmd)
+    assert(st.success?, "#{order} run failed (rc=#{st.exitstatus}):\nOUT:\n#{out}\nERR:\n#{err}")
+    assert(out.include?("PUBLISH_PORTS_STREAM_RESULT: PASS"), "missing PASS marker in #{order}")
+
+    # Verify fixed core budget per slot: 16 / 4 = 4 cores for every port!
+    %w[liba libb libc mid1 mid2 app].each do |p|
+      obs = File.read(File.join(work_dir, "observed-jobs", p)).strip
+      assert(obs == "4", "expected fixed slot_cores=4 for #{p}, got #{obs}")
+    end
+
+    # Verify pristine base pizfix was NEVER mutated!
+    after_snapshot = Dir.glob(File.join(fix[:tc_root], "pizfix", "**", "*")).sort
+    assert(after_snapshot == base_snapshot, "pristine base pizfix was modified during #{order} run!")
+
+    # Verify views directory cleaned up
+    views_dir = File.join(fix[:tc_root], "views")
+    leftover_views = File.directory?(views_dir) ? Dir.children(views_dir) : []
+    assert(leftover_views.empty?, "leftover views after #{order}: #{leftover_views}")
+
+    idx = JSON.parse(File.read(File.join(out_dir, "0.1.4", "x86_64-linux", "index.json"), encoding: "UTF-8"))
+    summary = JSON.parse(File.read(File.join(work_dir, "publish-summary.json"), encoding: "UTF-8"))
+    assert(summary["commit_allowed"] == true, "commit_allowed must be true for #{order}")
+    run_sequences[order] = summary["start_sequence"]
+    run_hashes[order] = idx["packages"].transform_values { |v| v["binary"]["sha256"] }
+  end
+
+  assert(run_sequences["critical-path"] != run_sequences["reverse"],
+         "expected different start sequences: #{run_sequences.inspect}")
+  assert(run_hashes["critical-path"] == run_hashes["reverse"],
+         "DETERMINISM FAILED!\ncritical-path: #{run_hashes['critical-path']}\nreverse:       #{run_hashes['reverse']}")
+  puts "DETERMINISM_PROOF: PASS (6/6 bit-for-bit identical .tar.xz SHA-256 across critical-path vs reverse):"
+  run_hashes["critical-path"].keys.sort.each do |p|
+    puts "  #{p.ljust(6)} #{run_hashes['critical-path'][p]}"
+  end
+
+  puts "=== [2/4] Critical-path ordering proof (parallel=1) ==="
+  work_cp = File.join(tmp, "work-cp1")
+  out_cp = File.join(tmp, "out-cp1")
+  timings_cp = File.join(tmp, "timings-cp1.json")
+  FileUtils.cp(timings_seed, timings_cp)
+  out_cp_s, err_cp_s, st_cp = Open3.capture3(
+    common_env,
+    STREAM_BIN,
+    "--repo-root", REPO_ROOT,
+    "--ports-dir", fix[:ports_dir],
+    "--toolchain-root", fix[:tc_root],
+    "--work-dir", work_cp,
+    "--out-dir", out_cp,
+    "--ports-cache-dir", fix[:cache_dir],
+    "--channel", "0.1.4",
+    "--arch", "x86_64-linux",
+    "--parallel", "1",
+    "--total-jobs", "4",
+    "--no-pin-cpus",
+    "--isolated-prefix",
+    "--schedule-order", "critical-path",
+    "--timings-file", timings_cp,
+    "--no-bootstrap-timings",
+    "--build-port-bin", fix[:mock_bp],
+    "--source-date-epoch", "1700000000"
+  )
+  assert(st_cp.success?, "cp1 run failed:\n#{out_cp_s}\n#{err_cp_s}")
+  cp_summary = JSON.parse(File.read(File.join(work_cp, "publish-summary.json"), encoding: "UTF-8"))
+  seq = cp_summary["start_sequence"]
+  # cp(liba)=95 -> unlocks mid1 (cp=90) -> must run before libb (cp=45) -> unlocks mid2 (cp=40) -> unlocks app (cp=30) -> libc (cp=12)
+  assert(seq == %w[liba mid1 libb mid2 app libc], "unexpected critical-path order: #{seq.inspect}")
+  assert(File.file?(timings_cp), "timings file not saved")
+  puts "CRITICAL_PATH_SCHEDULER: PASS (order=#{seq.join(' -> ')})"
+
+  puts "=== [3/4] Failure isolation + atomic commit blocker summary ==="
+  work_fail = File.join(tmp, "work-fail")
+  out_fail = File.join(tmp, "out-fail")
+  fail_env = common_env.merge("MOCK_FAIL_PORT" => "mid1")
+  out_f, err_f, st_f = Open3.capture3(
+    fail_env,
+    STREAM_BIN,
+    "--repo-root", REPO_ROOT,
+    "--ports-dir", fix[:ports_dir],
+    "--toolchain-root", fix[:tc_root],
+    "--work-dir", work_fail,
+    "--out-dir", out_fail,
+    "--ports-cache-dir", fix[:cache_dir],
+    "--channel", "0.1.4",
+    "--arch", "x86_64-linux",
+    "--parallel", "4",
+    "--total-jobs", "16",
+    "--no-pin-cpus",
+    "--isolated-prefix",
+    "--timings-file", timings_seed,
+    "--no-bootstrap-timings",
+    "--build-port-bin", fix[:mock_bp],
+    "--source-date-epoch", "1700000000"
+  )
+  assert(!st_f.success?, "expected non-zero exit when mid1 fails")
+  assert(out_f.include?("PUBLISH_PORTS_COMMIT_BLOCKED:"), "missing COMMIT_BLOCKED banner:\n#{out_f}")
+  assert(out_f.include?("- mid1 (stage=build"), "missing mid1 in failed summary:\n#{out_f}")
+  assert(out_f.include?("- app (blocked_by=mid1)"), "missing app in blocked summary:\n#{out_f}")
+  assert(!File.exist?(File.join(out_fail, "0.1.4", "x86_64-linux", "index.json")),
+         "index.json must NOT be written when any port fails!")
+  fail_summary = JSON.parse(File.read(File.join(work_fail, "publish-summary.json"), encoding: "UTF-8"))
+  assert(fail_summary["commit_allowed"] == false, "commit_allowed must be false")
+  assert(fail_summary["summary"]["tested"] == 4, "independent ports liba/libb/libc/mid2 must finish: #{fail_summary['summary']}")
+  assert(fail_summary["summary"]["failed"] == 1, "expected 1 failed port")
+  assert(fail_summary["summary"]["blocked"] == 1, "expected 1 blocked port")
+  puts "FAILURE_ISOLATION_AND_ATOMIC_GATE: PASS (4 independent ports finished, mid1 failed, app blocked, index.json blocked)"
+
+  puts "=== [4/4] report-live.rb & report-live verifying/stream-ports dry-run parity ==="
+  mock_log = File.join(tmp, "publish-ports.log")
+  File.write(mock_log, <<~LOG, encoding: "UTF-8")
+    FILC_PHASE stream-ports running
+    FILC_PORTS_PARALLEL=4
+    FILC_PORTS_TOTAL 6
+    FILC_PORT liba building policy=P0-Clean stage=build
+    FILC_PORT liba verifying policy=P0-Clean stage=verify
+    FILC_STAGE_PROGRESS verify 1/6 liba
+    FILC_PORT liba uploaded policy=P0-Clean stage=upload duration=2
+    FILC_STAGE_PROGRESS upload 1/6 liba
+    FILC_PORT mid1 verifying policy=P0-Clean stage=verify
+  LOG
+  rep_env = ENV.to_h.merge(
+    "CI_PIPELINE_NUMBER" => "999",
+    "CI_COMMIT_BRANCH" => "main",
+    "CI_COMMIT_SHA" => "0123456789abcdef0123456789abcdef01234567",
+    "CI_PIPELINE_EVENT" => "manual"
+  )
+  payloads = []
+  [REPORT_RB, REPORT_PY].each do |bin|
+    ro, re, rst = Open3.capture3(
+      rep_env, bin,
+      "--workflow", "publish-ports",
+      "--phase", "progress",
+      "--step", "stream-ports",
+      "--log", mock_log,
+      "--dry-run",
+      "--strict"
+    )
+    assert(rst.success?, "#{bin} dry-run failed:\nOUT:\n#{ro}\nERR:\n#{re}")
+    parsed = JSON.parse(ro)
+    phases_by_name = parsed["phases"].each_with_object({}) { |ph, h| h[ph["name"]] = ph }
+    assert(phases_by_name.dig("liba", "result") == "uploaded", "#{bin}: expected liba=uploaded, got #{phases_by_name['liba']}")
+    assert(phases_by_name.dig("mid1", "result") == "verifying", "#{bin}: expected mid1=verifying, got #{phases_by_name['mid1']}")
+    assert(phases_by_name.dig("mid1", "stage") == "verify", "#{bin}: expected mid1 stage=verify, got #{phases_by_name['mid1']}")
+    payloads << phases_by_name
+  end
+  assert(payloads[0] == payloads[1], "report-live.rb and report-live phase parity mismatch")
+  puts "REPORT_LIVE_VERIFYING_PARITY: PASS (Ruby + Python identical)"
+
+  puts "=== [5/5] Incremental build cache (skipped (cached), dep cascade, FILC_PORTS_FORCE, HEAD-only check) ==="
+  cache_manifest = File.join(tmp, "build-cache.json")
+  local_art_cache = File.join(tmp, "local-art-cache")
+  mock_upload_log = File.join(tmp, "mock-upload.log")
+  mock_upload_bin = File.join(tmp, "mock-upload-ports")
+  File.write(mock_upload_bin, <<~'RB', encoding: "UTF-8")
+    #!/usr/bin/env ruby
+    require "json"
+    log_path = ENV.fetch("MOCK_UPLOAD_LOG")
+    mode = nil
+    meta = nil
+    ARGV.each_with_index do |a, i|
+      if a == "--stage-port-meta"
+        mode = "stage"
+        meta = ARGV[i + 1]
+      elsif a == "--head-verify-meta"
+        mode = "head"
+        meta = ARGV[i + 1]
+      end
+    end
+    rec = JSON.parse(File.read(meta, encoding: "UTF-8"))
+    pname = rec["name"]
+    File.open(log_path, "a") { |f| f.puts("#{mode} #{pname}") }
+    if mode == "head" && ENV["MOCK_HEAD_MISS_PORT"] == pname
+      exit 1
+    end
+    exit 0
+  RB
+  File.chmod(0o755, mock_upload_bin)
+
+  run_cached_stream = lambda do |tag, extra_env: {}, force: nil|
+    wdir = File.join(tmp, "work-cache-#{tag}")
+    odir = File.join(tmp, "out-cache-#{tag}")
+    File.write(mock_upload_log, "", encoding: "UTF-8")
+    cmd = [
+      STREAM_BIN,
+      "--repo-root", REPO_ROOT,
+      "--ports-dir", fix[:ports_dir],
+      "--toolchain-root", fix[:tc_root],
+      "--work-dir", wdir,
+      "--out-dir", odir,
+      "--ports-cache-dir", fix[:cache_dir],
+      "--channel", "0.1.4",
+      "--arch", "x86_64-linux",
+      "--parallel", "4",
+      "--total-jobs", "16",
+      "--no-pin-cpus",
+      "--isolated-prefix",
+      "--timings-file", timings_seed,
+      "--no-bootstrap-timings",
+      "--cache-manifest", cache_manifest,
+      "--local-artifact-cache", local_art_cache,
+      "--upload",
+      "--upload-url", "http://127.0.0.1:1",
+      "--build-port-bin", fix[:mock_bp],
+      "--upload-ports-bin", mock_upload_bin,
+      "--source-date-epoch", "1700000000"
+    ]
+    cmd.concat(["--force", force]) if force
+    out, err, st = Open3.capture3(common_env.merge("MOCK_UPLOAD_LOG" => mock_upload_log).merge(extra_env), *cmd)
+    assert(st.success?, "cache run #{tag} failed:\nOUT:\n#{out}\nERR:\n#{err}")
+    summary = JSON.parse(File.read(File.join(wdir, "publish-summary.json"), encoding: "UTF-8"))
+    report_txt = File.read(File.join(wdir, "ports-report.txt"), encoding: "UTF-8")
+    ops = File.readlines(mock_upload_log, chomp: true)
+    [summary, report_txt, ops, out]
+  end
+
+  # 5a. Cold run populates cache (6 builds + 6 staged uploads)
+  s1, _r1, ops1, _o1 = run_cached_stream.call("cold")
+  assert(s1["cached_ports"].empty?, "cold run must build all 6 ports")
+  assert(ops1.count { |l| l.start_with?("stage ") } == 6, "cold run should stage-upload 6 ports: #{ops1}")
+
+  # 5b. Warm run: ALL 6 ports skipped (cached) via HEAD-only check, 0 builds, 0 stage uploads!
+  s2, r2, ops2, _o2 = run_cached_stream.call("warm")
+  assert(s2["cached_ports"].sort == %w[app liba libb libc mid1 mid2], "warm run must cache all 6: #{s2['cached_ports']}")
+  assert(s2["summary"]["cached"] == 6 && s2["summary"]["tested"] == 0, "expected 6 cached / 0 tested: #{s2['summary']}")
+  assert(ops2.count { |l| l.start_with?("head ") } == 6, "warm run must HEAD-verify all 6: #{ops2}")
+  assert(ops2.none? { |l| l.start_with?("stage ") }, "warm run must NOT upload anything: #{ops2}")
+  assert(r2.include?("skipped (cached)"), "report must label cached ports 'skipped (cached)'")
+
+  # 5c. Dependency recipe change (libb) -> libb, mid2, app rebuild; liba, mid1, libc stay cached!
+  libb_port = File.join(fix[:ports_dir], "libb", "PORT")
+  File.write(libb_port, File.read(libb_port, encoding: "UTF-8") + "\n# recipe tweak to trigger cascade\n", encoding: "UTF-8")
+  # Also make libb binary output differ slightly so transitive dep hash changes!
+  libb_p2 = File.read(libb_port, encoding: "UTF-8").sub('VERSION="1.0.0"', 'VERSION="1.0.1"')
+  _tar_b2, sha_b2 = make_source_tarball(fix[:cache_dir], "libb", "1.0.1")
+  libb_p2 = libb_p2.sub(/UPSTREAM_SHA256="[0-9a-f]+"/, "UPSTREAM_SHA256=\"#{sha_b2}\"")
+                   .sub('UPSTREAM_URL="https://example.invalid/libb-1.0.0.tar.gz"', 'UPSTREAM_URL="https://example.invalid/libb-1.0.1.tar.gz"')
+                   .sub('EXTRACT_DIR="libb-1.0.0"', 'EXTRACT_DIR="libb-1.0.1"')
+  File.write(libb_port, libb_p2, encoding: "UTF-8")
+  s3, _r3, ops3, _o3 = run_cached_stream.call("cascade")
+  assert(s3["cached_ports"].sort == %w[liba libc mid1], "only liba/libc/mid1 should stay cached after libb bump: #{s3['cached_ports']}")
+  rebuilt3 = ops3.select { |l| l.start_with?("stage ") }.map { |l| l.split[1] }.sort
+  assert(rebuilt3 == %w[app libb mid2], "expected libb/mid2/app to rebuild and upload: #{rebuilt3}")
+
+  # 5d. FILC_PORTS_FORCE=libc forces only libc; FILC_PORTS_FORCE=all forces all 6
+  s4, _r4, ops4, _o4 = run_cached_stream.call("force-one", force: "libc")
+  assert(s4["cached_ports"].sort == %w[app liba libb mid1 mid2], "FILC_PORTS_FORCE=libc must rebuild only libc: #{s4['cached_ports']}")
+  assert(ops4.select { |l| l.start_with?("stage ") } == ["stage libc"], "expected only libc stage-uploaded: #{ops4}")
+
+  s5, _r5, ops5, _o5 = run_cached_stream.call("force-all", force: "all")
+  assert(s5["cached_ports"].empty?, "FILC_PORTS_FORCE=all must rebuild all 6")
+  assert(ops5.count { |l| l.start_with?("stage ") } == 6, "FILC_PORTS_FORCE=all must stage-upload all 6")
+
+  # 5e. Server HEAD miss for liba forces liba rebuild cleanly
+  s6, _r6, ops6, _o6 = run_cached_stream.call("head-miss", extra_env: { "MOCK_HEAD_MISS_PORT" => "liba" })
+  assert(!s6["cached_ports"].include?("liba"), "liba must rebuild on server HEAD miss")
+  assert(ops6.include?("stage liba"), "liba must re-upload after HEAD miss")
+  puts "INCREMENTAL_BUILD_CACHE: PASS (6/6 warm skip, dep cascade, FILC_PORTS_FORCE=<port|all>, HEAD-miss fallback)"
+
+  puts "ALL PUBLISH-PORTS-STREAM TESTS PASSED"
+end

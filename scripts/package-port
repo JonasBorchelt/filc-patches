@@ -13,6 +13,7 @@ require "fileutils"
 require "json"
 require "open3"
 require "optparse"
+require "pathname"
 require "securerandom"
 require "set"
 require "time"
@@ -25,6 +26,7 @@ module PortPackager
   ARCH_RE = /\A(?:x86_64|aarch64)-linux\z/
   SHA256_RE = /\A[0-9a-f]{64}\z/
   IPV4_EXACT_RE = /\A\d{1,3}(?:\.\d{1,3}){3}\z/
+  MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
 
   INFRA_WORDS = [
     %w[ci server].join("-"),
@@ -334,6 +336,8 @@ module PortPackager
   def scan_directory_leaks(stage_dir, literals:, exact_rules: [], scan_elf_strings: true, throttle_fn: nil)
     hard_hits = []
     generic_hits = []
+    inode_cache = {}
+    placeholder = "__FILC_INODE_REL__"
 
     Dir.glob(File.join(stage_dir, "**", "*"), File::FNM_DOTMATCH).sort.each do |path|
       base = File.basename(path)
@@ -349,36 +353,46 @@ module PortPackager
         next
       end
 
-      if elf_file?(path)
-        if cmd_available?("patchelf")
-          out, _e, st = capture3_cmd(["patchelf", "--print-rpath", path], throttle_fn: throttle_fn)
-          if st.success? && !out.strip.empty?
-            h, g = scan_text_for_leaks("ELF RPATH #{rel}", out.strip, literals, exact_rules: exact_rules)
-            hard_hits.concat(h)
-            generic_hits.concat(g)
-            if out.strip.start_with?("/")
-              hard_hits << "ELF RPATH #{rel}: absolute RPATH not allowed (#{out.strip})"
+      st_f = File.stat(path)
+      ino_key = [st_f.dev, st_f.ino]
+      unless inode_cache.key?(ino_key)
+        ino_hard = []
+        ino_generic = []
+        if elf_file?(path)
+          if cmd_available?("patchelf")
+            out, _e, st = capture3_cmd(["patchelf", "--print-rpath", path], throttle_fn: throttle_fn)
+            if st.success? && !out.strip.empty?
+              h, g = scan_text_for_leaks("ELF RPATH #{placeholder}", out.strip, literals, exact_rules: exact_rules)
+              ino_hard.concat(h)
+              ino_generic.concat(g)
+              if out.strip.start_with?("/")
+                ino_hard << "ELF RPATH #{placeholder}: absolute RPATH not allowed (#{out.strip})"
+              end
             end
           end
-        end
-        if scan_elf_strings && cmd_available?("strings")
-          out, _e, st = capture3_cmd(["strings", "-a", "-n", "6", path], throttle_fn: throttle_fn)
-          if st.success?
-            h, g = scan_text_for_leaks("ELF strings #{rel}", out, literals, exact_rules: exact_rules)
-            hard_hits.concat(h)
-            generic_hits.concat(g)
+          if scan_elf_strings && cmd_available?("strings")
+            out, _e, st = capture3_cmd(["strings", "-a", "-n", "6", path], throttle_fn: throttle_fn)
+            if st.success?
+              h, g = scan_text_for_leaks("ELF strings #{placeholder}", out, literals, exact_rules: exact_rules)
+              ino_hard.concat(h)
+              ino_generic.concat(g)
+            end
+          end
+        else
+          raw = File.binread(path)
+          unless raw.include?("\x00".b)
+            text = raw.force_encoding("UTF-8").encode("UTF-8", invalid: :replace, undef: :replace)
+            h, g = scan_text_for_leaks(placeholder, text, literals, exact_rules: exact_rules)
+            ino_hard.concat(h)
+            ino_generic.concat(g)
           end
         end
-        next
+        inode_cache[ino_key] = [ino_hard, ino_generic]
       end
 
-      raw = File.binread(path)
-      next if raw.include?("\x00".b)
-
-      text = raw.force_encoding("UTF-8").encode("UTF-8", invalid: :replace, undef: :replace)
-      h, g = scan_text_for_leaks(rel, text, literals, exact_rules: exact_rules)
-      hard_hits.concat(h)
-      generic_hits.concat(g)
+      cached_hard, cached_generic = inode_cache[ino_key]
+      cached_hard.each { |msg| hard_hits << msg.sub(placeholder, rel) }
+      cached_generic.each { |g| generic_hits << g.merge(file: g[:file].sub(placeholder, rel)) }
     end
 
     [hard_hits.uniq, generic_hits.uniq]
@@ -553,9 +567,36 @@ module PortPackager
     [hard_hits.uniq, allowed]
   end
 
-  def relocate_stage!(prefix_dir, pizfix, throttle_fn: nil)
+  def format_mib(bytes)
+    format("%.2f MiB", bytes.to_f / (1024 * 1024))
+  end
+
+  def compute_elf_rpath(rel)
+    parts = rel.split("/")
+    if parts[0] == "lib" || parts[0] == "lib64"
+      if parts.length == 2
+        "$ORIGIN"
+      else
+        "$ORIGIN/" + ("../" * (parts.length - 2)).chomp("/")
+      end
+    else
+      "$ORIGIN/" + ("../" * (parts.length - 1)) + "lib"
+    end
+  end
+
+  def relocate_stage!(prefix_dir, pizfix, src_inode_map: {}, throttle_fn: nil)
     has_patchelf = cmd_available?("patchelf")
     has_strip = cmd_available?("strip")
+    processed_elfs = {}
+    stats = {
+      elf_count: 0,
+      unique_elf_count: 0,
+      stripped_count: 0,
+      strip_failed_count: 0,
+      strip_saved_bytes: 0,
+      patchelf_count: 0,
+      reused_hardlinks: 0
+    }
 
     Dir.glob(File.join(prefix_dir, "**", "*")).sort.each do |path|
       next if File.directory?(path) || File.symlink?(path)
@@ -582,22 +623,109 @@ module PortPackager
       # Relocate ALL ELF binaries, shared libraries, and loadable modules (e.g. lib/bash/*)
       next unless elf_file?(path)
 
-      capture3_cmd(["strip", "--strip-debug", path], throttle_fn: throttle_fn) if has_strip
-      next unless has_patchelf
+      stats[:elf_count] += 1
+      rpath = has_patchelf ? compute_elf_rpath(rel) : nil
+      mode = File.stat(path).mode & 0o777
+      src_ino = src_inode_map[path]
+      elf_key = src_ino ? [src_ino, mode, rpath] : nil
 
-      parts = rel.split("/")
-      if parts[0] == "lib" || parts[0] == "lib64"
-        rpath = if parts.length == 2
-                  "$ORIGIN"
-                else
-                  "$ORIGIN/" + ("../" * (parts.length - 2)).chomp("/")
-                end
+      if elf_key && processed_elfs.key?(elf_key)
+        canonical = processed_elfs[elf_key]
+        File.unlink(path)
+        File.link(canonical, path)
+        stats[:reused_hardlinks] += 1
+        next
+      end
+
+      stats[:unique_elf_count] += 1
+      if has_strip
+        before_sz = File.size(path)
+        _so, serr, sst = capture3_cmd(["strip", "--strip-debug", path], throttle_fn: throttle_fn)
+        if sst.success?
+          stats[:stripped_count] += 1
+          after_sz = File.size(path)
+          stats[:strip_saved_bytes] += [0, before_sz - after_sz].max
+        else
+          stats[:strip_failed_count] += 1
+          $stderr.puts("warning: strip --strip-debug failed for #{rel}: #{serr.strip}")
+        end
+      end
+      if has_patchelf && rpath
         capture3_cmd(["patchelf", "--set-rpath", rpath, path], throttle_fn: throttle_fn)
-      else
-        rpath = "$ORIGIN/" + ("../" * (parts.length - 1)) + "lib"
-        capture3_cmd(["patchelf", "--set-rpath", rpath, path], throttle_fn: throttle_fn)
+        stats[:patchelf_count] += 1
+      end
+      processed_elfs[elf_key] = path if elf_key
+    end
+    stats
+  end
+
+  # Deduplicates byte-identical regular files (same size, permissions, and SHA-256)
+  # inside a staged prefix into hardlinks to the lexicographically first path so
+  # GNU/BSD tar stores the payload once and preserves hardlinks deterministically.
+  def deduplicate_stage_hardlinks!(prefix_dir)
+    buckets = Hash.new { |h, k| h[k] = [] }
+    total_files = 0
+    total_logical_bytes = 0
+
+    Dir.glob(File.join(prefix_dir, "**", "*"), File::FNM_DOTMATCH).sort.each do |path|
+      base = File.basename(path)
+      next if base == "." || base == ".."
+      next if File.directory?(path) || File.symlink?(path)
+
+      st = File.stat(path)
+      total_files += 1
+      total_logical_bytes += st.size
+      next if st.size <= 0
+
+      buckets[[st.size, st.mode & 0o777]] << [path, st.dev, st.ino, st.size]
+    end
+
+    preserved_links = 0
+    newly_deduped = 0
+    saved_bytes = 0
+    seen_inodes = Set.new
+
+    buckets.each_value do |entries|
+      if entries.length == 1
+        _p, dev, ino, _sz = entries[0]
+        seen_inodes.add([dev, ino])
+        next
+      end
+
+      canonical_by_sha = {}
+      sha_by_inode = {}
+      entries.each do |path, dev, ino, sz|
+        ino_key = [dev, ino]
+        if sha_by_inode.key?(ino_key)
+          preserved_links += 1
+          saved_bytes += sz
+          next
+        end
+
+        sha = file_sha256(path)
+        sha_by_inode[ino_key] = sha
+        if canonical_by_sha.key?(sha)
+          canonical = canonical_by_sha[sha]
+          File.unlink(path)
+          File.link(canonical, path)
+          newly_deduped += 1
+          saved_bytes += sz
+        else
+          canonical_by_sha[sha] = path
+          seen_inodes.add(ino_key)
+        end
       end
     end
+
+    {
+      total_files: total_files,
+      logical_bytes: total_logical_bytes,
+      unique_inodes: seen_inodes.size,
+      preserved_links: preserved_links,
+      newly_deduped: newly_deduped,
+      hardlinks: preserved_links + newly_deduped,
+      saved_bytes: saved_bytes
+    }
   end
 
   def create_deterministic_tar_xz(stage_dir, out_tar_xz, source_date_epoch, xz_threads: 1, throttle_fn: nil)
@@ -712,6 +840,7 @@ module PortPackager
       bg_throttle: false,
       bg_cpus: nil,
       watch_done_file: nil,
+      max_artifact_bytes: MAX_ARTIFACT_BYTES,
       ci_run: ENV["CI_PIPELINE_NUMBER"] ? Integer(ENV["CI_PIPELINE_NUMBER"], 10) : nil,
       source_date_epoch: Integer(ENV.fetch("SOURCE_DATE_EPOCH", "1700000000"), 10)
     }
@@ -736,6 +865,11 @@ module PortPackager
       o.on("--bg-throttle", "Apply nice -n 19, ionice -c3, and 2-core taskset only while builds are running") { opts[:bg_throttle] = true }
       o.on("--bg-cpus SPEC", "CPU list for taskset while --bg-throttle is active (default: last 2 cores)") { |v| opts[:bg_cpus] = v }
       o.on("--watch-done-file PATH", "Continuously package green ports as manifests appear until PATH exists") { |v| opts[:watch_done_file] = File.expand_path(v) }
+      o.on("--max-artifact-bytes N", Integer, "Maximum allowed artifact size in bytes (default: 536870912 / 512 MiB)") do |v|
+        raise OptionParser::InvalidArgument, "--max-artifact-bytes must be >= 1" if v < 1
+
+        opts[:max_artifact_bytes] = v
+      end
       o.on("--exact-tokens-env VAR", "Env var containing newline-separated exact infra tokens (default: FILC_LEAK_EXACT_TOKENS)") { |v| opts[:exact_tokens_env] = v }
       o.on("--leak-report PATH", "Optional path to write JSON leak-gate provenance report") { |v| opts[:leak_report] = File.expand_path(v) }
       o.on("--sign-key-file PATH", "Optional minisign secret key file (CI only)") { |v| opts[:sign_key_file] = v }
@@ -862,6 +996,8 @@ module PortPackager
     packages_index = {}
     sums_entries = {}
     all_leaks = {}
+    all_size_violations = {}
+    package_size_records = []
     all_provenance_allowed = {}
     created_archives = []
     mu = Mutex.new
@@ -935,12 +1071,15 @@ module PortPackager
       bin_rel = "bin/#{bin_fname}"
       bin_out = File.join(channel_dir, bin_rel)
 
-      # 1. Stage binary package, strip .la files, relocate, leak-gate, and pack
+      # 1. Stage binary package, strip .la files, relocate, deduplicate hardlinks, leak-gate, and pack
       bin_leaks = []
       bin_allowed = []
+      reloc_stats = nil
+      dedup_stats = nil
       Dir.mktmpdir("filc-pkg-bin-") do |td|
         prefix_stage = File.join(td, "prefix")
         FileUtils.mkdir_p(prefix_stage)
+        src_inode_map = {}
 
         files.each do |rel|
           raise "unsafe manifest relative path: #{rel}" if rel.start_with?("/") || rel.split("/").include?("..")
@@ -954,18 +1093,24 @@ module PortPackager
           if File.symlink?(src_item)
             link_target = File.readlink(src_item)
             if link_target.start_with?("#{pizfix}/")
-              link_target = link_target.sub("#{pizfix}/", "")
+              target_rel = link_target.sub("#{pizfix}/", "")
+              from_dir = Pathname.new(File.dirname(rel))
+              link_target = Pathname.new(target_rel).relative_path_from(from_dir).to_s
             end
             File.symlink(link_target, dst_item)
           elsif File.file?(src_item)
+            src_st = File.stat(src_item)
             FileUtils.cp(src_item, dst_item, preserve: false)
-            File.chmod(File.stat(src_item).mode & 0o777, dst_item)
+            File.chmod(src_st.mode & 0o777, dst_item)
+            src_inode_map[dst_item] = [src_st.dev, src_st.ino]
           end
         end
 
-        relocate_stage!(prefix_stage, pizfix, throttle_fn: throttle_fn)
+        reloc_stats = relocate_stage!(prefix_stage, pizfix, src_inode_map: src_inode_map, throttle_fn: throttle_fn)
+        dedup_stats = deduplicate_stage_hardlinks!(prefix_stage)
 
         pkg_files = {}
+        sha_cache_by_inode = {}
         Dir.glob(File.join(prefix_stage, "**", "*")).sort.each do |p|
           next if File.directory?(p) && !File.symlink?(p)
 
@@ -973,7 +1118,10 @@ module PortPackager
           if File.symlink?(p)
             pkg_files[rel] = { "type" => "symlink", "target" => File.readlink(p) }
           else
-            pkg_files[rel] = { "type" => "file", "size_bytes" => File.size(p), "sha256" => file_sha256(p) }
+            st_p = File.stat(p)
+            ino_key = [st_p.dev, st_p.ino]
+            sha_p = (sha_cache_by_inode[ino_key] ||= file_sha256(p))
+            pkg_files[rel] = { "type" => "file", "size_bytes" => st_p.size, "sha256" => sha_p }
           end
         end
 
@@ -1058,18 +1206,46 @@ module PortPackager
 
       bin_sha = bin_leaks.empty? ? file_sha256(bin_out) : nil
       rec_sha = (bin_leaks.empty? && rec_leaks.empty?) ? file_sha256(rec_out) : nil
+      bin_size = (bin_leaks.empty? && File.file?(bin_out)) ? File.size(bin_out) : 0
+      src_size = (bin_leaks.empty? && File.file?(src_out)) ? File.size(src_out) : 0
+      rec_size = (bin_leaks.empty? && rec_leaks.empty? && File.file?(rec_out)) ? File.size(rec_out) : 0
+
+      size_violations = []
+      if bin_leaks.empty? && rec_leaks.empty?
+        [[bin_rel, bin_size], [src_rel, src_size], [rec_rel, rec_size]].each do |art_rel, art_sz|
+          next unless art_sz > opts[:max_artifact_bytes]
+
+          size_violations << "#{art_rel}: #{art_sz} bytes (#{format_mib(art_sz)}) exceeds limit #{opts[:max_artifact_bytes]} bytes (#{format_mib(opts[:max_artifact_bytes])})"
+        end
+      end
 
       mu.synchronize do
         all_provenance_allowed[name] = bin_allowed unless bin_allowed.empty?
         all_provenance_allowed["#{name} (recipe)"] = rec_allowed unless rec_allowed.empty?
         all_leaks[name] = bin_leaks unless bin_leaks.empty?
         all_leaks["#{name} (recipe)"] = rec_leaks unless rec_leaks.empty?
+        all_size_violations[name] = size_violations unless size_violations.empty?
         created_archives << bin_out if bin_leaks.empty?
         created_archives << rec_out if bin_leaks.empty? && rec_leaks.empty?
 
+        if bin_leaks.empty? && rec_leaks.empty?
+          package_size_records << {
+            name: name,
+            version: meta["version"],
+            bin_size: bin_size,
+            src_size: src_size,
+            rec_size: rec_size,
+            hardlinks: dedup_stats ? dedup_stats[:hardlinks] : 0,
+            saved_bytes: dedup_stats ? dedup_stats[:saved_bytes] : 0,
+            elf_count: reloc_stats ? reloc_stats[:elf_count] : 0,
+            stripped_count: reloc_stats ? reloc_stats[:stripped_count] : 0,
+            unique_elf_count: reloc_stats ? reloc_stats[:unique_elf_count] : 0
+          }
+        end
+
         packaged_done += 1
         eff_total = [read_planned_total.call(planned_total), packaged_done].max
-        if bin_leaks.empty? && rec_leaks.empty?
+        if bin_leaks.empty? && rec_leaks.empty? && size_violations.empty?
           sums_entries[bin_rel] = bin_sha
           sums_entries[src_rel] = src_sha
           sums_entries[rec_rel] = rec_sha
@@ -1083,13 +1259,13 @@ module PortPackager
             "transitive_deps" => tdeps,
             "binary" => {
               "path" => bin_rel,
-              "size_bytes" => File.size(bin_out),
+              "size_bytes" => bin_size,
               "sha256" => bin_sha
             },
             "source" => {
               "path" => src_rel,
               "upstream_url" => meta["upstream_url"],
-              "size_bytes" => File.size(src_out),
+              "size_bytes" => src_size,
               "sha256" => src_sha
             },
             "recipe" => {
@@ -1097,7 +1273,7 @@ module PortPackager
               "patch_count" => pcount,
               "added_lines" => added,
               "removed_lines" => removed,
-              "size_bytes" => File.size(rec_out),
+              "size_bytes" => rec_size,
               "sha256" => rec_sha
             },
             "built_at" => Time.now.utc.iso8601
@@ -1105,7 +1281,11 @@ module PortPackager
           pkg_entry["ci_run"] = opts[:ci_run] if opts[:ci_run]
           pkg_entry["repo_commit"] = repo_commit if repo_commit
           packages_index[name] = pkg_entry
-          $stdout.puts("FILC_PORT #{name} packaged policy=#{meta['policy_class']} stage=package")
+          $stdout.puts(
+            "FILC_PORT #{name} packaged policy=#{meta['policy_class']} stage=package " \
+            "size_bytes=#{bin_size} hardlinks=#{dedup_stats[:hardlinks]} " \
+            "dedup_saved=#{dedup_stats[:saved_bytes]} stripped=#{reloc_stats[:stripped_count]}/#{reloc_stats[:unique_elf_count]}"
+          )
         else
           $stdout.puts("FILC_PORT #{name} failed:package policy=#{meta['policy_class']} stage=package")
         end
@@ -1267,6 +1447,35 @@ module PortPackager
         lines << "  [#{pkg_key}] (#{pkg_hits.length} hit(s)):"
         pkg_hits.first(50).each { |h| lines << "    - #{h}" }
         lines << "    ... (#{pkg_hits.length - 50} more hits omitted)" if pkg_hits.length > 50
+      end
+      raise lines.join("\n")
+    end
+
+    unless package_size_records.empty?
+      sorted_sizes = package_size_records.sort_by { |r| [-r[:bin_size], r[:name]] }
+      total_bin_bytes = sorted_sizes.sum { |r| r[:bin_size] }
+      max_bin_bytes = sorted_sizes.first[:bin_size]
+      total_hardlinks = sorted_sizes.sum { |r| r[:hardlinks] }
+      total_saved_bytes = sorted_sizes.sum { |r| r[:saved_bytes] }
+      puts "PACKAGE_SIZES: packages=#{sorted_sizes.length} total_bin=#{format_mib(total_bin_bytes)} " \
+           "max_bin=#{format_mib(max_bin_bytes)} limit=#{format_mib(opts[:max_artifact_bytes])} " \
+           "hardlinks=#{total_hardlinks} dedup_saved=#{format_mib(total_saved_bytes)}"
+      puts "TOP_10_LARGEST_PACKAGES:"
+      sorted_sizes.first(10).each_with_index do |r, idx|
+        puts format(
+          "  %2d. %-16s %s bin=%s src=%s hardlinks=%d saved=%s stripped=%d/%d",
+          idx + 1, r[:name], r[:version], format_mib(r[:bin_size]), format_mib(r[:src_size]),
+          r[:hardlinks], format_mib(r[:saved_bytes]), r[:stripped_count], r[:unique_elf_count]
+        )
+      end
+      $stdout.flush
+    end
+
+    unless all_size_violations.empty?
+      created_archives.each { |p| File.unlink(p) if File.exist?(p) }
+      lines = ["SIZE_LIMIT FAILED across #{all_size_violations.size} package(s) (limit=#{opts[:max_artifact_bytes]} bytes / #{format_mib(opts[:max_artifact_bytes])}):"]
+      all_size_violations.keys.sort.each do |pkg_key|
+        all_size_violations[pkg_key].each { |v| lines << "  [#{pkg_key}] #{v}" }
       end
       raise lines.join("\n")
     end

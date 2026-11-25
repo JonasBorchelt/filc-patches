@@ -14,6 +14,7 @@ require "uri"
 
 module PortsUploader
   DEFAULT_PUBKEY = File.expand_path("../ports/ports-pubkey.pub", __dir__)
+  MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
   SHA256_RE = /\A[0-9a-f]{64}\z/
   CHANNEL_RE = /\A\d+\.\d+\.\d+(?:-[a-z0-9.]+)?\z/
   ARCH_RE = /\A(?:x86_64|aarch64)-linux\z/
@@ -63,7 +64,7 @@ module PortsUploader
     raise "refusing upload: minisign binary not found in PATH for signature verification"
   end
 
-  def verify_channel_before_upload!(channel_dir, channel, arch, pubkey_path: nil, verify_sig: true)
+  def verify_channel_before_upload!(channel_dir, channel, arch, pubkey_path: nil, verify_sig: true, max_artifact_bytes: MAX_ARTIFACT_BYTES)
     index_path = File.join(channel_dir, "index.json")
     index_sig_path = File.join(channel_dir, "index.json.minisig")
     sums_path = File.join(channel_dir, "SHA256SUMS")
@@ -110,7 +111,15 @@ module PortsUploader
         actual = file_sha256(full)
         raise "SHA-256 mismatch for #{rel} (index=#{art['sha256']}, disk=#{actual})" unless actual == art["sha256"]
 
-        item = { rel: rel, full: full, sha256: actual, size: File.size(full), bucket: bucket }
+        size = File.size(full)
+        if size > max_artifact_bytes
+          raise format(
+            "SIZE_LIMIT FAILED: refusing upload of %s (%d bytes / %.2f MiB exceeds %d bytes / %.2f MiB limit)",
+            rel, size, size.to_f / (1024 * 1024), max_artifact_bytes, max_artifact_bytes.to_f / (1024 * 1024)
+          )
+        end
+
+        item = { rel: rel, full: full, sha256: actual, size: size, bucket: bucket }
         pkg_items << item
         next if seen[rel]
 
@@ -198,7 +207,8 @@ module PortsUploader
       pubkey_path: default_pub.empty? ? nil : default_pub,
       verify_sig: true,
       dry_run: false,
-      parallel: 4
+      parallel: 4,
+      max_artifact_bytes: MAX_ARTIFACT_BYTES
     }
 
     parser = OptionParser.new do |o|
@@ -209,6 +219,11 @@ module PortsUploader
       o.on("--base-url URL", "filc-live base URL") { |v| opts[:base_url] = v }
       o.on("--token-env VAR", "Env var containing upload token (default: FILC_PORTS_UPLOAD_TOKEN)") { |v| opts[:token_env] = v }
       o.on("--pubkey PATH", "Minisign public key file to verify channel signatures (default: ports/ports-pubkey.pub)") { |v| opts[:pubkey_path] = File.expand_path(v) }
+      o.on("--max-artifact-bytes N", Integer, "Maximum allowed artifact size in bytes (default: 536870912 / 512 MiB)") do |v|
+        raise OptionParser::InvalidArgument, "--max-artifact-bytes must be >= 1" if v < 1
+
+        opts[:max_artifact_bytes] = v
+      end
       o.on("--allow-unsigned-test", "Skip cryptographic minisign verification (unit tests only)") { opts[:verify_sig] = false }
       o.on("--dry-run", "Verify locally without uploading") { opts[:dry_run] = true }
       o.on("-j", "--parallel N", Integer, "Concurrent package upload workers (1..8, default: 4)") { |v| opts[:parallel] = v.clamp(1, 8) }
@@ -221,7 +236,8 @@ module PortsUploader
 
     verified = verify_channel_before_upload!(
       opts[:channel_dir], opts[:channel], opts[:arch],
-      pubkey_path: opts[:pubkey_path], verify_sig: opts[:verify_sig]
+      pubkey_path: opts[:pubkey_path], verify_sig: opts[:verify_sig],
+      max_artifact_bytes: opts[:max_artifact_bytes]
     )
     if opts[:dry_run]
       puts "UPLOAD_PORTS: DRY_RUN OK channel=#{opts[:channel]} arch=#{opts[:arch]} packages=#{verified[:package_count]}"

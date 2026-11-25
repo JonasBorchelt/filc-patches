@@ -10,7 +10,7 @@ DEPS="zlib curl expat openssl pcre2 pkgconf"
 BUILD_SYSTEM="autotools"
 CONFIGURE_ARGS="--with-libpcre2"
 MAKE_ARGS="NO_RUST=1 NO_GETTEXT=1 NO_TCLTK=1"
-INSTALL_ARGS="NO_RUST=1 NO_GETTEXT=1 NO_TCLTK=1"
+INSTALL_ARGS="NO_RUST=1 NO_GETTEXT=1 NO_TCLTK=1 INSTALL_SYMLINKS=YesPlease"
 TEST_CMD=""
 POLICY_CLASS="P2-Package"
 POLICY_RATIONALE="Pinned to 2.56.0 to match the Fil-C git.projeny 23-file parse-options defval patch base. Audited down from 24 files (+74/-96) to 23 source files by passing NO_RUST=1 via MAKE_ARGS instead of patching config.mak. Preserves pointer capabilities in parse-options defval (void* instead of intptr_t) and uses single-object-per-chunk allocation in compat/obstack."
@@ -36,10 +36,11 @@ port_build() {
 }
 
 port_install() {
-  make -j"$JOBS" NO_RUST=1 NO_GETTEXT=1 NO_TCLTK=1 install
+  make -j"$JOBS" NO_RUST=1 NO_GETTEXT=1 NO_TCLTK=1 INSTALL_SYMLINKS=YesPlease install
 }
 
 port_test() {
+  test -L "$PIZFIX/libexec/git-core/git-status"
   local out ver
   out="$("$PIZFIX/bin/git" --version)"
   ver="${out%%$'\n'*}"

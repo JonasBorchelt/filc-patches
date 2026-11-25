@@ -985,6 +985,260 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
   pb_ch_dir = File.join(out_pb, "0.1.4", "x86_64-linux")
   assert(File.file?(File.join(pb_ch_dir, "index.json.minisig")) && File.file?(File.join(pb_ch_dir, "SHA256SUMS.minisig")),
          "missing .minisig outputs after --sign-only")
+
+  # 12. Generic hardlink preservation & identical-file deduplication:
+  #     A package with 50 hardlinks (plus 5 independent copies) of a 1 MiB incompressible
+  #     ELF binary must stay small (~2 MiB across two RPATH depths, not ~55 MiB), run
+  #     strip once per unique (inode, rpath), preserve hardlinks in tar, and print Top 10 sizes.
+  hl_repo = File.join(td, "hl-repo")
+  hl_work = File.join(td, "hl-work")
+  hl_pizfix = File.join(td, "hl-pizfix")
+  hl_cache = File.join(hl_work, "ports-cache")
+  hl_state = File.join(hl_work, "ports-state")
+  hl_out = File.join(td, "hl-out")
+  hl_tools = File.join(td, "hl-tools")
+  strip_log = File.join(td, "strip-calls.log")
+  FileUtils.mkdir_p([
+    File.join(hl_repo, "ports", "biggit"),
+    File.join(hl_pizfix, "bin"),
+    File.join(hl_pizfix, "libexec", "git-core"),
+    hl_cache,
+    hl_state,
+    hl_out,
+    hl_tools
+  ])
+  FileUtils.cp(File.join(repo, "UPSTREAM"), File.join(hl_repo, "UPSTREAM"))
+  setup_fake_patchelf(hl_tools)
+  # Replace no-op strip with one that logs invocations and strips a trailing debug marker
+  File.write(File.join(hl_tools, "strip"), <<~SH)
+    #!/usr/bin/env ruby
+    log_path = ENV["TEST_STRIP_LOG"]
+    path = ARGV.last
+    File.open(log_path, "a") { |f| f.puts(path) } if log_path && !log_path.empty?
+    raw = File.binread(path)
+    trimmed = raw.delete_suffix("DEBUG_TAIL_MARKER".b)
+    # Rewrite via temp file + rename just like GNU strip (which breaks hardlinks if unhandled)
+    tmp = path + ".strip.tmp"
+    File.binwrite(tmp, trimmed)
+    File.chmod(File.stat(path).mode & 0o777, tmp)
+    File.rename(tmp, path)
+  SH
+  File.chmod(0o755, File.join(hl_tools, "strip"))
+
+  hl_src_tmp = File.join(td, "biggit-2.56.0.tar.gz")
+  hl_src_sha = make_tar_gz(hl_src_tmp, { "biggit-2.56.0/README" => "biggit upstream\n" })
+  FileUtils.cp(hl_src_tmp, File.join(hl_cache, "biggit-2.56.0-#{hl_src_sha[0, 12]}-biggit-2.56.0.tar.gz"))
+  File.write(File.join(hl_repo, "ports", "biggit", "PORT"), <<~PORT)
+    NAME=biggit
+    VERSION=2.56.0
+    LICENSE=GPL-2.0-only
+    UPSTREAM_URL=https://example.invalid/biggit-2.56.0.tar.gz
+    UPSTREAM_SHA256=#{hl_src_sha}
+    EXTRACT_DIR=biggit-2.56.0
+    TIER=5
+    DEPS=""
+    BUILD_SYSTEM=autotools
+    POLICY_CLASS=P2-Package
+  PORT
+
+  # Deterministic 1 MiB incompressible pseudo-random payload (LCG byte stream)
+  rng = Random.new(42)
+  big_payload = "\x7fELF\x02\x01\x01\x00RPATH=/opt/filc/0.1.4/pizfix/lib\x00".b +
+                rng.bytes(1_048_576) + "DEBUG_TAIL_MARKER".b
+  git_bin = File.join(hl_pizfix, "bin", "git")
+  File.binwrite(git_bin, big_payload)
+  File.chmod(0o755, git_bin)
+
+  hl_manifest_files = ["bin/git"]
+  # 50 hardlinks in libexec/git-core pointing to the same 1 MiB ELF
+  (1..50).each do |i|
+    rel = format("libexec/git-core/git-cmd-%02d", i)
+    dst = File.join(hl_pizfix, rel)
+    File.link(git_bin, dst)
+    hl_manifest_files << rel
+  end
+  # Plus 5 separate byte-identical copies (simulating cp without hardlinks)
+  (51..55).each do |i|
+    rel = format("libexec/git-core/git-cmd-%02d", i)
+    dst = File.join(hl_pizfix, rel)
+    File.binwrite(dst, big_payload)
+    File.chmod(0o755, dst)
+    hl_manifest_files << rel
+  end
+  # Plus symlinks: one relative (INSTALL_SYMLINKS=YesPlease style) and one absolute inside pizfix
+  File.symlink("../../bin/git", File.join(hl_pizfix, "libexec", "git-core", "git-rel-sym"))
+  File.symlink(File.join(hl_pizfix, "bin", "git"), File.join(hl_pizfix, "libexec", "git-core", "git-abs-sym"))
+  hl_manifest_files << "libexec/git-core/git-rel-sym"
+  hl_manifest_files << "libexec/git-core/git-abs-sym"
+
+  File.write(File.join(hl_state, "biggit.manifest.json"), JSON.pretty_generate(
+    "port" => "biggit",
+    "files" => hl_manifest_files
+  ) + "\n")
+
+  hl_env = BASE_ENV.merge(
+    "PATH" => "#{hl_tools}:#{ENV['PATH']}",
+    "TEST_STRIP_LOG" => strip_log
+  )
+  hl_out_s, hl_err_s, hl_st = Open3.capture3(
+    hl_env,
+    "ruby", PACKAGE_SCRIPT,
+    "--repo-root", hl_repo,
+    "--work-dir", hl_work,
+    "--pizfix", hl_pizfix,
+    "--neutral-prefix", hl_pizfix,
+    "--ports-cache-dir", hl_cache,
+    "--out-dir", hl_out,
+    "--channel", "0.1.4",
+    "--arch", "x86_64-linux"
+  )
+  assert(hl_st.success?, "hardlink dedup package-port failed: #{hl_out_s}\n#{hl_err_s}")
+
+  biggit_tar = File.join(hl_out, "0.1.4", "x86_64-linux", "bin", "biggit-2.56.0-r1-x86_64-linux.tar.xz")
+  assert(File.file?(biggit_tar), "missing biggit binary archive")
+  # 56 copies of 1 MiB incompressible bytes would be ~56 MiB without dedup;
+  # with hardlink dedup across 2 RPATH depths (bin/ + libexec/git-core/), archive must be < 3 MiB.
+  assert(File.size(biggit_tar) < 3 * 1024 * 1024,
+         "hardlink dedup archive too large: #{File.size(biggit_tar)} bytes (expected < 3 MiB)")
+  assert(hl_out_s.include?("PACKAGE_SIZES:") && hl_out_s.include?("TOP_10_LARGEST_PACKAGES:"),
+         "missing PACKAGE_SIZES / TOP_10_LARGEST_PACKAGES summary: #{hl_out_s}")
+  assert(hl_out_s.include?("biggit") && hl_out_s.include?("hardlinks=54"),
+         "expected biggit with 54 hardlinks (49 reused + 5 deduped) in summary: #{hl_out_s}")
+
+  strip_calls = File.readlines(strip_log, chomp: true)
+  # 1 (bin/git) + 1 (libexec/git-core/git-cmd-01 reused for 02..50) + 5 (separate copies 51..55) = 7 strip calls, NOT 56
+  assert(strip_calls.length == 7,
+         "expected 7 strip invocations (reusing hardlinked ELFs), got #{strip_calls.length}: #{strip_calls.inspect}")
+
+  hl_ext = File.join(td, "hl-ext")
+  FileUtils.mkdir_p(hl_ext)
+  _hto, hterr, htst = Open3.capture3("tar", "-xf", biggit_tar, "-C", hl_ext)
+  assert(htst.success?, "tar extract biggit failed: #{hterr}")
+  ext_bin_git = File.join(hl_ext, "prefix", "bin", "git")
+  ext_cmd01 = File.join(hl_ext, "prefix", "libexec", "git-core", "git-cmd-01")
+  ext_cmd50 = File.join(hl_ext, "prefix", "libexec", "git-core", "git-cmd-50")
+  ext_cmd55 = File.join(hl_ext, "prefix", "libexec", "git-core", "git-cmd-55")
+  assert(File.binread(ext_bin_git, 128).include?("RPATH=$ORIGIN/../lib".b), "bin/git RPATH wrong")
+  assert(File.binread(ext_cmd01, 128).include?("RPATH=$ORIGIN/../../lib".b), "libexec/git-core/git-cmd-01 RPATH wrong")
+  assert(!File.binread(ext_cmd01).end_with?("DEBUG_TAIL_MARKER".b), "strip did not run on git-cmd-01")
+  assert(File.stat(ext_cmd01).ino == File.stat(ext_cmd50).ino, "hardlinks 01..50 must share inode after tar extract")
+  assert(File.stat(ext_cmd01).ino == File.stat(ext_cmd55).ino, "deduplicated copies 51..55 must share inode after tar extract")
+  assert(File.stat(ext_bin_git).ino != File.stat(ext_cmd01).ino, "different-RPATH binaries must not share inode")
+  # Verify both relative and nested absolute symlinks resolve to ../../bin/git
+  assert(File.readlink(File.join(hl_ext, "prefix", "libexec", "git-core", "git-rel-sym")) == "../../bin/git",
+         "relative symlink must stay ../../bin/git")
+  assert(File.readlink(File.join(hl_ext, "prefix", "libexec", "git-core", "git-abs-sym")) == "../../bin/git",
+         "nested absolute symlink inside pizfix must be rewritten to ../../bin/git")
+
+  # 13. Mandatory pre-upload size limit gate in package-port AND upload-ports
+  hl_out_lim = File.join(td, "hl-out-limit")
+  lim_out, lim_err, lim_st = Open3.capture3(
+    hl_env,
+    "ruby", PACKAGE_SCRIPT,
+    "--repo-root", hl_repo,
+    "--work-dir", hl_work,
+    "--pizfix", hl_pizfix,
+    "--neutral-prefix", hl_pizfix,
+    "--ports-cache-dir", hl_cache,
+    "--out-dir", hl_out_lim,
+    "--max-artifact-bytes", "500000",
+    "--channel", "0.1.4",
+    "--arch", "x86_64-linux"
+  )
+  assert(!lim_st.success?, "package-port must abort when an artifact exceeds --max-artifact-bytes")
+  assert(lim_err.include?("SIZE_LIMIT FAILED"), "expected SIZE_LIMIT FAILED error, got: #{lim_err}")
+  assert(lim_out.include?("TOP_10_LARGEST_PACKAGES:"), "size limit failure must still report TOP_10_LARGEST_PACKAGES")
+  assert(!File.exist?(File.join(hl_out_lim, "0.1.4", "x86_64-linux", "index.json")),
+         "index.json must not be written when SIZE_LIMIT fails")
+
+  hl_ch_dir = File.join(hl_out, "0.1.4", "x86_64-linux")
+  File.write(File.join(hl_ch_dir, "index.json.minisig"), "untrusted comment: test\nAA==\ntrusted comment: t\nAA==\n")
+  File.write(File.join(hl_ch_dir, "SHA256SUMS.minisig"), "untrusted comment: test\nAA==\ntrusted comment: t\nAA==\n")
+  _ulim_o, ulim_e, ulim_st = Open3.capture3(
+    "ruby", UPLOAD_SCRIPT,
+    "--channel-dir", hl_ch_dir,
+    "--channel", "0.1.4",
+    "--arch", "x86_64-linux",
+    "--allow-unsigned-test",
+    "--max-artifact-bytes", "500000",
+    "--dry-run"
+  )
+  assert(!ulim_st.success?, "upload-ports must reject oversized artifact before upload")
+  assert(ulim_e.include?("SIZE_LIMIT FAILED"), "expected SIZE_LIMIT FAILED from upload-ports, got: #{ulim_e}")
+
+  # 14. Idempotent upload replacement: unchanged artifacts (matching HEAD X-Content-SHA256)
+  #     are skipped while a changed package with a new SHA-256 replaces the old invisible file via PUT.
+  hl_idx = JSON.parse(File.read(File.join(hl_ch_dir, "index.json")))
+  src_art = hl_idx.dig("packages", "biggit", "source")
+  bin_art = hl_idx.dig("packages", "biggit", "binary")
+  old_bin_sha = "0" * 64
+  stored_hashes = {
+    "/api/ports-artifacts/0.1.4/x86_64-linux/#{src_art['path']}" => src_art["sha256"],
+    "/api/ports-artifacts/0.1.4/x86_64-linux/#{bin_art['path']}" => old_bin_sha
+  }
+  repl_puts = []
+  repl_srv = TCPServer.new("127.0.0.1", 0)
+  repl_port = repl_srv.addr[1]
+  repl_thr = Thread.new do
+    loop do
+      sock = begin
+        repl_srv.accept
+      rescue IOError
+        break
+      end
+      req_head = +""
+      while (line = sock.gets)
+        req_head << line
+        break if line == "\r\n"
+      end
+      first = req_head.lines.first.to_s.strip
+      method, path, = first.split(" ", 3)
+      cl = req_head[/^Content-Length:\s*(\d+)/i, 1].to_i
+      x_sha = req_head[/^X-Content-SHA256:\s*([0-9a-f]{64})/i, 1]
+      body = cl > 0 ? sock.read(cl) : ""
+
+      if method == "HEAD"
+        if stored_hashes.key?(path)
+          sock.write("HTTP/1.1 200 OK\r\nX-Content-SHA256: #{stored_hashes[path]}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        else
+          sock.write("HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+        end
+      elsif method == "PUT"
+        existed = stored_hashes.key?(path)
+        stored_hashes[path] = Digest::SHA256.hexdigest(body)
+        repl_puts << [path, x_sha, existed]
+        status_line = existed ? "HTTP/1.1 200 OK" : "HTTP/1.1 201 Created"
+        resp = JSON.generate("ok" => true, "created" => !existed, "sha256" => stored_hashes[path])
+        sock.write("#{status_line}\r\nContent-Type: application/json\r\nContent-Length: #{resp.bytesize}\r\nConnection: close\r\n\r\n#{resp}")
+      elsif method == "POST"
+        resp = JSON.generate("ok" => true, "packages" => 1)
+        sock.write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: #{resp.bytesize}\r\nConnection: close\r\n\r\n#{resp}")
+      end
+      sock.close
+    end
+  end
+
+  begin
+    ruo, rue, rust = Open3.capture3(
+      { "FILC_PORTS_UPLOAD_TOKEN" => "ci-upload-secret" },
+      "ruby", UPLOAD_SCRIPT,
+      "--channel-dir", hl_ch_dir,
+      "--channel", "0.1.4",
+      "--arch", "x86_64-linux",
+      "--allow-unsigned-test",
+      "--base-url", "http://127.0.0.1:#{repl_port}"
+    )
+    assert(rust.success?, "idempotent replacement upload failed: #{ruo}\n#{rue}")
+    assert(ruo.include?("uploaded=2 skipped=1"), "expected 2 uploaded (recipe + replaced bin) and 1 skipped (unchanged src), got: #{ruo}")
+    bin_put = repl_puts.find { |p, _, _| p.end_with?(bin_art["path"]) }
+    assert(bin_put && bin_put[1] == bin_art["sha256"] && bin_put[2] == true,
+           "changed bin package must replace old invisible file via PUT: #{repl_puts.inspect}")
+    assert(stored_hashes["/api/ports-artifacts/0.1.4/x86_64-linux/#{bin_art['path']}"] == bin_art["sha256"],
+           "server must hold new bin SHA-256 after replacement")
+  ensure
+    repl_srv.close
+    repl_thr.join(2)
+  end
 end
 
-puts "TEST_PACKAGE_PORT: PASS (11/11)"
+puts "TEST_PACKAGE_PORT: PASS (14/14)"

@@ -753,6 +753,8 @@ module PublishPortsStream
     end
   end
 
+  FAILURE_ANCHOR_RE = /(?:STAGE_CMD_FAILED|SMOKE_CMD_FAILED|PACKAGE_SMOKE FAILED|LEAK_GATE FAILED|SIZE_LIMIT FAILED|filc safety error|LoadError|make(?:\[\d+\])?: \*\*\*|error:|ERROR:|FATAL:)/
+
   def read_log_tail(log_file, max_lines: 80, redact_tokens: [])
     return [] unless log_file && File.file?(log_file)
 
@@ -760,7 +762,28 @@ module PublishPortsStream
                 .force_encoding("UTF-8")
                 .encode("UTF-8", invalid: :replace, undef: :replace)
                 .lines
-    lines.last(max_lines).map { |ln| sanitize_log_line(ln, redact_tokens) }
+    total = lines.length
+    return lines.map { |ln| sanitize_log_line(ln, redact_tokens) } if total <= max_lines
+
+    anchor = lines.rindex { |ln| FAILURE_ANCHOR_RE.match?(ln) }
+    tail_start = total - max_lines
+    if anchor.nil? || anchor >= tail_start
+      selected = lines[tail_start..]
+    else
+      win_end = [anchor + 10, total - 1].min
+      win_start = [win_end - 49, 0].max
+      end_keep = 25
+      end_start = total - end_keep
+      if win_end + 1 >= end_start
+        selected = lines[win_start..]
+      else
+        omitted = end_start - (win_end + 1)
+        selected = lines[win_start..win_end] +
+                   ["--- ... (#{omitted} lines omitted between last failure marker and EOF) ... ---"] +
+                   lines[end_start..]
+      end
+    end
+    selected.map { |ln| sanitize_log_line(ln, redact_tokens) }
   rescue StandardError
     []
   end

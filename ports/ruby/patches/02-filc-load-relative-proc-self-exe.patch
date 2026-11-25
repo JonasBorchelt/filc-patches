@@ -1,0 +1,17 @@
+--- a/ruby.c
++++ b/ruby.c
+@@ -653,7 +653,14 @@ runtime_libruby_path(void)
+     const void* addr = (void *)(VALUE)expand_include_path;
+ 
+     if (!dladdr((void *)addr, &dli)) {
++#ifdef __linux__
++        fname = rb_str_new_cstr("/proc/self/exe");
++        path = rb_readlink(fname, NULL);
++        rb_str_resize(fname, 0);
++        return path;
++#else
+         return rb_str_new(0, 0);
++#endif
+     }
+ #ifdef __linux__
+     else if (origarg.argc > 0 && origarg.argv && dli.dli_fname == origarg.argv[0]) {

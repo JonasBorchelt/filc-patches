@@ -639,5 +639,23 @@ Dir.mktmpdir("filc-stream-test-") do |tmp|
   assert(cp_merged["libc"] == 270.0, "expected conservative 3x median (270.0) for unmeasured libc, got #{cp_merged['libc']}")
   puts "TIMINGS_BOOTSTRAP_MERGE_AND_FALLBACK: PASS (mid1=900.0 inherited, unmeasured libc=270.0)"
 
+  puts "=== [8/8] Failure-anchored log tail when failure marker precedes long trailing output ==="
+  anchored_log = File.join(tmp, "anchored-fail.log")
+  log_lines = (1..40).map { |i| "build step #{i}" }
+  log_lines << "STAGE_CMD_FAILED port=ruby stage=test fn=port_test line=56 rc=1 cmd=ruby"
+  log_lines << "LoadError: cannot load such file -- digest"
+  log_lines.concat((1..120).map { |i| "trailing cleanup line #{i}" })
+  File.write(anchored_log, log_lines.join("\n") + "\n", encoding: "UTF-8")
+  anchored_tail = PublishPortsStream.read_log_tail(anchored_log, max_lines: 80)
+  assert(anchored_tail.any? { |l| l.include?("STAGE_CMD_FAILED port=ruby") },
+         "expected anchored tail to include earlier STAGE_CMD_FAILED:\n#{anchored_tail.join("\n")}")
+  assert(anchored_tail.any? { |l| l.include?("LoadError: cannot load such file -- digest") },
+         "expected anchored tail to include LoadError right after anchor:\n#{anchored_tail.join("\n")}")
+  assert(anchored_tail.any? { |l| l.include?("lines omitted between last failure marker and EOF") },
+         "expected omission marker between anchor window and EOF:\n#{anchored_tail.join("\n")}")
+  assert(anchored_tail.any? { |l| l.include?("trailing cleanup line 120") },
+         "expected EOF trailing line to still be included:\n#{anchored_tail.join("\n")}")
+  puts "FAILURE_ANCHORED_LOG_TAIL: PASS (anchor window + omission banner + EOF tail)"
+
   puts "ALL PUBLISH-PORTS-STREAM TESTS PASSED"
 end

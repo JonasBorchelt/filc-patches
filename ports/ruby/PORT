@@ -43,8 +43,10 @@ port_configure() {
 }
 
 port_install() {
-  # Ruby's RDoc installation requires a valid writable HOME directory
-  HOME="${HOME:-/tmp}" make -j"$JOBS" install
+  # Ruby's RDoc installation requires a valid writable HOME directory; clear
+  # Ruby/Gem env vars so rbinstall never inherits host container gem settings.
+  env -u RUBYOPT -u RUBYLIB -u GEM_HOME -u GEM_PATH \
+    HOME="${HOME:-/tmp}" make -j"$JOBS" install
 }
 
 port_test() {
@@ -54,6 +56,8 @@ port_test() {
   echo "ruby version: $ver"
   printf '%s\n' "$ver" | grep -q '^ruby 3\.3\.14 '
   "$PIZFIX/bin/ruby" - <<'EOF' | grep -Fxq 'RUBY_FILC_OK'
+require "rbconfig"
+require "rubygems"
 require "digest"
 require "fiddle"
 require "json"
@@ -62,6 +66,10 @@ require "ripper"
 require "yaml"
 require "zlib"
 
+prefix = File.realpath(ENV.fetch("PIZFIX"))
+topdir = File.exist?(RbConfig::TOPDIR) ? File.realpath(RbConfig::TOPDIR) : RbConfig::TOPDIR
+raise "topdir mismatch: #{RbConfig::TOPDIR.inspect} != #{prefix.inspect}" unless topdir == prefix
+raise "gem dir escaped prefix: #{Gem.default_dir.inspect} (expected under #{prefix.inspect})" unless Gem.default_dir.start_with?("#{prefix}/")
 raise "digest" unless Digest::SHA256.hexdigest("hello\n") == "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
 raise "zlib" unless Zlib::Inflate.inflate(Zlib::Deflate.deflate("filc-ruby")) == "filc-ruby"
 raise "json" unless JSON.parse(JSON.generate({"a" => [1, 2, 3]}))["a"] == [1, 2, 3]
@@ -81,12 +89,13 @@ EOF
 
 port_package_smoke() {
   local out ver
-  out="$(env -u RUBYLIB -u GEM_PATH -u GEM_HOME "$PKG_PREFIX/bin/ruby" --version)"
+  out="$(env -u RUBYLIB -u RUBYOPT -u GEM_PATH -u GEM_HOME "$PKG_PREFIX/bin/ruby" --version)"
   ver="${out%%$'\n'*}"
   printf '%s\n' "$ver" | grep -q '^ruby 3\.3\.14 '
-  # Verify --enable-load-relative resolves RbConfig::TOPDIR and stdlib relative to PKG_PREFIX
-  env -u RUBYLIB -u GEM_PATH -u GEM_HOME "$PKG_PREFIX/bin/ruby" - <<'EOF' | grep -Fxq 'RUBY_PKG_SMOKE_OK'
+  # Verify --enable-load-relative resolves RbConfig::TOPDIR, Gem.default_dir, and stdlib relative to PKG_PREFIX
+  env -u RUBYLIB -u RUBYOPT -u GEM_PATH -u GEM_HOME "$PKG_PREFIX/bin/ruby" - <<'EOF' | grep -Fxq 'RUBY_PKG_SMOKE_OK'
 require "rbconfig"
+require "rubygems"
 require "digest"
 require "json"
 require "openssl"
@@ -96,6 +105,7 @@ require "zlib"
 prefix = File.realpath(ENV.fetch("PKG_PREFIX"))
 topdir = File.exist?(RbConfig::TOPDIR) ? File.realpath(RbConfig::TOPDIR) : RbConfig::TOPDIR
 raise "topdir mismatch: #{RbConfig::TOPDIR.inspect} (resolved=#{topdir.inspect}) != #{prefix.inspect}" unless topdir == prefix
+raise "gem dir escaped prefix: #{Gem.default_dir.inspect} (expected under #{prefix.inspect})" unless Gem.default_dir.start_with?("#{prefix}/")
 raise "json" unless JSON.parse(JSON.generate({"k" => 42}))["k"] == 42
 raise "openssl" unless OpenSSL::Digest::SHA256.hexdigest("hello\n") == "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
 raise "zlib" unless Zlib::Inflate.inflate(Zlib::Deflate.deflate("reloc")) == "reloc"

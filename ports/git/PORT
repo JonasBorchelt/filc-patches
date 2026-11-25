@@ -9,8 +9,8 @@ TIER=5
 DEPS="zlib curl expat openssl pcre2 pkgconf"
 BUILD_SYSTEM="autotools"
 CONFIGURE_ARGS="--with-libpcre2"
-MAKE_ARGS="NO_RUST=1 NO_GETTEXT=1 NO_TCLTK=1 RUNTIME_PREFIX=YesPlease"
-INSTALL_ARGS="NO_RUST=1 NO_GETTEXT=1 NO_TCLTK=1 RUNTIME_PREFIX=YesPlease INSTALL_SYMLINKS=YesPlease"
+MAKE_ARGS="NO_RUST=1 NO_GETTEXT=1 NO_TCLTK=1 RUNTIME_PREFIX=YesPlease PROCFS_EXECUTABLE_PATH=/proc/self/exe bindir_relative=bin gitexecdir=libexec/git-core template_dir=share/git-core/templates"
+INSTALL_ARGS="NO_RUST=1 NO_GETTEXT=1 NO_TCLTK=1 RUNTIME_PREFIX=YesPlease PROCFS_EXECUTABLE_PATH=/proc/self/exe bindir_relative=bin gitexecdir=libexec/git-core template_dir=share/git-core/templates INSTALL_SYMLINKS=YesPlease"
 TEST_CMD=""
 POLICY_CLASS="P2-Package"
 POLICY_RATIONALE="Pinned to 2.56.0 to match the Fil-C git.projeny 23-file parse-options defval patch base. Audited down from 24 files (+74/-96) to 23 source files by passing NO_RUST=1 via MAKE_ARGS instead of patching config.mak. Preserves pointer capabilities in parse-options defval (void* instead of intptr_t) and uses single-object-per-chunk allocation in compat/obstack."
@@ -32,11 +32,27 @@ port_configure() {
 }
 
 port_build() {
-  make -j"$JOBS" NO_RUST=1 NO_GETTEXT=1 NO_TCLTK=1 RUNTIME_PREFIX=YesPlease
+  # Override config.mak.autogen's absolute gitexecdir/template_dir so
+  # RUNTIME_PREFIX resolves them relative to /proc/self/exe instead of
+  # hitting exec-cmd.c's is_absolute_path() bypass.
+  make -j"$JOBS" \
+    NO_RUST=1 NO_GETTEXT=1 NO_TCLTK=1 \
+    RUNTIME_PREFIX=YesPlease \
+    PROCFS_EXECUTABLE_PATH=/proc/self/exe \
+    bindir_relative=bin \
+    gitexecdir=libexec/git-core \
+    template_dir=share/git-core/templates
 }
 
 port_install() {
-  make -j"$JOBS" NO_RUST=1 NO_GETTEXT=1 NO_TCLTK=1 RUNTIME_PREFIX=YesPlease INSTALL_SYMLINKS=YesPlease install
+  make -j"$JOBS" \
+    NO_RUST=1 NO_GETTEXT=1 NO_TCLTK=1 \
+    RUNTIME_PREFIX=YesPlease \
+    PROCFS_EXECUTABLE_PATH=/proc/self/exe \
+    bindir_relative=bin \
+    gitexecdir=libexec/git-core \
+    template_dir=share/git-core/templates \
+    INSTALL_SYMLINKS=YesPlease install
 }
 
 port_test() {

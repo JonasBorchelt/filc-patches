@@ -39,13 +39,13 @@ module PortPackager
   WP_SEG = %w[wood pecker].join.freeze
 
   # Built-in hard-block patterns (NEVER exempted by upstream provenance).
+  # Host-specific CI paths and internal IPs are supplied at runtime via
+  # FILC_LEAK_EXACT_TOKENS rather than hardcoded in source.
   HARD_FORBIDDEN_RE = [
     ["infra_word", Regexp.new("(?<![A-Za-z0-9_-])(?:#{INFRA_WORDS.join('|')})(?![A-Za-z0-9_-])", Regexp::IGNORECASE)],
     ["ccache_path", %r{(?<![A-Za-z0-9_.-])/ccache(?:/|(?![A-Za-z0-9_.-]))}],
     ["wp_path", Regexp.new("(?<![A-Za-z0-9_.-])/#{WP_SEG}(?:/|(?![A-Za-z0-9_.-]))")],
-    ["work_path", %r{(?<![A-Za-z0-9_.-])/\.work(?:/|(?![A-Za-z0-9_.-]))}],
-    ["srv_ci_path", Regexp.new("(?<![A-Za-z0-9_.-])/#{SRV_SEG}/example-ci(?![A-Za-z0-9_.-])")],
-    ["mnt_ci_path", %r{(?<![A-Za-z0-9_.-])/mnt/example-ci-artifacts(?![A-Za-z0-9_.-])}]
+    ["work_path", %r{(?<![A-Za-z0-9_.-])/\.work(?:/|(?![A-Za-z0-9_.-]))}]
   ].freeze
 
   # Generic patterns that are ONLY allowed when the exact matched token is proven

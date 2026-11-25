@@ -26,3 +26,7 @@ port_install() {
 port_test() {
   make CC="$CC" test
 }
+
+port_package_smoke() {
+  printf 'filc-bz2-pkg-smoke\n' | "$PKG_PREFIX/bin/bzip2" -c | "$PKG_PREFIX/bin/bunzip2" -c | grep -qx 'filc-bz2-pkg-smoke'
+}

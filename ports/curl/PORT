@@ -79,3 +79,14 @@ finally:
 PY
   rm -rf "$td"
 }
+
+port_package_smoke() {
+  local ver td
+  ver="$("$PKG_PREFIX/bin/curl" --version)"
+  printf '%s\n' "$ver" | grep -q 'OpenSSL/3\.6\.5'
+  printf '%s\n' "$ver" | grep -q 'HTTP2'
+  td="$(mktemp -d)"
+  printf 'filc-curl-pkg-ok\n' > "$td/hello.txt"
+  "$PKG_PREFIX/bin/curl" -fsS "file://$td/hello.txt" | grep -qx 'filc-curl-pkg-ok'
+  rm -rf "$td"
+}

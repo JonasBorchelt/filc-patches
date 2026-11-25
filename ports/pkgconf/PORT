@@ -25,3 +25,9 @@ port_test() {
   "$PIZFIX/bin/pkgconf" --version
   "$PIZFIX/bin/pkg-config" --version
 }
+
+port_package_smoke() {
+  test -L "$PKG_PREFIX/bin/pkg-config"
+  "$PKG_PREFIX/bin/pkgconf" --version | grep -qx '3\.0\.10'
+  "$PKG_PREFIX/bin/pkg-config" --version | grep -qx '3\.0\.10'
+}

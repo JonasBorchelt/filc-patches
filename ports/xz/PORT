@@ -20,3 +20,8 @@ port_test() {
   "$PIZFIX/bin/xz" --version
   printf 'filc-xz-roundtrip-check\n' | "$PIZFIX/bin/xz" -c | "$PIZFIX/bin/xz" -dc | grep -qx 'filc-xz-roundtrip-check'
 }
+
+port_package_smoke() {
+  test -L "$PKG_PREFIX/bin/unxz"
+  printf 'filc-xz-pkg-smoke\n' | "$PKG_PREFIX/bin/xz" -c | "$PKG_PREFIX/bin/unxz" -c | grep -qx 'filc-xz-pkg-smoke'
+}

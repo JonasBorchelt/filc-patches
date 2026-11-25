@@ -66,3 +66,34 @@ gc.collect()
 print("PYTHON_FILC_OK")
 EOF
 }
+
+port_package_smoke() {
+  test -L "$PKG_PREFIX/bin/python3"
+  local out ver
+  out="$("$PKG_PREFIX/bin/python3" --version)"
+  ver="${out%%$'\n'*}"
+  printf '%s\n' "$ver" | grep -Fxq 'Python 3.12.16'
+  "$PKG_PREFIX/bin/python3" - <<'EOF' | grep -Fxq 'PYTHON_PKG_SMOKE_OK'
+import bz2, ctypes, gc, hashlib, json, lzma, os, re, sqlite3, ssl, sys, xml.etree.ElementTree as ET, zlib
+
+pkg_prefix = os.path.realpath(os.environ["PKG_PREFIX"])
+assert os.path.realpath(sys.executable).startswith(pkg_prefix + "/"), sys.executable
+assert os.path.realpath(zlib.__file__).startswith(pkg_prefix + "/"), zlib.__file__
+assert hashlib.sha256(b"hello\n").hexdigest() == "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
+assert zlib.decompress(zlib.compress(b"filc-zlib")) == b"filc-zlib"
+assert bz2.decompress(bz2.compress(b"filc-bz2")) == b"filc-bz2"
+assert lzma.decompress(lzma.compress(b"filc-xz")) == b"filc-xz"
+assert ET.fromstring("<root><x>42</x></root>").find("x").text == "42"
+assert re.match(r"([a-z]+)-(\d+)", "filc-312").groups() == ("filc", "312")
+assert json.loads(json.dumps({"ok": [1, 2, 3]}))["ok"] == [1, 2, 3]
+conn = sqlite3.connect(":memory:")
+conn.execute("CREATE TABLE t (v INT)")
+conn.execute("INSERT INTO t VALUES (42)")
+assert conn.execute("SELECT v FROM t").fetchone() == (42,)
+conn.close()
+assert hasattr(ssl, "OPENSSL_VERSION")
+assert ctypes.c_int(42).value == 42
+gc.collect()
+print("PYTHON_PKG_SMOKE_OK")
+EOF
+}

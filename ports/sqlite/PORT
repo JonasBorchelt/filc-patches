@@ -25,3 +25,8 @@ port_test() {
   "$PIZFIX/bin/sqlite3" --version
   "$PIZFIX/bin/sqlite3" :memory: "CREATE TABLE t(x INT, s TEXT); INSERT INTO t VALUES (42, 'filc-ok'); SELECT x || ':' || s FROM t;" | grep -qx '42:filc-ok'
 }
+
+port_package_smoke() {
+  "$PKG_PREFIX/bin/sqlite3" --version | grep -q '^3\.54\.1 '
+  "$PKG_PREFIX/bin/sqlite3" :memory: "SELECT 40 + 2;" | grep -qx '42'
+}

@@ -764,6 +764,216 @@ module PortPackager
     end
   end
 
+  def copy_missing_tree!(src_root, dst_root)
+    return unless File.directory?(src_root)
+
+    Dir.glob(File.join(src_root, "**", "*"), File::FNM_DOTMATCH).sort.each do |src|
+      base = File.basename(src)
+      next if base == "." || base == ".."
+
+      rel = src.sub("#{src_root}/", "")
+      dst = File.join(dst_root, rel)
+      if File.directory?(src) && !File.symlink?(src)
+        FileUtils.mkdir_p(dst)
+        next
+      end
+      next if File.exist?(dst) || File.symlink?(dst)
+
+      FileUtils.mkdir_p(File.dirname(dst))
+      if File.symlink?(src)
+        File.symlink(File.readlink(src), dst)
+      elsif File.file?(src)
+        begin
+          File.link(src, dst)
+        rescue SystemCallError
+          FileUtils.cp(src, dst, preserve: false)
+          File.chmod(File.stat(src).mode & 0o777, dst)
+        end
+      end
+    end
+  end
+
+  def copy_runtime_libs!(pizfix, dst_lib_dir)
+    src_lib = File.join(pizfix, "lib")
+    return unless File.directory?(src_lib)
+
+    FileUtils.mkdir_p(dst_lib_dir)
+    Dir.children(src_lib).sort.each do |entry|
+      next unless entry.end_with?(".so") || entry.include?(".so.")
+
+      dst = File.join(dst_lib_dir, entry)
+      next if File.exist?(dst) || File.symlink?(dst)
+
+      src = File.join(src_lib, entry)
+      if File.symlink?(src)
+        target = File.readlink(src)
+        target = target.sub("#{src_lib}/", "") if target.start_with?("#{src_lib}/")
+        File.symlink(target, dst)
+      elsif File.file?(src)
+        FileUtils.cp(src, dst, preserve: false)
+        File.chmod(File.stat(src).mode & 0o777, dst)
+      end
+    end
+  end
+
+  def port_has_package_smoke?(port_file)
+    return false unless File.file?(port_file)
+
+    File.read(port_file, encoding: "UTF-8").match?(/^\s*port_package_smoke\s*\(\s*\)/)
+  end
+
+  def verify_packaged_archive!(name:, meta:, tdeps:, bin_out:, bin_outs:, expected_hardlinks:,
+                               pizfix:, neutral_prefix:, work_dir:, throttle_fn: nil)
+    errors = []
+    symlinks_checked = 0
+    extracted_hardlinks = 0
+    ran_smoke = false
+
+    Dir.mktmpdir("filc-pkg-smoke-#{name}-") do |smoke_dir|
+      alt_prefix = File.join(smoke_dir, "prefix")
+      if alt_prefix == pizfix || alt_prefix == neutral_prefix
+        errors << "smoke prefix collided with build/neutral prefix: #{alt_prefix}"
+        return { errors: errors, symlinks: 0, hardlinks: 0, ran_smoke: false }
+      end
+
+      _to, terr, tst = capture3_cmd(["tar", "-xf", bin_out, "-C", smoke_dir], throttle_fn: throttle_fn)
+      unless tst.success?
+        errors << "tar -xf failed: #{terr.strip}"
+        return { errors: errors, symlinks: 0, hardlinks: 0, ran_smoke: false }
+      end
+
+      pkg_json_path = File.join(smoke_dir, "filc-pkg.json")
+      unless File.file?(pkg_json_path)
+        errors << "missing filc-pkg.json in extracted archive"
+        return { errors: errors, symlinks: 0, hardlinks: 0, ran_smoke: false }
+      end
+
+      pkg_manifest = JSON.parse(File.read(pkg_json_path, encoding: "UTF-8"))
+      if pkg_manifest["name"] != name
+        errors << "filc-pkg.json name mismatch: expected #{name.inspect}, got #{pkg_manifest['name'].inspect}"
+      end
+
+      manifest_files = pkg_manifest["files"].is_a?(Hash) ? pkg_manifest["files"] : {}
+      pkg_symlinks = []
+      seen_reg_inodes = Set.new
+      reg_count = 0
+      checked_elf_inodes = Set.new
+      has_patchelf = cmd_available?("patchelf")
+
+      manifest_files.keys.sort.each do |rel|
+        full = File.join(alt_prefix, rel)
+        info = manifest_files[rel]
+        if info["type"] == "symlink"
+          unless File.symlink?(full)
+            errors << "missing extracted symlink: #{rel}"
+            next
+          end
+          pkg_symlinks << [rel, full, File.readlink(full)]
+        else
+          unless File.file?(full) && !File.symlink?(full)
+            errors << "missing extracted file: #{rel}"
+            next
+          end
+          st = File.stat(full)
+          reg_count += 1
+          ino_key = [st.dev, st.ino]
+          seen_reg_inodes.add(ino_key)
+
+          if has_patchelf && !checked_elf_inodes.include?(ino_key) && elf_file?(full)
+            checked_elf_inodes.add(ino_key)
+            rp_out, _rpe, rp_st = capture3_cmd(["patchelf", "--print-rpath", full], throttle_fn: throttle_fn)
+            if rp_st.success? && !rp_out.strip.empty?
+              rp = rp_out.strip
+              if rp.start_with?("/") || !rp.start_with?("$ORIGIN")
+                errors << "extracted ELF #{rel} has non-relocatable RPATH: #{rp}"
+              end
+            end
+          end
+        end
+      end
+
+      extracted_hardlinks = reg_count - seen_reg_inodes.size
+      if expected_hardlinks > 0 && extracted_hardlinks < expected_hardlinks
+        errors << "hardlinks not preserved after tar extract: expected >=#{expected_hardlinks}, got #{extracted_hardlinks}"
+      end
+
+      # Stage transitive dependency packages (from their packaged .tar.xz archives) without overwriting P's files,
+      # plus missing Fil-C toolchain runtime libraries (*.so*) from pizfix/lib so $ORIGIN RPATH resolves cleanly.
+      missing_dep_archives = false
+      tdeps.sort.each do |dep|
+        dep_tar = bin_outs[dep]
+        if dep_tar && File.file?(dep_tar)
+          Dir.mktmpdir("filc-pkg-dep-") do |dep_dir|
+            _do, derr, dst = capture3_cmd(["tar", "-xf", dep_tar, "-C", dep_dir], throttle_fn: throttle_fn)
+            unless dst.success?
+              errors << "failed to extract dependency #{dep}: #{derr.strip}"
+              next
+            end
+            copy_missing_tree!(File.join(dep_dir, "prefix"), alt_prefix)
+          end
+        else
+          missing_dep_archives = true
+        end
+      end
+      copy_runtime_libs!(pizfix, File.join(alt_prefix, "lib"))
+
+      forbidden_prefixes = [pizfix, neutral_prefix, work_dir].compact.map(&:to_s).reject(&:empty?).uniq
+      pkg_symlinks.each do |rel, full, target|
+        symlinks_checked += 1
+        if target.start_with?("/")
+          bad_pref = forbidden_prefixes.find { |fp| target == fp || target.start_with?("#{fp}/") }
+          if bad_pref
+            errors << "symlink #{rel} still references forbidden prefix #{bad_pref}: #{target}"
+          end
+          next
+        end
+
+        resolved = File.expand_path(target, File.dirname(full))
+        unless resolved == alt_prefix || resolved.start_with?("#{alt_prefix}/")
+          errors << "relative symlink #{rel} -> #{target} escapes package prefix"
+          next
+        end
+        unless File.exist?(resolved) || File.symlink?(resolved)
+          unless missing_dep_archives
+            errors << "broken relative symlink after extract: #{rel} -> #{target}"
+          end
+        end
+      end
+
+      port_file = File.join(meta["port_dir"], "PORT")
+      if errors.empty? && port_has_package_smoke?(port_file)
+        ran_smoke = true
+        smoke_tmp = File.join(smoke_dir, "tmp")
+        FileUtils.mkdir_p(smoke_tmp)
+        smoke_env = {
+          "PKG_PREFIX" => alt_prefix,
+          "PIZFIX" => alt_prefix,
+          "PORT_FILE" => port_file,
+          "FILC_ORIGINAL_PIZFIX" => pizfix,
+          "PATH" => "#{alt_prefix}/bin:/usr/bin:/bin",
+          "LD_LIBRARY_PATH" => nil,
+          "LD_PRELOAD" => nil,
+          "TMPDIR" => smoke_tmp,
+          "HOME" => smoke_tmp
+        }
+        bash_bin = ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).map { |d| File.join(d, "bash") }.find { |p| File.file?(p) && File.executable?(p) } || "/bin/bash"
+        timeout_bin = ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).map { |d| File.join(d, "timeout") }.find { |p| File.file?(p) && File.executable?(p) }
+        bash_cmd = [
+          bash_bin, "-euo", "pipefail", "-c",
+          'source "$PORT_FILE" && declare -F port_package_smoke >/dev/null && port_package_smoke'
+        ]
+        bash_cmd = [timeout_bin, "120", *bash_cmd] if timeout_bin
+        out_err, st = Open3.capture2e(smoke_env, *bash_cmd)
+        unless st.success?
+          tail = out_err.lines.last(30).join.strip
+          errors << "port_package_smoke failed (exit=#{st.exitstatus}):\n#{tail}"
+        end
+      end
+    end
+
+    { errors: errors, symlinks: symlinks_checked, hardlinks: extracted_hardlinks, ran_smoke: ran_smoke }
+  end
+
   def find_cached_source_tarball(cache_dir, port_meta)
     url_base = File.basename(port_meta["upstream_url"].split("?", 2).first)
     expected_sha = port_meta["upstream_sha256"]
@@ -841,6 +1051,7 @@ module PortPackager
       bg_cpus: nil,
       watch_done_file: nil,
       max_artifact_bytes: MAX_ARTIFACT_BYTES,
+      verify_smoke: true,
       ci_run: ENV["CI_PIPELINE_NUMBER"] ? Integer(ENV["CI_PIPELINE_NUMBER"], 10) : nil,
       source_date_epoch: Integer(ENV.fetch("SOURCE_DATE_EPOCH", "1700000000"), 10)
     }
@@ -870,6 +1081,7 @@ module PortPackager
 
         opts[:max_artifact_bytes] = v
       end
+      o.on("--skip-package-smoke", "Skip post-packaging extract and smoke verification in an alternate prefix") { opts[:verify_smoke] = false }
       o.on("--exact-tokens-env VAR", "Env var containing newline-separated exact infra tokens (default: FILC_LEAK_EXACT_TOKENS)") { |v| opts[:exact_tokens_env] = v }
       o.on("--leak-report PATH", "Optional path to write JSON leak-gate provenance report") { |v| opts[:leak_report] = File.expand_path(v) }
       o.on("--sign-key-file PATH", "Optional minisign secret key file (CI only)") { |v| opts[:sign_key_file] = v }
@@ -998,6 +1210,7 @@ module PortPackager
     all_leaks = {}
     all_size_violations = {}
     package_size_records = []
+    packaged_targets = {}
     all_provenance_allowed = {}
     created_archives = []
     mu = Mutex.new
@@ -1281,6 +1494,12 @@ module PortPackager
           pkg_entry["ci_run"] = opts[:ci_run] if opts[:ci_run]
           pkg_entry["repo_commit"] = repo_commit if repo_commit
           packages_index[name] = pkg_entry
+          packaged_targets[name] = {
+            meta: meta,
+            tdeps: tdeps,
+            bin_out: bin_out,
+            expected_hardlinks: dedup_stats ? dedup_stats[:hardlinks] : 0
+          }
           $stdout.puts(
             "FILC_PORT #{name} packaged policy=#{meta['policy_class']} stage=package " \
             "size_bytes=#{bin_size} hardlinks=#{dedup_stats[:hardlinks]} " \
@@ -1478,6 +1697,58 @@ module PortPackager
         all_size_violations[pkg_key].each { |v| lines << "  [#{pkg_key}] #{v}" }
       end
       raise lines.join("\n")
+    end
+
+    if opts[:verify_smoke] && !packaged_targets.empty?
+      bin_outs = packaged_targets.transform_values { |v| v[:bin_out] }
+      smoke_q = Queue.new
+      packaged_targets.keys.sort.each { |n| smoke_q << n }
+      smoke_workers_n = [opts[:parallel], packaged_targets.size].min
+      smoke_workers_n.times { smoke_q << nil }
+
+      smoke_failures = {}
+      smoke_totals = { packages: 0, smoke_cmds: 0, symlinks: 0, hardlinks: 0 }
+      smoke_mu = Mutex.new
+      smoke_workers = Array.new(smoke_workers_n) do
+        Thread.new do
+          while (pname = smoke_q.pop)
+            target = packaged_targets[pname]
+            res = verify_packaged_archive!(
+              name: pname,
+              meta: target[:meta],
+              tdeps: target[:tdeps],
+              bin_out: target[:bin_out],
+              bin_outs: bin_outs,
+              expected_hardlinks: target[:expected_hardlinks],
+              pizfix: pizfix,
+              neutral_prefix: neutral_prefix,
+              work_dir: work_dir,
+              throttle_fn: nil
+            )
+            smoke_mu.synchronize do
+              smoke_totals[:packages] += 1
+              smoke_totals[:smoke_cmds] += 1 if res[:ran_smoke]
+              smoke_totals[:symlinks] += res[:symlinks]
+              smoke_totals[:hardlinks] += res[:hardlinks]
+              smoke_failures[pname] = res[:errors] unless res[:errors].empty?
+            end
+          end
+        end
+      end
+      smoke_workers.each(&:join)
+
+      unless smoke_failures.empty?
+        created_archives.each { |p| File.unlink(p) if File.exist?(p) }
+        lines = ["PACKAGE_SMOKE FAILED across #{smoke_failures.size} package(s):"]
+        smoke_failures.keys.sort.each do |pkg_key|
+          smoke_failures[pkg_key].each { |err| lines << "  [#{pkg_key}] #{err}" }
+        end
+        raise lines.join("\n")
+      end
+
+      puts "PACKAGE_SMOKE: PASS packages=#{smoke_totals[:packages]} smoke_cmds=#{smoke_totals[:smoke_cmds]} " \
+           "symlinks=#{smoke_totals[:symlinks]} hardlinks=#{smoke_totals[:hardlinks]}"
+      $stdout.flush
     end
 
     index_obj = {

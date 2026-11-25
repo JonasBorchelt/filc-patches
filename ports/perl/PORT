@@ -226,3 +226,29 @@ puts "=== END PERL FAILURE DIAGNOSTICS ==="
 exit(rc.zero? ? 1 : rc)
 RB
 }
+
+port_package_smoke() {
+  local arch ver
+  arch="$(uname -m)"
+  ver="$("$PKG_PREFIX/bin/perl" -e 'print "$^V\n"')"
+  test "$ver" = "v5.40.5"
+  if [[ -x "$PKG_PREFIX/bin/perl5.40.5" ]]; then
+    test "$("$PKG_PREFIX/bin/perl5.40.5" -e 'print "$^V\n"')" = "v5.40.5"
+  fi
+  "$PKG_PREFIX/bin/perl" \
+    -I"$PKG_PREFIX/lib/perl5/5.40.5/${arch}-linux" \
+    -I"$PKG_PREFIX/lib/perl5/5.40.5" \
+    -Mthreads -Mthreads::shared -MStorable -MEncode -MCompress::Raw::Zlib -e '
+      my $prefix = $ENV{PKG_PREFIX};
+      die "Storable not loaded from PKG_PREFIX: $INC{\"Storable.pm\"}"
+        unless index($INC{"Storable.pm"}, "$prefix/") == 0;
+      my $t = threads->create(sub { return 21 * 2; });
+      die "threads" unless $t->join() == 42;
+      my $frozen = Storable::freeze({ k => [1, 2, 3] });
+      my $thawed = Storable::thaw($frozen);
+      die "storable" unless $thawed->{k}[2] == 3;
+      my $u = Encode::decode("UTF-8", "h\xc3\xa4llo");
+      die "encode" unless length($u) == 5;
+      print "PERL_PKG_SMOKE_OK\n";
+    ' | grep -Fxq 'PERL_PKG_SMOKE_OK'
+}

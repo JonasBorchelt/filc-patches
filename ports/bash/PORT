@@ -44,3 +44,27 @@ port_test() {
     echo "BASH_FILC_OK"
   ' | grep -Fxq 'BASH_FILC_OK'
 }
+
+port_package_smoke() {
+  "$PKG_PREFIX/bin/bash" --version | grep -q 'GNU bash, version 5\.3'
+  "$PKG_PREFIX/bin/bash" -c '
+    set -euo pipefail
+    outer="kept"
+    f() {
+      local outer="inner"
+      local -a arr=(10 20 12)
+      local sum=0 x
+      for x in "${arr[@]}"; do sum=$((sum + x)); done
+      echo "${outer}:${sum}"
+    }
+    res="$(f)"
+    test "$res" = "inner:42"
+    test "$outer" = "kept"
+    echo "BASH_PKG_SMOKE_OK"
+  ' | grep -Fxq 'BASH_PKG_SMOKE_OK'
+  if [[ -f "$PKG_PREFIX/lib/bash/basename" ]]; then
+    "$PKG_PREFIX/bin/bash" -c "set -euo pipefail; enable -f '$PKG_PREFIX/lib/bash/basename' basename; basename /a/b/filc-ok" | grep -Fxq 'filc-ok'
+  elif [[ -f "$PKG_PREFIX/lib/bash/true" ]]; then
+    "$PKG_PREFIX/bin/bash" -c "set -euo pipefail; enable -f '$PKG_PREFIX/lib/bash/true' true; true"
+  fi
+}

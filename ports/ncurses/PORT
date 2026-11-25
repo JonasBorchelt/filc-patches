@@ -44,3 +44,8 @@ port_test() {
   test -f "$PIZFIX/lib/pkgconfig/ncursesw.pc"
   "$PIZFIX/bin/infocmp" -V
 }
+
+port_package_smoke() {
+  test -L "$PKG_PREFIX/lib/libncurses.so"
+  "$PKG_PREFIX/bin/infocmp" -V | grep -q 'ncurses 6\.6'
+}

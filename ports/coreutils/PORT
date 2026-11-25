@@ -45,3 +45,18 @@ port_test() {
   "$PIZFIX/bin/wc" -l < "$td/b.txt" | tr -d ' ' | grep -Fxq '2'
   rm -rf "$td"
 }
+
+port_package_smoke() {
+  "$PKG_PREFIX/bin/sort" --version | grep -q 'GNU coreutils.*9\.12'
+  printf 'c\na\nb\n' | "$PKG_PREFIX/bin/sort" | tr '\n' ',' | grep -Fxq 'a,b,c,'
+  printf 'hello\n' | "$PKG_PREFIX/bin/sha256sum" | grep -q '^5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03 '
+  "$PKG_PREFIX/bin/expr" 123456789012345678901234567890 + 1 | grep -Fxq '123456789012345678901234567891'
+  printf 'filc-coreutils\n' | "$PKG_PREFIX/bin/base64" | "$PKG_PREFIX/bin/base64" -d | grep -Fxq 'filc-coreutils'
+  local td
+  td="$(mktemp -d)"
+  printf 'line1\nline2\n' > "$td/a.txt"
+  "$PKG_PREFIX/bin/cp" "$td/a.txt" "$td/b.txt"
+  "$PKG_PREFIX/bin/wc" -l < "$td/b.txt" | tr -d ' ' | grep -Fxq '2'
+  "$PKG_PREFIX/bin/[" -f "$td/b.txt" ]
+  rm -rf "$td"
+}

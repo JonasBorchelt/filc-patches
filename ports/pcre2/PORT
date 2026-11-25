@@ -26,3 +26,8 @@ port_test() {
   printf 'filc-pcre2-12345\n' | "$PIZFIX/bin/pcre2grep" -o '[0-9]+' | grep -qx '12345'
   printf '/(foo|bar)+/\nfoobar\n' | "$PIZFIX/bin/pcre2test" | grep -q '0: foobar'
 }
+
+port_package_smoke() {
+  "$PKG_PREFIX/bin/pcre2grep" --version | grep -q '10\.49'
+  printf 'filc-pcre2-12345\n' | "$PKG_PREFIX/bin/pcre2grep" -o '[0-9]+' | grep -qx '12345'
+}

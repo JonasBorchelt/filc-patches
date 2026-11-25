@@ -56,3 +56,8 @@ port_test() {
   "$PIZFIX/bin/openssl" pkeyutl -verify -inkey "$td/ed.key" -rawin -in "$td/in.txt" -sigfile "$td/in.sig"
   rm -rf "$td"
 }
+
+port_package_smoke() {
+  "$PKG_PREFIX/bin/openssl" version | grep -q '3\.6\.5'
+  printf 'hello\n' | "$PKG_PREFIX/bin/openssl" dgst -sha256 | grep -q '5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03'
+}

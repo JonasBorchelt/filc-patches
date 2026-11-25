@@ -1239,6 +1239,162 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
     repl_srv.close
     repl_thr.join(2)
   end
+
+  # 15. Post-packaging extract + smoke verification in a fresh alternate prefix:
+  #     Verifies that packaged archives unpack into a different prefix, preserve
+  #     relative symlinks + hardlinks + transitive deps, execute port_package_smoke(),
+  #     and abort cleanly on failing smoke commands or broken relative symlinks.
+  sm_repo = File.join(td, "sm-repo")
+  sm_work = File.join(td, "sm-work")
+  sm_pizfix = File.join(td, "sm-pizfix")
+  sm_cache = File.join(sm_work, "ports-cache")
+  sm_state = File.join(sm_work, "ports-state")
+  sm_out = File.join(td, "sm-out")
+  FileUtils.mkdir_p([
+    File.join(sm_repo, "ports", "smdep"),
+    File.join(sm_repo, "ports", "smtool"),
+    File.join(sm_pizfix, "bin"),
+    File.join(sm_pizfix, "libexec", "smtool-core"),
+    File.join(sm_pizfix, "share", "smdep"),
+    sm_cache,
+    sm_state,
+    sm_out
+  ])
+  FileUtils.cp(File.join(repo, "UPSTREAM"), File.join(sm_repo, "UPSTREAM"))
+
+  smdep_tar = File.join(td, "smdep-1.0.tar.gz")
+  smdep_sha = make_tar_gz(smdep_tar, { "smdep-1.0/README" => "smdep\n" })
+  FileUtils.cp(smdep_tar, File.join(sm_cache, "smdep-1.0-#{smdep_sha[0, 12]}-smdep-1.0.tar.gz"))
+  File.write(File.join(sm_repo, "ports", "smdep", "PORT"), <<~PORT)
+    NAME=smdep
+    VERSION=1.0
+    LICENSE=MIT
+    UPSTREAM_URL=https://example.invalid/smdep-1.0.tar.gz
+    UPSTREAM_SHA256=#{smdep_sha}
+    EXTRACT_DIR=smdep-1.0
+    TIER=0
+    DEPS=""
+    BUILD_SYSTEM=autotools
+    POLICY_CLASS=P0-Clean
+  PORT
+  File.write(File.join(sm_pizfix, "share", "smdep", "token.txt"), "DEP_TOKEN_OK\n")
+  File.write(File.join(sm_state, "smdep.manifest.json"), JSON.pretty_generate(
+    "port" => "smdep",
+    "files" => ["share/smdep/token.txt"]
+  ) + "\n")
+
+  smtool_tar = File.join(td, "smtool-2.0.tar.gz")
+  smtool_sha = make_tar_gz(smtool_tar, { "smtool-2.0/README" => "smtool\n" })
+  FileUtils.cp(smtool_tar, File.join(sm_cache, "smtool-2.0-#{smtool_sha[0, 12]}-smtool-2.0.tar.gz"))
+  smtool_port = File.join(sm_repo, "ports", "smtool", "PORT")
+  File.write(smtool_port, <<~'PORT'.sub("__SHA__", smtool_sha))
+    NAME=smtool
+    VERSION=2.0
+    LICENSE=MIT
+    UPSTREAM_URL=https://example.invalid/smtool-2.0.tar.gz
+    UPSTREAM_SHA256=__SHA__
+    EXTRACT_DIR=smtool-2.0
+    TIER=1
+    DEPS="smdep"
+    BUILD_SYSTEM=autotools
+    POLICY_CLASS=P0-Clean
+
+    port_package_smoke() {
+      test "$PKG_PREFIX" != "$FILC_ORIGINAL_PIZFIX"
+      test -L "$PKG_PREFIX/libexec/smtool-core/smtool-status"
+      test "$(readlink "$PKG_PREFIX/libexec/smtool-core/smtool-status")" = "../../bin/smtool"
+      "$PKG_PREFIX/bin/smtool" --version | grep -Fxq "smtool 2.0"
+      "$PKG_PREFIX/libexec/smtool-core/smtool-status" | grep -Fxq "invoked:smtool-status"
+      "$PKG_PREFIX/bin/smtool-alias" | grep -Fxq "invoked:smtool-alias"
+      grep -Fxq "DEP_TOKEN_OK" "$PKG_PREFIX/share/smdep/token.txt"
+    }
+  PORT
+
+  smtool_bin = File.join(sm_pizfix, "bin", "smtool")
+  File.write(smtool_bin, <<~'SH')
+    #!/bin/sh
+    if [ "${1:-}" = "--version" ]; then
+      echo "smtool 2.0"
+    else
+      echo "invoked:$(basename "$0")"
+    fi
+  SH
+  File.chmod(0o755, smtool_bin)
+  File.link(smtool_bin, File.join(sm_pizfix, "bin", "smtool-alias"))
+  File.symlink(smtool_bin, File.join(sm_pizfix, "libexec", "smtool-core", "smtool-status"))
+  File.write(File.join(sm_state, "smtool.manifest.json"), JSON.pretty_generate(
+    "port" => "smtool",
+    "files" => [
+      "bin/smtool",
+      "bin/smtool-alias",
+      "libexec/smtool-core/smtool-status"
+    ]
+  ) + "\n")
+
+  smo_o, smo_e, smo_st = Open3.capture3(
+    BASE_ENV,
+    "ruby", PACKAGE_SCRIPT,
+    "--repo-root", sm_repo,
+    "--work-dir", sm_work,
+    "--pizfix", sm_pizfix,
+    "--neutral-prefix", sm_pizfix,
+    "--ports-cache-dir", sm_cache,
+    "--out-dir", sm_out,
+    "--channel", "0.1.4",
+    "--arch", "x86_64-linux"
+  )
+  assert(smo_st.success?, "post-packaging smoke pass test failed: #{smo_o}\n#{smo_e}")
+  assert(smo_o.include?("PACKAGE_SMOKE: PASS packages=2 smoke_cmds=1 symlinks=1 hardlinks=1"),
+         "expected PACKAGE_SMOKE PASS summary, got:\n#{smo_o}")
+
+  # 15b. Failing port_package_smoke() must abort packaging with PACKAGE_SMOKE FAILED and no index.json
+  File.write(smtool_port, File.read(smtool_port).sub('grep -Fxq "smtool 2.0"', 'grep -Fxq "wrong-version"'))
+  sm_out_fail = File.join(td, "sm-out-fail")
+  smf_o, smf_e, smf_st = Open3.capture3(
+    BASE_ENV,
+    "ruby", PACKAGE_SCRIPT,
+    "--repo-root", sm_repo,
+    "--work-dir", sm_work,
+    "--pizfix", sm_pizfix,
+    "--neutral-prefix", sm_pizfix,
+    "--ports-cache-dir", sm_cache,
+    "--out-dir", sm_out_fail,
+    "--channel", "0.1.4",
+    "--arch", "x86_64-linux"
+  )
+  assert(!smf_st.success?, "failing port_package_smoke must fail package-port")
+  assert(smf_e.include?("PACKAGE_SMOKE FAILED"), "expected PACKAGE_SMOKE FAILED error, got: #{smf_e}")
+  assert(!File.exist?(File.join(sm_out_fail, "0.1.4", "x86_64-linux", "index.json")),
+         "index.json must not be written when PACKAGE_SMOKE fails")
+
+  # 15c. Broken relative symlink in a packaged archive must fail PACKAGE_SMOKE
+  File.write(smtool_port, File.read(smtool_port).sub('grep -Fxq "wrong-version"', 'grep -Fxq "smtool 2.0"'))
+  File.symlink("../../bin/does-not-exist", File.join(sm_pizfix, "libexec", "smtool-core", "smtool-broken"))
+  File.write(File.join(sm_state, "smtool.manifest.json"), JSON.pretty_generate(
+    "port" => "smtool",
+    "files" => [
+      "bin/smtool",
+      "bin/smtool-alias",
+      "libexec/smtool-core/smtool-status",
+      "libexec/smtool-core/smtool-broken"
+    ]
+  ) + "\n")
+  sm_out_brk = File.join(td, "sm-out-broken-sym")
+  smb_o, smb_e, smb_st = Open3.capture3(
+    BASE_ENV,
+    "ruby", PACKAGE_SCRIPT,
+    "--repo-root", sm_repo,
+    "--work-dir", sm_work,
+    "--pizfix", sm_pizfix,
+    "--neutral-prefix", sm_pizfix,
+    "--ports-cache-dir", sm_cache,
+    "--out-dir", sm_out_brk,
+    "--channel", "0.1.4",
+    "--arch", "x86_64-linux"
+  )
+  assert(!smb_st.success?, "broken relative symlink must fail package-port smoke check")
+  assert(smb_e.include?("PACKAGE_SMOKE FAILED") && smb_e.include?("broken relative symlink"),
+         "expected broken relative symlink error, got: #{smb_e}")
 end
 
-puts "TEST_PACKAGE_PORT: PASS (14/14)"
+puts "TEST_PACKAGE_PORT: PASS (15/15)"

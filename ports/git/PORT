@@ -61,3 +61,25 @@ port_test() {
   "$PIZFIX/bin/git" -C "$td" log -n 1 --format=%s | grep -Fxq 'initial'
   rm -rf "$td"
 }
+
+port_package_smoke() {
+  test -L "$PKG_PREFIX/libexec/git-core/git-status"
+  test "$(readlink "$PKG_PREFIX/libexec/git-core/git-status")" = "../../bin/git"
+  local out ver td
+  out="$("$PKG_PREFIX/bin/git" --version)"
+  ver="${out%%$'\n'*}"
+  printf '%s\n' "$ver" | grep -Fxq 'git version 2.56.0'
+  td="$(mktemp -d)"
+  GIT_EXEC_PATH="$PKG_PREFIX/libexec/git-core" "$PKG_PREFIX/bin/git" -C "$td" init -q -b main
+  GIT_EXEC_PATH="$PKG_PREFIX/libexec/git-core" "$PKG_PREFIX/bin/git" -C "$td" config user.name "Fil-C Smoke"
+  GIT_EXEC_PATH="$PKG_PREFIX/libexec/git-core" "$PKG_PREFIX/bin/git" -C "$td" config user.email "smoke@example.invalid"
+  printf 'hello relocated\nneedle-line\n' > "$td/file.txt"
+  GIT_EXEC_PATH="$PKG_PREFIX/libexec/git-core" "$PKG_PREFIX/bin/git" -C "$td" add file.txt
+  GIT_EXEC_PATH="$PKG_PREFIX/libexec/git-core" "$PKG_PREFIX/bin/git" -C "$td" commit -q -m "smoke-initial"
+  printf 'untracked\n' > "$td/new.txt"
+  # Run git-status directly through the relative symlink in libexec/git-core
+  (cd "$td" && GIT_EXEC_PATH="$PKG_PREFIX/libexec/git-core" "$PKG_PREFIX/libexec/git-core/git-status" -u --short) | grep -Fxq '?? new.txt'
+  GIT_EXEC_PATH="$PKG_PREFIX/libexec/git-core" "$PKG_PREFIX/bin/git" -C "$td" grep -F "needle-line" | grep -Fq 'file.txt:needle-line'
+  GIT_EXEC_PATH="$PKG_PREFIX/libexec/git-core" "$PKG_PREFIX/bin/git" -C "$td" log -n 1 --format=%s | grep -Fxq 'smoke-initial'
+  rm -rf "$td"
+}

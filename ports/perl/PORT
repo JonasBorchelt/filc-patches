@@ -29,12 +29,17 @@ port_configure() {
     -Doptimize="-O2 -g -fno-strict-aliasing -D_GNU_SOURCE" \
     -Dprefix="$PIZFIX" \
     -Dinstallprefix="$PIZFIX" \
+    -Duserelocatableinc \
     -Dbin="$PIZFIX/bin" \
-    -Dprivlib="$PIZFIX/lib/perl5/5.40.5" \
-    -Darchlib="$PIZFIX/lib/perl5/5.40.5/${arch}-linux" \
+    -Dprivlib=".../../lib/perl5/5.40.5" \
+    -Darchlib=".../../lib/perl5/5.40.5/${arch}-linux" \
+    -Dinstallprivlib="$PIZFIX/lib/perl5/5.40.5" \
+    -Dinstallarchlib="$PIZFIX/lib/perl5/5.40.5/${arch}-linux" \
     -Dsiteprefix="$PIZFIX" \
-    -Dsitelib="$PIZFIX/lib/perl5/site_perl/5.40.5" \
-    -Dsitearch="$PIZFIX/lib/perl5/site_perl/5.40.5/${arch}-linux" \
+    -Dsitelib=".../../lib/perl5/site_perl/5.40.5" \
+    -Dsitearch=".../../lib/perl5/site_perl/5.40.5/${arch}-linux" \
+    -Dinstallsitelib="$PIZFIX/lib/perl5/site_perl/5.40.5" \
+    -Dinstallsitearch="$PIZFIX/lib/perl5/site_perl/5.40.5/${arch}-linux" \
     -Dman1dir="$PIZFIX/share/man/man1" \
     -Dman3dir="$PIZFIX/share/man/man3" \
     -Dscriptdir="$PIZFIX/bin" \
@@ -228,16 +233,14 @@ RB
 }
 
 port_package_smoke() {
-  local arch ver
-  arch="$(uname -m)"
-  ver="$("$PKG_PREFIX/bin/perl" -e 'print "$^V\n"')"
+  local ver
+  ver="$(env -u PERL5LIB "$PKG_PREFIX/bin/perl" -e 'print "$^V\n"')"
   test "$ver" = "v5.40.5"
   if [[ -x "$PKG_PREFIX/bin/perl5.40.5" ]]; then
-    test "$("$PKG_PREFIX/bin/perl5.40.5" -e 'print "$^V\n"')" = "v5.40.5"
+    test "$(env -u PERL5LIB "$PKG_PREFIX/bin/perl5.40.5" -e 'print "$^V\n"')" = "v5.40.5"
   fi
-  "$PKG_PREFIX/bin/perl" \
-    -I"$PKG_PREFIX/lib/perl5/5.40.5/${arch}-linux" \
-    -I"$PKG_PREFIX/lib/perl5/5.40.5" \
+  # Verify -Duserelocatableinc resolves @INC relative to the relocated binary without -I or PERL5LIB
+  env -u PERL5LIB "$PKG_PREFIX/bin/perl" \
     -Mthreads -Mthreads::shared -MStorable -MEncode -MCompress::Raw::Zlib -e '
       my $prefix = $ENV{PKG_PREFIX};
       die "Storable not loaded from PKG_PREFIX: $INC{\"Storable.pm\"}"

@@ -9,8 +9,8 @@ TIER=5
 DEPS="zlib curl expat openssl pcre2 pkgconf"
 BUILD_SYSTEM="autotools"
 CONFIGURE_ARGS="--with-libpcre2"
-MAKE_ARGS="NO_RUST=1 NO_GETTEXT=1 NO_TCLTK=1"
-INSTALL_ARGS="NO_RUST=1 NO_GETTEXT=1 NO_TCLTK=1 INSTALL_SYMLINKS=YesPlease"
+MAKE_ARGS="NO_RUST=1 NO_GETTEXT=1 NO_TCLTK=1 RUNTIME_PREFIX=YesPlease"
+INSTALL_ARGS="NO_RUST=1 NO_GETTEXT=1 NO_TCLTK=1 RUNTIME_PREFIX=YesPlease INSTALL_SYMLINKS=YesPlease"
 TEST_CMD=""
 POLICY_CLASS="P2-Package"
 POLICY_RATIONALE="Pinned to 2.56.0 to match the Fil-C git.projeny 23-file parse-options defval patch base. Audited down from 24 files (+74/-96) to 23 source files by passing NO_RUST=1 via MAKE_ARGS instead of patching config.mak. Preserves pointer capabilities in parse-options defval (void* instead of intptr_t) and uses single-object-per-chunk allocation in compat/obstack."
@@ -32,11 +32,11 @@ port_configure() {
 }
 
 port_build() {
-  make -j"$JOBS" NO_RUST=1 NO_GETTEXT=1 NO_TCLTK=1
+  make -j"$JOBS" NO_RUST=1 NO_GETTEXT=1 NO_TCLTK=1 RUNTIME_PREFIX=YesPlease
 }
 
 port_install() {
-  make -j"$JOBS" NO_RUST=1 NO_GETTEXT=1 NO_TCLTK=1 INSTALL_SYMLINKS=YesPlease install
+  make -j"$JOBS" NO_RUST=1 NO_GETTEXT=1 NO_TCLTK=1 RUNTIME_PREFIX=YesPlease INSTALL_SYMLINKS=YesPlease install
 }
 
 port_test() {
@@ -65,21 +65,24 @@ port_test() {
 port_package_smoke() {
   test -L "$PKG_PREFIX/libexec/git-core/git-status"
   test "$(readlink "$PKG_PREFIX/libexec/git-core/git-status")" = "../../bin/git"
-  local out ver td
-  out="$("$PKG_PREFIX/bin/git" --version)"
+  local out ver td exec_path
+  out="$(env -u GIT_EXEC_PATH -u GIT_TEMPLATE_DIR "$PKG_PREFIX/bin/git" --version)"
   ver="${out%%$'\n'*}"
   printf '%s\n' "$ver" | grep -Fxq 'git version 2.56.0'
+  # Verify RUNTIME_PREFIX resolves libexec/git-core relative to the binary without GIT_EXEC_PATH
+  exec_path="$(env -u GIT_EXEC_PATH -u GIT_TEMPLATE_DIR "$PKG_PREFIX/bin/git" --exec-path)"
+  test "$exec_path" = "$PKG_PREFIX/libexec/git-core"
   td="$(mktemp -d)"
-  GIT_EXEC_PATH="$PKG_PREFIX/libexec/git-core" "$PKG_PREFIX/bin/git" -C "$td" init -q -b main
-  GIT_EXEC_PATH="$PKG_PREFIX/libexec/git-core" "$PKG_PREFIX/bin/git" -C "$td" config user.name "Fil-C Smoke"
-  GIT_EXEC_PATH="$PKG_PREFIX/libexec/git-core" "$PKG_PREFIX/bin/git" -C "$td" config user.email "smoke@example.invalid"
+  env -u GIT_EXEC_PATH -u GIT_TEMPLATE_DIR "$PKG_PREFIX/bin/git" -C "$td" init -q -b main
+  env -u GIT_EXEC_PATH -u GIT_TEMPLATE_DIR "$PKG_PREFIX/bin/git" -C "$td" config user.name "Fil-C Smoke"
+  env -u GIT_EXEC_PATH -u GIT_TEMPLATE_DIR "$PKG_PREFIX/bin/git" -C "$td" config user.email "smoke@example.invalid"
   printf 'hello relocated\nneedle-line\n' > "$td/file.txt"
-  GIT_EXEC_PATH="$PKG_PREFIX/libexec/git-core" "$PKG_PREFIX/bin/git" -C "$td" add file.txt
-  GIT_EXEC_PATH="$PKG_PREFIX/libexec/git-core" "$PKG_PREFIX/bin/git" -C "$td" commit -q -m "smoke-initial"
+  env -u GIT_EXEC_PATH -u GIT_TEMPLATE_DIR "$PKG_PREFIX/bin/git" -C "$td" add file.txt
+  env -u GIT_EXEC_PATH -u GIT_TEMPLATE_DIR "$PKG_PREFIX/bin/git" -C "$td" commit -q -m "smoke-initial"
   printf 'untracked\n' > "$td/new.txt"
   # Run git-status directly through the relative symlink in libexec/git-core
-  (cd "$td" && GIT_EXEC_PATH="$PKG_PREFIX/libexec/git-core" "$PKG_PREFIX/libexec/git-core/git-status" -u --short) | grep -Fxq '?? new.txt'
-  GIT_EXEC_PATH="$PKG_PREFIX/libexec/git-core" "$PKG_PREFIX/bin/git" -C "$td" grep -F "needle-line" | grep -Fq 'file.txt:needle-line'
-  GIT_EXEC_PATH="$PKG_PREFIX/libexec/git-core" "$PKG_PREFIX/bin/git" -C "$td" log -n 1 --format=%s | grep -Fxq 'smoke-initial'
+  (cd "$td" && env -u GIT_EXEC_PATH -u GIT_TEMPLATE_DIR "$PKG_PREFIX/libexec/git-core/git-status" -u --short) | grep -Fxq '?? new.txt'
+  env -u GIT_EXEC_PATH -u GIT_TEMPLATE_DIR "$PKG_PREFIX/bin/git" -C "$td" grep -F "needle-line" | grep -Fq 'file.txt:needle-line'
+  env -u GIT_EXEC_PATH -u GIT_TEMPLATE_DIR "$PKG_PREFIX/bin/git" -C "$td" log -n 1 --format=%s | grep -Fxq 'smoke-initial'
   rm -rf "$td"
 }

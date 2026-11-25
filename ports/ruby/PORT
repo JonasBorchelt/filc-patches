@@ -8,7 +8,7 @@ EXTRACT_DIR="ruby-3.3.14"
 TIER=5
 DEPS="openssl libffi zlib yaml ncurses libedit pkgconf"
 BUILD_SYSTEM="autotools"
-CONFIGURE_ARGS="--enable-shared --disable-yjit --disable-rjit --without-jit --without-gcc --without-valgrind --with-thread=pthread --without-jemalloc --with-coroutine=pthread --with-setjmp-type=_setjmp"
+CONFIGURE_ARGS="--enable-shared --enable-load-relative --disable-yjit --disable-rjit --without-jit --without-gcc --without-valgrind --with-thread=pthread --without-jemalloc --with-coroutine=pthread --with-setjmp-type=_setjmp"
 MAKE_ARGS=""
 INSTALL_ARGS=""
 TEST_CMD=""
@@ -26,6 +26,7 @@ port_configure() {
     ac_cv_func___builtin_setjmp=no \
     ./configure --prefix="$PIZFIX" \
       --enable-shared \
+      --enable-load-relative \
       --disable-yjit \
       --disable-rjit \
       --without-jit \
@@ -75,5 +76,28 @@ raise "fiber2" unless fib.resume == 42
 
 GC.start
 puts "RUBY_FILC_OK"
+EOF
+}
+
+port_package_smoke() {
+  local out ver
+  out="$(env -u RUBYLIB -u GEM_PATH -u GEM_HOME "$PKG_PREFIX/bin/ruby" --version)"
+  ver="${out%%$'\n'*}"
+  printf '%s\n' "$ver" | grep -q '^ruby 3\.3\.14 '
+  # Verify --enable-load-relative resolves RbConfig::TOPDIR and stdlib relative to PKG_PREFIX
+  env -u RUBYLIB -u GEM_PATH -u GEM_HOME "$PKG_PREFIX/bin/ruby" - <<'EOF' | grep -Fxq 'RUBY_PKG_SMOKE_OK'
+require "rbconfig"
+require "digest"
+require "json"
+require "openssl"
+require "yaml"
+require "zlib"
+
+prefix = ENV.fetch("PKG_PREFIX")
+raise "topdir mismatch: #{RbConfig::TOPDIR.inspect} != #{prefix.inspect}" unless RbConfig::TOPDIR == prefix
+raise "json" unless JSON.parse(JSON.generate({"k" => 42}))["k"] == 42
+raise "openssl" unless OpenSSL::Digest::SHA256.hexdigest("hello\n") == "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
+raise "zlib" unless Zlib::Inflate.inflate(Zlib::Deflate.deflate("reloc")) == "reloc"
+puts "RUBY_PKG_SMOKE_OK"
 EOF
 }

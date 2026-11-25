@@ -8,6 +8,7 @@
 # Never generates production signing keys locally.
 
 require "digest/sha2"
+require "etc"
 require "fileutils"
 require "json"
 require "open3"
@@ -112,6 +113,33 @@ module PortPackager
       full = File.join(dir, name)
       File.file?(full) && File.executable?(full)
     end
+  end
+
+  def default_bg_cpus
+    n = Etc.nprocessors
+    if n >= 4
+      "#{n - 2}-#{n - 1}"
+    elsif n >= 2
+      (n - 1).to_s
+    else
+      "0"
+    end
+  rescue StandardError
+    "0"
+  end
+
+  def build_throttle_prefix(bg_cpus)
+    prefix = []
+    prefix.concat(["nice", "-n", "19"]) if cmd_available?("nice")
+    prefix.concat(["ionice", "-c3"]) if cmd_available?("ionice")
+    prefix.concat(["taskset", "-c", bg_cpus]) if bg_cpus && !bg_cpus.empty? && cmd_available?("taskset")
+    prefix
+  end
+
+  def capture3_cmd(cmd, throttle_fn: nil)
+    prefix = throttle_fn ? throttle_fn.call : nil
+    full = (prefix && !prefix.empty?) ? (prefix + cmd) : cmd
+    Open3.capture3(*full)
   end
 
   def load_all_ports(ports_dir)
@@ -303,7 +331,7 @@ module PortPackager
     [hard_hits, generic_hits]
   end
 
-  def scan_directory_leaks(stage_dir, literals:, exact_rules: [], scan_elf_strings: true)
+  def scan_directory_leaks(stage_dir, literals:, exact_rules: [], scan_elf_strings: true, throttle_fn: nil)
     hard_hits = []
     generic_hits = []
 
@@ -323,7 +351,7 @@ module PortPackager
 
       if elf_file?(path)
         if cmd_available?("patchelf")
-          out, _e, st = Open3.capture3("patchelf", "--print-rpath", path)
+          out, _e, st = capture3_cmd(["patchelf", "--print-rpath", path], throttle_fn: throttle_fn)
           if st.success? && !out.strip.empty?
             h, g = scan_text_for_leaks("ELF RPATH #{rel}", out.strip, literals, exact_rules: exact_rules)
             hard_hits.concat(h)
@@ -334,7 +362,7 @@ module PortPackager
           end
         end
         if scan_elf_strings && cmd_available?("strings")
-          out, _e, st = Open3.capture3("strings", "-a", "-n", "6", path)
+          out, _e, st = capture3_cmd(["strings", "-a", "-n", "6", path], throttle_fn: throttle_fn)
           if st.success?
             h, g = scan_text_for_leaks("ELF strings #{rel}", out, literals, exact_rules: exact_rules)
             hard_hits.concat(h)
@@ -405,17 +433,17 @@ module PortPackager
     nil
   end
 
-  def search_gem_for_tokens(gem_path, rel_prefix, remaining_tokens, found, tar_bin)
+  def search_gem_for_tokens(gem_path, rel_prefix, remaining_tokens, found, tar_bin, throttle_fn: nil)
     return if remaining_tokens.empty?
 
     Dir.mktmpdir("filc-gem-prov-") do |gtd|
-      _o, _e, st = Open3.capture3(tar_bin, "-xf", gem_path, "-C", gtd, "data.tar.gz")
+      _o, _e, st = capture3_cmd([tar_bin, "-xf", gem_path, "-C", gtd, "data.tar.gz"], throttle_fn: throttle_fn)
       data_gz = File.join(gtd, "data.tar.gz")
       return unless st.success? && File.file?(data_gz)
 
       data_dir = File.join(gtd, "data")
       FileUtils.mkdir_p(data_dir)
-      _o2, _e2, st2 = Open3.capture3(tar_bin, "-xzf", data_gz, "-C", data_dir)
+      _o2, _e2, st2 = capture3_cmd([tar_bin, "-xzf", data_gz, "-C", data_dir], throttle_fn: throttle_fn)
       return unless st2.success?
 
       Dir.glob(File.join(data_dir, "**", "*"), File::FNM_DOTMATCH).sort.each do |f|
@@ -439,7 +467,7 @@ module PortPackager
   # Extracts the SHA-256-verified upstream source archive into an isolated temp dir
   # and proves exact fixed-string provenance for every generic token (including
   # bundled .whl/.zip and .gem archives shipped inside upstream tarballs).
-  def verify_upstream_provenance(upstream_tarball, generic_hits)
+  def verify_upstream_provenance(upstream_tarball, generic_hits, throttle_fn: nil)
     return [{}, generic_hits] if generic_hits.empty?
 
     needed = generic_hits.map { |h| h[:token] }.uniq
@@ -448,7 +476,7 @@ module PortPackager
     tar_bin = cmd_available?("gtar") ? "gtar" : "tar"
 
     Dir.mktmpdir("filc-prov-src-") do |src_td|
-      _o, err, st = Open3.capture3(tar_bin, "-xf", upstream_tarball, "-C", src_td)
+      _o, err, st = capture3_cmd([tar_bin, "-xf", upstream_tarball, "-C", src_td], throttle_fn: throttle_fn)
       unless st.success?
         raise "failed to extract verified upstream source #{File.basename(upstream_tarball)} for provenance check: #{err.strip}"
       end
@@ -490,7 +518,7 @@ module PortPackager
         nested_gems.each do |gp, grel|
           break if remaining.empty?
 
-          search_gem_for_tokens(gp, grel, remaining, found, tar_bin)
+          search_gem_for_tokens(gp, grel, remaining, found, tar_bin, throttle_fn: throttle_fn)
         end
       end
     end
@@ -499,11 +527,11 @@ module PortPackager
     [found, unverified]
   end
 
-  def evaluate_package_leaks(stage_dir, literals:, exact_rules:, upstream_tarball:, scan_elf_strings: true)
+  def evaluate_package_leaks(stage_dir, literals:, exact_rules:, upstream_tarball:, scan_elf_strings: true, throttle_fn: nil)
     hard_hits, generic_hits = scan_directory_leaks(
-      stage_dir, literals: literals, exact_rules: exact_rules, scan_elf_strings: scan_elf_strings
+      stage_dir, literals: literals, exact_rules: exact_rules, scan_elf_strings: scan_elf_strings, throttle_fn: throttle_fn
     )
-    provenance_map, unverified = verify_upstream_provenance(upstream_tarball, generic_hits)
+    provenance_map, unverified = verify_upstream_provenance(upstream_tarball, generic_hits, throttle_fn: throttle_fn)
 
     allowed = []
     generic_hits.each do |gh|
@@ -525,7 +553,7 @@ module PortPackager
     [hard_hits.uniq, allowed]
   end
 
-  def relocate_stage!(prefix_dir, pizfix)
+  def relocate_stage!(prefix_dir, pizfix, throttle_fn: nil)
     has_patchelf = cmd_available?("patchelf")
     has_strip = cmd_available?("strip")
 
@@ -554,7 +582,7 @@ module PortPackager
       # Relocate ALL ELF binaries, shared libraries, and loadable modules (e.g. lib/bash/*)
       next unless elf_file?(path)
 
-      Open3.capture3("strip", "--strip-debug", path) if has_strip
+      capture3_cmd(["strip", "--strip-debug", path], throttle_fn: throttle_fn) if has_strip
       next unless has_patchelf
 
       parts = rel.split("/")
@@ -564,15 +592,15 @@ module PortPackager
                 else
                   "$ORIGIN/" + ("../" * (parts.length - 2)).chomp("/")
                 end
-        Open3.capture3("patchelf", "--set-rpath", rpath, path)
+        capture3_cmd(["patchelf", "--set-rpath", rpath, path], throttle_fn: throttle_fn)
       else
         rpath = "$ORIGIN/" + ("../" * (parts.length - 1)) + "lib"
-        Open3.capture3("patchelf", "--set-rpath", rpath, path)
+        capture3_cmd(["patchelf", "--set-rpath", rpath, path], throttle_fn: throttle_fn)
       end
     end
   end
 
-  def create_deterministic_tar_xz(stage_dir, out_tar_xz, source_date_epoch, xz_threads: 1)
+  def create_deterministic_tar_xz(stage_dir, out_tar_xz, source_date_epoch, xz_threads: 1, throttle_fn: nil)
     FileUtils.mkdir_p(File.dirname(out_tar_xz))
     entries = Dir.children(stage_dir).sort
     raise "refusing to create empty archive from #{stage_dir}" if entries.empty?
@@ -593,12 +621,12 @@ module PortPackager
       else
         cmd = [tar_bin, "-cf", tmp_tar, "-C", stage_dir, *entries]
       end
-      _o, err, st = Open3.capture3(*cmd)
+      _o, err, st = capture3_cmd(cmd, throttle_fn: throttle_fn)
       raise "tar failed: #{err.strip}" unless st.success?
 
-      threads = Integer(xz_threads.to_s, 10).clamp(1, 4)
+      threads = Integer(xz_threads.to_s, 10).clamp(0, 8)
       xz_args = ["xz", "-6", "-T#{threads}", "-f", tmp_tar]
-      _xo, xerr, xst = Open3.capture3(*xz_args)
+      _xo, xerr, xst = capture3_cmd(xz_args, throttle_fn: throttle_fn)
       raise "xz failed: #{xerr.strip}" unless xst.success?
 
       FileUtils.mv("#{tmp_tar}.xz", out_tar_xz)
@@ -678,7 +706,11 @@ module PortPackager
       pubkey_file: nil,
       sign_only: false,
       parallel: 1,
-      xz_threads: Integer(ENV.fetch("FILC_PACKAGE_XZ_THREADS", "1"), 10).clamp(1, 4),
+      bg_parallel: nil,
+      xz_threads: Integer(ENV.fetch("FILC_PACKAGE_XZ_THREADS", "1"), 10).clamp(0, 8),
+      bg_xz_threads: 1,
+      bg_throttle: false,
+      bg_cpus: nil,
       watch_done_file: nil,
       ci_run: ENV["CI_PIPELINE_NUMBER"] ? Integer(ENV["CI_PIPELINE_NUMBER"], 10) : nil,
       source_date_epoch: Integer(ENV.fetch("SOURCE_DATE_EPOCH", "1700000000"), 10)
@@ -697,8 +729,12 @@ module PortPackager
       o.on("--arch ARCH", "Target arch (default: x86_64-linux)") { |v| opts[:arch] = v }
       o.on("--revision N", Integer, "Package revision number (default: 1)") { |v| opts[:revision] = v }
       o.on("--ports LIST", "Comma-separated subset of ports to package") { |v| opts[:ports_filter] = v.split(",").map(&:strip).reject(&:empty?) }
-      o.on("-j", "--parallel N", Integer, "Concurrent packaging workers (1..8, default: 1)") { |v| opts[:parallel] = v.clamp(1, 8) }
-      o.on("--xz-threads N", Integer, "Threads per xz invocation (1..4, default: 1)") { |v| opts[:xz_threads] = v.clamp(1, 4) }
+      o.on("-j", "--parallel N", Integer, "Concurrent packaging workers (1..8, default: 1; post-build in watch mode)") { |v| opts[:parallel] = v.clamp(1, 8) }
+      o.on("--bg-parallel N", Integer, "Max concurrent workers while builds run in watch mode (1..8, default: 1)") { |v| opts[:bg_parallel] = v.clamp(1, 8) }
+      o.on("--xz-threads N", Integer, "Threads per xz invocation (0..8, 0=all cores, default: 1)") { |v| opts[:xz_threads] = v.clamp(0, 8) }
+      o.on("--bg-xz-threads N", Integer, "Threads per xz invocation while builds run in watch mode (1..4, default: 1)") { |v| opts[:bg_xz_threads] = v.clamp(1, 4) }
+      o.on("--bg-throttle", "Apply nice -n 19, ionice -c3, and 2-core taskset only while builds are running") { opts[:bg_throttle] = true }
+      o.on("--bg-cpus SPEC", "CPU list for taskset while --bg-throttle is active (default: last 2 cores)") { |v| opts[:bg_cpus] = v }
       o.on("--watch-done-file PATH", "Continuously package green ports as manifests appear until PATH exists") { |v| opts[:watch_done_file] = File.expand_path(v) }
       o.on("--exact-tokens-env VAR", "Env var containing newline-separated exact infra tokens (default: FILC_LEAK_EXACT_TOKENS)") { |v| opts[:exact_tokens_env] = v }
       o.on("--leak-report PATH", "Optional path to write JSON leak-gate provenance report") { |v| opts[:leak_report] = File.expand_path(v) }
@@ -803,8 +839,33 @@ module PortPackager
     all_provenance_allowed = {}
     created_archives = []
     mu = Mutex.new
+    slot_cv = ConditionVariable.new
+    active_workers = 0
+    builds_done = opts[:watch_done_file].nil?
+    bg_par = opts[:bg_parallel] ? [opts[:bg_parallel], opts[:parallel]].min : 1
+    bg_cpus = opts[:bg_cpus] || default_bg_cpus
+    bg_prefix = opts[:bg_throttle] ? build_throttle_prefix(bg_cpus) : []
     packaged_done = 0
     planned_total = 0
+
+    throttle_fn = lambda do
+      done = mu.synchronize { builds_done }
+      (!done && !bg_prefix.empty?) ? bg_prefix : nil
+    end
+    xz_threads_fn = lambda do
+      done = mu.synchronize { builds_done }
+      done ? opts[:xz_threads] : opts[:bg_xz_threads]
+    end
+
+    if !builds_done && opts[:bg_throttle]
+      begin
+        Process.setpriority(Process::PRIO_PROCESS, 0, 19)
+      rescue Errno::EACCES, Errno::EPERM, NotImplementedError
+        nil
+      end
+      $stdout.puts("PACKAGER_MODE: phase=background parallel=#{bg_par} xz_threads=#{opts[:bg_xz_threads]} throttle=#{bg_prefix.empty? ? 'none' : bg_prefix.join(' ')}")
+      $stdout.flush
+    end
 
     read_planned_total = lambda do |fallback|
       plan_path = File.join(state_dir, "ports-plan.json")
@@ -873,7 +934,7 @@ module PortPackager
           end
         end
 
-        relocate_stage!(prefix_stage, pizfix)
+        relocate_stage!(prefix_stage, pizfix, throttle_fn: throttle_fn)
 
         pkg_files = {}
         Dir.glob(File.join(prefix_stage, "**", "*")).sort.each do |p|
@@ -907,10 +968,12 @@ module PortPackager
           literals: literals,
           exact_rules: exact_rules,
           upstream_tarball: cached_src,
-          scan_elf_strings: true
+          scan_elf_strings: true,
+          throttle_fn: throttle_fn
         )
         if bin_leaks.empty?
-          create_deterministic_tar_xz(td, bin_out, opts[:source_date_epoch], xz_threads: opts[:xz_threads])
+          create_deterministic_tar_xz(td, bin_out, opts[:source_date_epoch],
+                                      xz_threads: xz_threads_fn.call, throttle_fn: throttle_fn)
         end
       end
 
@@ -955,10 +1018,12 @@ module PortPackager
           literals: literals,
           exact_rules: exact_rules,
           upstream_tarball: cached_src,
-          scan_elf_strings: false
+          scan_elf_strings: false,
+          throttle_fn: throttle_fn
         )
         if rec_leaks.empty? && bin_leaks.empty?
-          create_deterministic_tar_xz(td, rec_out, opts[:source_date_epoch], xz_threads: opts[:xz_threads])
+          create_deterministic_tar_xz(td, rec_out, opts[:source_date_epoch],
+                                      xz_threads: xz_threads_fn.call, throttle_fn: throttle_fn)
         end
       end
 
@@ -1025,12 +1090,32 @@ module PortPackager
     workers = Array.new(opts[:parallel]) do
       Thread.new do
         while (pname = work_q.pop)
-          next if mu.synchronize { !worker_error.nil? }
+          mu.synchronize do
+            loop do
+              break unless worker_error.nil?
+
+              limit = builds_done ? opts[:parallel] : bg_par
+              break if active_workers < limit
+
+              slot_cv.wait(mu)
+            end
+            active_workers += 1
+          end
 
           begin
-            process_port.call(pname)
+            unless mu.synchronize { !worker_error.nil? }
+              process_port.call(pname)
+            end
           rescue StandardError => e
-            mu.synchronize { worker_error ||= e }
+            mu.synchronize do
+              worker_error ||= e
+              slot_cv.broadcast
+            end
+          ensure
+            mu.synchronize do
+              active_workers -= 1
+              slot_cv.broadcast
+            end
           end
         end
       end
@@ -1064,6 +1149,22 @@ module PortPackager
         break if File.file?(opts[:watch_done_file]) || mu.synchronize { !worker_error.nil? }
 
         sleep 0.4
+      end
+      # Builds finished: unlock full post-build parallelism, normal priority, and xz_threads.
+      mu.synchronize do
+        unless builds_done
+          builds_done = true
+          if opts[:bg_throttle]
+            begin
+              Process.setpriority(Process::PRIO_PROCESS, 0, 0)
+            rescue Errno::EACCES, Errno::EPERM, NotImplementedError
+              nil
+            end
+            $stdout.puts("PACKAGER_MODE: phase=post-build parallel=#{opts[:parallel]} xz_threads=#{opts[:xz_threads]} throttle=off")
+            $stdout.flush
+          end
+          slot_cv.broadcast
+        end
       end
       # Final sweep after done-file appears
       Dir.glob(File.join(state_dir, "*.manifest.json")).sort.each do |mpath|

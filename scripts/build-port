@@ -673,15 +673,24 @@ else
 fi
 
 # 7. Test
+emit_stage_testing() {
+  local line="FILC_PORT $PORT_NAME testing policy=$POLICY_CLASS stage=test"
+  echo "$line"
+  if [[ -n "${FILC_PORT_STAGE_MARKER:-}" ]]; then
+    local tmp="${FILC_PORT_STAGE_MARKER}.tmp.$$"
+    printf '%s\n' "$line" > "$tmp" && mv -f "$tmp" "$FILC_PORT_STAGE_MARKER" || true
+  fi
+}
+
 FINAL_STATUS="built"
 if declare -F port_test >/dev/null 2>&1; then
   CURRENT_STAGE="test"
-  echo "FILC_PORT $PORT_NAME testing policy=$POLICY_CLASS stage=test"
+  emit_stage_testing
   run_stage_fn port_test
   FINAL_STATUS="tested"
 elif [[ -n "$TEST_CMD" ]]; then
   CURRENT_STAGE="test"
-  echo "FILC_PORT $PORT_NAME testing policy=$POLICY_CLASS stage=test"
+  emit_stage_testing
   run_with_timeout bash -ceuxo pipefail "$TEST_CMD"
   FINAL_STATUS="tested"
 fi

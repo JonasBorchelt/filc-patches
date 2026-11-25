@@ -878,6 +878,47 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
     assert(File.binread(bin_t1a) == File.binread(bin_t1b),
            "package-port --xz-threads 1 must produce byte-identical deterministic .tar.xz archives on GNU tar")
   end
+
+  # 10. Verify two-phase watch mode transitions cleanly from throttled background
+  #     (--bg-throttle --bg-parallel 1 --bg-xz-threads 1) to full post-build speed
+  #     (--parallel 4 --xz-threads 0) when the done-marker appears.
+  out_tp = File.join(td, "out-twophase")
+  done_tp = File.join(td, "twophase.done")
+  File.unlink(done_tp) if File.exist?(done_tp)
+  File.write(File.join(state, "demo.json"), JSON.generate("name" => "demo", "status" => "tested"))
+  tp_out = +""
+  tp_err = +""
+  tp_st = nil
+  tp_thr = Thread.new do
+    tp_out, tp_err, tp_st = Open3.capture3(
+      { "FILC_LEAK_EXACT_TOKENS" => TEST_EXACT_TOKENS, "SOURCE_DATE_EPOCH" => "1700000000" },
+      "ruby", PACKAGE_SCRIPT,
+      "--repo-root", repo,
+      "--work-dir", work,
+      "--pizfix", pizfix,
+      "--neutral-prefix", pizfix,
+      "--ports-cache-dir", cache,
+      "--out-dir", out_tp,
+      "--channel", "0.1.4",
+      "--arch", "x86_64-linux",
+      "--ports", "demo",
+      "--watch-done-file", done_tp,
+      "--bg-throttle",
+      "--bg-parallel", "1",
+      "--bg-xz-threads", "1",
+      "--parallel", "4",
+      "--xz-threads", "0"
+    )
+  end
+  sleep 0.6
+  File.write(done_tp, "done\n")
+  tp_thr.join
+  assert(tp_st && tp_st.success?, "two-phase watch package-port failed: #{tp_err}\n#{tp_out}")
+  assert(tp_out.include?("PACKAGER_MODE: phase=background parallel=1 xz_threads=1"),
+         "missing background mode banner: #{tp_out}")
+  assert(tp_out.include?("PACKAGER_MODE: phase=post-build parallel=4 xz_threads=0 throttle=off"),
+         "missing post-build mode banner: #{tp_out}")
+  assert(tp_out.include?("FILC_PORT demo packaged "), "missing demo packaged marker: #{tp_out}")
 end
 
-puts "TEST_PACKAGE_PORT: PASS (9/9)"
+puts "TEST_PACKAGE_PORT: PASS (10/10)"

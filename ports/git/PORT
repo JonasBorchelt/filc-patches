@@ -45,6 +45,7 @@ port_test() {
   out="$("$PIZFIX/bin/git" --version)"
   ver="${out%%$'\n'*}"
   echo "git version: $ver"
+  echo "git --exec-path: $("$PIZFIX/bin/git" --exec-path)"
   printf '%s\n' "$ver" | grep -Fxq 'git version 2.56.0'
   local td
   td="$(mktemp -d)"
@@ -65,13 +66,16 @@ port_test() {
 port_package_smoke() {
   test -L "$PKG_PREFIX/libexec/git-core/git-status"
   test "$(readlink "$PKG_PREFIX/libexec/git-core/git-status")" = "../../bin/git"
-  local out ver td exec_path
+  local out ver td exec_path expected_exec_path actual_exec_path
   out="$(env -u GIT_EXEC_PATH -u GIT_TEMPLATE_DIR "$PKG_PREFIX/bin/git" --version)"
   ver="${out%%$'\n'*}"
   printf '%s\n' "$ver" | grep -Fxq 'git version 2.56.0'
   # Verify RUNTIME_PREFIX resolves libexec/git-core relative to the binary without GIT_EXEC_PATH
   exec_path="$(env -u GIT_EXEC_PATH -u GIT_TEMPLATE_DIR "$PKG_PREFIX/bin/git" --exec-path)"
-  test "$exec_path" = "$PKG_PREFIX/libexec/git-core"
+  expected_exec_path="$(realpath "$PKG_PREFIX/libexec/git-core")"
+  actual_exec_path="$(realpath "$exec_path" 2>/dev/null || printf '%s' "$exec_path")"
+  echo "git --exec-path: $exec_path (resolved=$actual_exec_path expected=$expected_exec_path)"
+  test "$actual_exec_path" = "$expected_exec_path"
   td="$(mktemp -d)"
   env -u GIT_EXEC_PATH -u GIT_TEMPLATE_DIR "$PKG_PREFIX/bin/git" -C "$td" init -q -b main
   env -u GIT_EXEC_PATH -u GIT_TEMPLATE_DIR "$PKG_PREFIX/bin/git" -C "$td" config user.name "Fil-C Smoke"

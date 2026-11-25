@@ -93,8 +93,9 @@ require "openssl"
 require "yaml"
 require "zlib"
 
-prefix = ENV.fetch("PKG_PREFIX")
-raise "topdir mismatch: #{RbConfig::TOPDIR.inspect} != #{prefix.inspect}" unless RbConfig::TOPDIR == prefix
+prefix = File.realpath(ENV.fetch("PKG_PREFIX"))
+topdir = File.exist?(RbConfig::TOPDIR) ? File.realpath(RbConfig::TOPDIR) : RbConfig::TOPDIR
+raise "topdir mismatch: #{RbConfig::TOPDIR.inspect} (resolved=#{topdir.inspect}) != #{prefix.inspect}" unless topdir == prefix
 raise "json" unless JSON.parse(JSON.generate({"k" => 42}))["k"] == 42
 raise "openssl" unless OpenSSL::Digest::SHA256.hexdigest("hello\n") == "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
 raise "zlib" unless Zlib::Inflate.inflate(Zlib::Deflate.deflate("reloc")) == "reloc"

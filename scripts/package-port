@@ -1119,14 +1119,19 @@ module PortPackager
         }
         bash_bin = ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).map { |d| File.join(d, "bash") }.find { |p| File.file?(p) && File.executable?(p) } || "/bin/bash"
         timeout_bin = ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).map { |d| File.join(d, "timeout") }.find { |p| File.file?(p) && File.executable?(p) }
-        bash_cmd = [
-          bash_bin, "-euo", "pipefail", "-c",
-          'source "$PORT_FILE" && declare -F port_package_smoke >/dev/null && port_package_smoke'
-        ]
+        smoke_script = <<~'SH'.chomp
+          export PS4='+ [port_package_smoke:${LINENO}] '
+          trap 'rc=$?; echo "SMOKE_CMD_FAILED line=${LINENO} rc=$rc cmd=${BASH_COMMAND}" >&2' ERR
+          source "$PORT_FILE"
+          declare -F port_package_smoke >/dev/null
+          set -x
+          port_package_smoke
+        SH
+        bash_cmd = [bash_bin, "-euo", "pipefail", "-c", smoke_script]
         bash_cmd = [timeout_bin, "120", *bash_cmd] if timeout_bin
         out_err, st = Open3.capture2e(smoke_env, *bash_cmd)
         unless st.success?
-          tail = out_err.lines.last(30).join.strip
+          tail = out_err.lines.last(80).join.strip
           errors << "port_package_smoke failed (exit=#{st.exitstatus}):\n#{tail}"
         end
       end

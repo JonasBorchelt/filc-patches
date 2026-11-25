@@ -128,6 +128,9 @@ def write_mock_build_port(path)
 
     # Optional failure injection for error-isolation test
     if [[ "${MOCK_FAIL_PORT:-}" == "$PORT_NAME" ]]; then
+      for i in $(seq 1 90); do
+        echo "MOCK_FAIL_DETAIL_LINE_${i} port=$PORT_NAME"
+      done
       echo "error: injected build failure in $PORT_NAME" >&2
       printf '{"name":"%s","version":"%s","tier":%s,"status":"failed","failed_stage":"build","failed_kind":"package","policy_class":"%s","deps":[],"duration_seconds":1,"patch_count":0,"added_lines":0,"removed_lines":0,"files_changed":0}\n' \
         "$PORT_NAME" "$VERSION" "$TIER" "$POLICY_CLASS" > "$STATE_DIR/$PORT_NAME.json"
@@ -401,6 +404,11 @@ Dir.mktmpdir("filc-stream-test-") do |tmp|
   assert(out_f.include?("PUBLISH_PORTS_COMMIT_BLOCKED:"), "missing COMMIT_BLOCKED banner:\n#{out_f}")
   assert(out_f.include?("- mid1 (stage=build"), "missing mid1 in failed summary:\n#{out_f}")
   assert(out_f.include?("- app (blocked_by=mid1)"), "missing app in blocked summary:\n#{out_f}")
+  assert(out_f.include?("=== FAILED PORT LOG: mid1 (stage=build, kind=package, last 80 lines) ==="),
+         "missing 80-line FAILED PORT LOG header for mid1:\n#{out_f}")
+  assert(out_f.include?("MOCK_FAIL_DETAIL_LINE_20 port=mid1"), "missing earlier line inside 80-line tail:\n#{out_f}")
+  assert(out_f.include?("MOCK_FAIL_DETAIL_LINE_90 port=mid1"), "missing latest line inside 80-line tail:\n#{out_f}")
+  assert(out_f.include?("=== END FAILED PORT LOG: mid1 ==="), "missing END FAILED PORT LOG footer:\n#{out_f}")
   assert(!File.exist?(File.join(out_fail, "0.1.4", "x86_64-linux", "index.json")),
          "index.json must NOT be written when any port fails!")
   fail_summary = JSON.parse(File.read(File.join(work_fail, "publish-summary.json"), encoding: "UTF-8"))

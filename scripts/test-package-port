@@ -1368,6 +1368,7 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
   )
   assert(!smf_st.success?, "failing port_package_smoke must fail package-port")
   assert(smf_e.include?("PACKAGE_SMOKE FAILED"), "expected PACKAGE_SMOKE FAILED error, got: #{smf_e}")
+  assert(smf_e.include?("SMOKE_CMD_FAILED"), "expected SMOKE_CMD_FAILED diagnostic in smoke error, got: #{smf_e}")
   assert(!File.exist?(File.join(sm_out_fail, "0.1.4", "x86_64-linux", "index.json")),
          "index.json must not be written when PACKAGE_SMOKE fails")
 

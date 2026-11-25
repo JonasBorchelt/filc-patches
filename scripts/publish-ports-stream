@@ -695,7 +695,7 @@ module PublishPortsStream
     reason.length > 180 ? "#{reason[0, 177]}..." : reason
   end
 
-  def extract_failure_details(output, max_lines: 30)
+  def extract_failure_details(output, max_lines: 80)
     raw_lines = decode_utf8(output).lines.map { |l| l.chomp("\n").chomp("\r") }
     gate_idx = raw_lines.rindex do |l|
       l.include?("LEAK_GATE FAILED") ||
@@ -705,15 +705,64 @@ module PublishPortsStream
     if gate_idx
       block = []
       raw_lines[gate_idx..].each_with_index do |ln, off|
-        break if off > 0 && (ln.strip.empty? || ln.start_with?("\tfrom ", "from "))
+        break if off > 0 && ln.match?(/\A\s*from\s+/)
 
-        block << ln[0, 240]
+        block << ln[0, 320]
         break if block.length >= max_lines
       end
+      block.pop while !block.empty? && block.last.strip.empty?
       return block
     end
     non_empty = raw_lines.reject { |l| l.strip.empty? }
-    non_empty.last([max_lines, 10].min).map { |l| l[0, 240] }
+    non_empty.last(max_lines).map { |l| l[0, 320] }
+  end
+
+  def secret_tokens_for_redaction(exact_tokens_env)
+    tokens = []
+    raw = ENV[exact_tokens_env].to_s
+    raw.each_line do |ln|
+      s = ln.strip
+      next if s.empty? || s.start_with?("#")
+
+      tokens << s
+    end
+    SECRET_ENV_KEYS.each do |k|
+      v = ENV[k].to_s.strip
+      tokens << v if v.length >= 6
+    end
+    tokens.uniq.sort_by { |t| -t.length }
+  end
+
+  def sanitize_log_line(line, redact_tokens)
+    s = decode_utf8(line).chomp("\n").chomp("\r")
+    redact_tokens.each do |tok|
+      s = s.gsub(tok, "[REDACTED]") if s.include?(tok)
+    end
+    s.length > 400 ? "#{s[0, 397]}..." : s
+  end
+
+  def details_preview(details, limit:)
+    arr = Array(details)
+    return arr if arr.length <= limit
+
+    first = arr.first.to_s
+    if first.include?("LEAK_GATE FAILED") || first.include?("SIZE_LIMIT FAILED") || first.include?("PACKAGE_SMOKE FAILED")
+      arr.first(limit)
+    else
+      arr.last(limit)
+    end
+  end
+
+  def read_log_tail(log_file, max_lines: 80, redact_tokens: [])
+    return [] unless log_file && File.file?(log_file)
+
+    lines = File.binread(log_file)
+                .force_encoding("UTF-8")
+                .encode("UTF-8", invalid: :replace, undef: :replace)
+                .lines
+    lines.last(max_lines).map { |ln| sanitize_log_line(ln, redact_tokens) }
+  rescue StandardError
+    []
   end
 
   def sort_json(obj)
@@ -1476,9 +1525,10 @@ module PublishPortsStream
                 "log_file" => log_file
               }
               $stdout.puts("FILC_PORT #{pname} failed:#{fk} policy=#{meta['policy_class']} stage=#{fail_stage || 'build'} duration=#{port_dur.round}")
+              redact_tokens = secret_tokens_for_redaction(opts[:exact_tokens_env])
               unless fail_details.empty?
                 $stdout.puts("STREAM_SLOT[#{slot_idx}] FAIL_DETAIL #{pname} (stage=#{fail_stage || 'build'}, kind=#{fk}):")
-                fail_details.each { |dl| $stdout.puts("  | #{dl}") }
+                details_preview(fail_details, limit: 40).each { |dl| $stdout.puts("  | #{sanitize_log_line(dl, redact_tokens)}") }
               end
               # Only build/verify failures block downstream builds (upload failure leaves verified tree intact)
               propagate_blocked.call(pname) unless verify_ok
@@ -1532,6 +1582,7 @@ module PublishPortsStream
     write_json(File.join(opts[:work_dir], "publish-summary.json"), summary_obj)
 
     unless commit_allowed
+      redact_tokens = secret_tokens_for_redaction(opts[:exact_tokens_env])
       $stdout.puts("FILC_PHASE stream-ports failure #{total_duration.round}")
       $stdout.puts("=" * 80)
       $stdout.puts(
@@ -1540,9 +1591,9 @@ module PublishPortsStream
       )
       $stdout.puts("FAILED PORTS PREVENTING INDEX COMMIT:")
       failures.sort_by { |f| f["name"] }.each do |f|
-        $stdout.puts("  - #{f['name']} (stage=#{f['stage']}, kind=#{f['kind']}): #{f['reason']}")
-        Array(f["details"]).each do |dl|
-          $stdout.puts("      #{dl}")
+        $stdout.puts("  - #{f['name']} (stage=#{f['stage']}, kind=#{f['kind']}): #{sanitize_log_line(f['reason'], redact_tokens)}")
+        details_preview(f["details"], limit: 25).each do |dl|
+          $stdout.puts("      #{sanitize_log_line(dl, redact_tokens)}")
         end
       end
       unless blocked_records.empty?
@@ -1550,6 +1601,16 @@ module PublishPortsStream
         blocked_records.each do |r|
           $stdout.puts("  - #{r['name']} (blocked_by=#{r['blocked_by'].join(',')})")
         end
+      end
+      failures.sort_by { |f| f["name"] }.each do |f|
+        tail = read_log_tail(f["log_file"], max_lines: 80, redact_tokens: redact_tokens)
+        tail = Array(f["details"]).map { |dl| sanitize_log_line(dl, redact_tokens) } if tail.empty?
+        next if tail.empty?
+
+        $stdout.puts("")
+        $stdout.puts("=== FAILED PORT LOG: #{f['name']} (stage=#{f['stage']}, kind=#{f['kind']}, last #{tail.length} lines) ===")
+        tail.each { |ln| $stdout.puts(ln) }
+        $stdout.puts("=== END FAILED PORT LOG: #{f['name']} ===")
       end
       $stdout.puts("=" * 80)
       $stdout.flush

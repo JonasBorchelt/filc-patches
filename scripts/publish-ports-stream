@@ -371,22 +371,10 @@ module PublishPortsStream
 
   def load_timings(timings_file, bootstrap_glob: "/ccache/reports/ports-*.json")
     durations = {}
-    if timings_file && File.file?(timings_file)
-      begin
-        parsed = JSON.parse(File.read(timings_file, encoding: "UTF-8"))
-        raw_map = parsed.is_a?(Hash) && parsed["durations"].is_a?(Hash) ? parsed["durations"] : parsed
-        if raw_map.is_a?(Hash)
-          raw_map.each do |k, v|
-            val = v.to_f
-            durations[k.to_s] = val if PORT_NAME_RE.match?(k.to_s) && val > 0.0
-          end
-        end
-      rescue StandardError
-        nil
-      end
-      return durations unless durations.empty?
-    end
 
+    # Seed from the latest legacy ports report first so ports missing from a
+    # partial ports-timings.json (e.g. blocked in an earlier run) still inherit
+    # their historical build duration instead of falling back to a tiny default.
     if bootstrap_glob && !bootstrap_glob.empty?
       latest = Dir.glob(bootstrap_glob).sort_by { |p| File.mtime(p) }.last
       if latest && File.file?(latest)
@@ -403,6 +391,22 @@ module PublishPortsStream
         end
       end
     end
+
+    if timings_file && File.file?(timings_file)
+      begin
+        parsed = JSON.parse(File.read(timings_file, encoding: "UTF-8"))
+        raw_map = parsed.is_a?(Hash) && parsed["durations"].is_a?(Hash) ? parsed["durations"] : parsed
+        if raw_map.is_a?(Hash)
+          raw_map.each do |k, v|
+            val = v.to_f
+            durations[k.to_s] = val if PORT_NAME_RE.match?(k.to_s) && val > 0.0
+          end
+        end
+      rescue StandardError
+        nil
+      end
+    end
+
     durations
   end
 
@@ -424,6 +428,15 @@ module PublishPortsStream
     $stderr.puts("warning: failed to persist timings file #{timings_file}: #{e.message}")
   end
 
+  def conservative_missing_duration(durations)
+    vals = durations.values.map(&:to_f).select { |v| v > 0.0 }.sort
+    return DEFAULT_DURATION_ESTIMATE if vals.empty?
+
+    mid = vals.length / 2
+    median = vals.length.odd? ? vals[mid] : ((vals[mid - 1] + vals[mid]) / 2.0)
+    [median * 3.0, DEFAULT_DURATION_ESTIMATE].max.round(3)
+  end
+
   def compute_critical_paths(ports, selected, durations)
     topo = topo_sort(ports, selected)
     rdeps = Hash.new { |h, k| h[k] = [] }
@@ -431,9 +444,10 @@ module PublishPortsStream
       ports[n]["deps"].each { |d| rdeps[d] << n if selected.include?(d) }
     end
 
+    missing_est = conservative_missing_duration(durations)
     cp = {}
     topo.reverse_each do |n|
-      own = [durations.fetch(n, DEFAULT_DURATION_ESTIMATE).to_f, 1.0].max
+      own = [durations.fetch(n, missing_est).to_f, 1.0].max
       tail = rdeps[n].empty? ? 0.0 : rdeps[n].map { |child| cp[child] }.max
       cp[n] = (own + tail).round(3)
     end
@@ -1397,7 +1411,7 @@ module PublishPortsStream
           mu.synchronize do
             active_count -= 1
             done_count += 1
-            measured_durations[pname] = port_dur if verify_ok
+            measured_durations[pname] = port_dur if build_ok
 
             if build_ok && verify_ok && upload_ok
               if staged_rec

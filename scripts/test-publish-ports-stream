@@ -592,7 +592,36 @@ Dir.mktmpdir("filc-stream-test-") do |tmp|
   to_libc = File.read(File.join(work_leak, "observed-timeouts", "libc")).strip
   assert(to_liba == "1500", "expected duration-scaled timeout 1500s (600*2.5) for liba, got #{to_liba}")
   assert(to_libc == "3600", "expected capped timeout 3600s for libc (2000*2.5 capped), got #{to_libc}")
-  puts "LEAK_GATE_DETAILS_AND_TIMEOUT_SCALING: PASS (exact ELF hit printed, liba=1500s, libc=3600s)"
+  # Even though libc failed LEAK_GATE during verify, its build completed so its
+  # measured duration must still be persisted to timings_file.
+  saved_slow = JSON.parse(File.read(slow_timings, encoding: "UTF-8")).fetch("durations")
+  assert(saved_slow.key?("libc") && saved_slow["libc"].to_f > 0.0 && saved_slow["libc"].to_f != 2000.0,
+         "expected measured build duration to be persisted for verify-failed libc: #{saved_slow.inspect}")
+  puts "LEAK_GATE_DETAILS_AND_TIMEOUT_SCALING: PASS (exact ELF hit printed, liba=1500s, libc=3600s, build-ok timing persisted)"
+
+  puts "=== [7/7] Partial timings merge from bootstrap report + conservative missing estimate ==="
+  load STREAM_BIN
+  boot_dir = File.join(tmp, "boot-reports")
+  FileUtils.mkdir_p(boot_dir)
+  File.write(File.join(boot_dir, "ports-200.json"), JSON.pretty_generate({
+    "ports" => [
+      { "name" => "liba", "duration_seconds" => 120 },
+      { "name" => "mid1", "duration_seconds" => 900 }
+    ]
+  }) + "\n", encoding: "UTF-8")
+  partial_timings = File.join(tmp, "partial-timings.json")
+  File.write(partial_timings, JSON.pretty_generate({
+    "schema_version" => 1,
+    "durations" => { "liba" => 80, "libb" => 60, "mid2" => 100 }
+  }) + "\n", encoding: "UTF-8")
+  merged = PublishPortsStream.load_timings(partial_timings, bootstrap_glob: File.join(boot_dir, "ports-*.json"))
+  assert(merged["liba"] == 80.0, "timings_file must override bootstrap for liba: #{merged.inspect}")
+  assert(merged["mid1"] == 900.0, "missing mid1 must be inherited from bootstrap report: #{merged.inspect}")
+  ports_map = PublishPortsStream.load_ports(fix[:ports_dir])
+  cp_merged = PublishPortsStream.compute_critical_paths(ports_map, ports_map.keys.sort, merged)
+  # Values are [60, 80, 100, 900] -> median = 90.0 -> missing estimate = 270.0 (not 10.0)
+  assert(cp_merged["libc"] == 270.0, "expected conservative 3x median (270.0) for unmeasured libc, got #{cp_merged['libc']}")
+  puts "TIMINGS_BOOTSTRAP_MERGE_AND_FALLBACK: PASS (mid1=900.0 inherited, unmeasured libc=270.0)"
 
   puts "ALL PUBLISH-PORTS-STREAM TESTS PASSED"
 end

@@ -26,6 +26,9 @@ port_configure() {
     PKG_CONFIG="$PIZFIX/bin/pkg-config --define-prefix" \
     PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" \
     EXTENSION_DIR="$PIZFIX/lib/php8.4/extensions" \
+    PHP_UNAME="Linux" \
+    PHP_BUILD_SYSTEM="Linux" \
+    PHP_BUILD_PROVIDER="Fil-C" \
     ac_cv_have_decl_UFFDIO_WRITEPROTECT_MODE_WP=no \
     php_cv_have_fpu_inline_asm_x86=no \
     ./configure --prefix="$PIZFIX" \

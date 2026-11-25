@@ -654,7 +654,9 @@ module PortPackager
       reused_hardlinks: 0
     }
 
-    Dir.glob(File.join(prefix_dir, "**", "*")).sort.each do |path|
+    Dir.glob(File.join(prefix_dir, "**", "*"), File::FNM_DOTMATCH).sort.each do |path|
+      base = File.basename(path)
+      next if base == "." || base == ".."
       next if File.directory?(path) || File.symlink?(path)
 
       rel = path.sub("#{prefix_dir}/", "")
@@ -1647,7 +1649,9 @@ module PortPackager
 
         pkg_files = {}
         sha_cache_by_inode = {}
-        Dir.glob(File.join(prefix_stage, "**", "*")).sort.each do |p|
+        Dir.glob(File.join(prefix_stage, "**", "*"), File::FNM_DOTMATCH).sort.each do |p|
+          base = File.basename(p)
+          next if base == "." || base == ".."
           next if File.directory?(p) && !File.symlink?(p)
 
           rel = p.sub("#{prefix_stage}/", "")

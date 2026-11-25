@@ -1397,4 +1397,71 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
          "expected broken relative symlink error, got: #{smb_e}")
 end
 
-puts "TEST_PACKAGE_PORT: PASS (15/15)"
+# 16. Dotfiles (e.g. perl's .packlist) inside prefix must be normalized from slot view
+# to neutral prefix and recorded in filc-pkg.json with zero LEAK_GATE hits.
+Dir.mktmpdir("filc-pkg-dotfile-") do |td|
+  dot_repo = File.join(td, "repo")
+  dot_tc_parent = File.join(td, "filc")
+  dot_neutral = File.join(dot_tc_parent, "0.1.4", "pizfix")
+  dot_view = File.join(dot_tc_parent, ".v000", "pizfix")
+  dot_work = File.join(td, "work")
+  dot_state = File.join(dot_work, "ports-state")
+  dot_cache = File.join(td, "cache")
+  dot_out = File.join(td, "out")
+  FileUtils.mkdir_p([
+    File.join(dot_repo, "ports", "dotpkg"),
+    File.join(dot_neutral),
+    File.join(dot_view, "lib", "perl5", "5.40.5", "x86_64-linux"),
+    dot_state, dot_cache, dot_out
+  ])
+  FileUtils.cp(File.join(REPO_ROOT, "UPSTREAM"), File.join(dot_repo, "UPSTREAM"))
+  dot_tar = File.join(td, "dotpkg-1.0.tar.gz")
+  dot_sha = make_tar_gz(dot_tar, { "dotpkg-1.0/README" => "dotpkg\n" })
+  FileUtils.cp(dot_tar, File.join(dot_cache, "dotpkg-1.0-#{dot_sha[0, 12]}-dotpkg-1.0.tar.gz"))
+  File.write(File.join(dot_repo, "ports", "dotpkg", "PORT"), <<~PORT)
+    NAME=dotpkg
+    VERSION=1.0
+    LICENSE=MIT
+    UPSTREAM_URL=https://example.invalid/dotpkg-1.0.tar.gz
+    UPSTREAM_SHA256=#{dot_sha}
+    EXTRACT_DIR=dotpkg-1.0
+    TIER=0
+    DEPS=""
+    BUILD_SYSTEM=autotools
+    POLICY_CLASS=P0-Clean
+  PORT
+  packlist_rel = "lib/perl5/5.40.5/x86_64-linux/.packlist"
+  File.write(File.join(dot_view, packlist_rel), "#{dot_view}/bin/perl\n#{dot_view}/lib/perl5/Config.pm\n")
+  File.write(File.join(dot_state, "dotpkg.manifest.json"), JSON.pretty_generate(
+    "port" => "dotpkg",
+    "files" => [packlist_rel]
+  ) + "\n")
+
+  do_o, do_e, do_st = Open3.capture3(
+    BASE_ENV,
+    "ruby", PACKAGE_SCRIPT,
+    "--repo-root", dot_repo,
+    "--work-dir", dot_work,
+    "--pizfix", dot_view,
+    "--neutral-prefix", dot_neutral,
+    "--ports-cache-dir", dot_cache,
+    "--out-dir", dot_out,
+    "--channel", "0.1.4",
+    "--arch", "x86_64-linux",
+    "--skip-package-smoke"
+  )
+  assert(do_st.success?, "dotfile normalization test failed: #{do_o}\n#{do_e}")
+  bin_arc = Dir.glob(File.join(dot_out, "0.1.4", "x86_64-linux", "bin", "dotpkg-*.tar.xz")).first
+  assert(bin_arc && File.file?(bin_arc), "dotpkg archive missing")
+  ext_dir = File.join(td, "extracted")
+  FileUtils.mkdir_p(ext_dir)
+  _to, _te, tst = Open3.capture3("tar", "-xJf", bin_arc, "-C", ext_dir)
+  assert(tst.success?, "failed to extract dotpkg archive")
+  extracted_pl = File.read(File.join(ext_dir, "prefix", packlist_rel), encoding: "UTF-8")
+  assert(!extracted_pl.include?(".v000"), ".packlist still leaked slot view path: #{extracted_pl}")
+  assert(extracted_pl.include?("#{dot_neutral}/bin/perl"), ".packlist not normalized to neutral prefix: #{extracted_pl}")
+  pkg_meta = JSON.parse(File.read(File.join(ext_dir, "filc-pkg.json"), encoding: "UTF-8"))
+  assert(pkg_meta.fetch("files").key?(packlist_rel), ".packlist missing from filc-pkg.json files map")
+end
+
+puts "TEST_PACKAGE_PORT: PASS (16/16)"

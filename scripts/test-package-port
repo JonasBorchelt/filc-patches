@@ -919,6 +919,72 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
   assert(tp_out.include?("PACKAGER_MODE: phase=post-build parallel=4 xz_threads=0 throttle=off"),
          "missing post-build mode banner: #{tp_out}")
   assert(tp_out.include?("FILC_PORT demo packaged "), "missing demo packaged marker: #{tp_out}")
+
+  # 11. Verify non-watch post-build packaging (--parallel 4 --xz-threads 0) and
+  #     parallel --sign-only --parallel 4 per-port signing/signed live markers.
+  out_pb = File.join(td, "out-postbuild")
+  pb_out, pb_err, pb_st = Open3.capture3(
+    p201_env,
+    "ruby", PACKAGE_SCRIPT,
+    "--repo-root", p201_repo,
+    "--work-dir", p201_work,
+    "--pizfix", p201_pizfix,
+    "--neutral-prefix", p201_pizfix,
+    "--ports-cache-dir", p201_cache,
+    "--out-dir", out_pb,
+    "--ports", "bison,rsync",
+    "--parallel", "4",
+    "--xz-threads", "0",
+    "--channel", "0.1.4",
+    "--arch", "x86_64-linux"
+  )
+  assert(pb_st.success?, "post-build parallel package-port failed: #{pb_err}\n#{pb_out}")
+  assert(pb_out.include?("PACKAGER_MODE: phase=post-build parallel=4 xz_threads=0 throttle=off"),
+         "missing non-watch post-build banner: #{pb_out}")
+  assert(pb_out.include?("FILC_PORT bison packaged ") && pb_out.include?("FILC_PORT rsync packaged "),
+         "missing per-port packaged markers: #{pb_out}")
+  assert(pb_out.include?("FILC_STAGE_PROGRESS package 2/2 "),
+         "missing package 2/2 stage progress: #{pb_out}")
+
+  fake_sign_bin = File.join(td, "fake-minisign-bin")
+  FileUtils.mkdir_p(fake_sign_bin)
+  fake_minisign = File.join(fake_sign_bin, "minisign")
+  File.write(fake_minisign, <<~SH)
+    #!/usr/bin/env ruby
+    out_sig = nil
+    ARGV.each_with_index do |arg, idx|
+      out_sig = ARGV[idx + 1] if arg == "-x"
+    end
+    raise "missing -x" unless out_sig
+    File.write(out_sig, "untrusted comment: fake\\nAA==\\ntrusted comment: fake\\nAA==\\n")
+  SH
+  File.chmod(0o755, fake_minisign)
+
+  sign_env = {
+    "PATH" => "#{fake_sign_bin}:#{ENV['PATH']}",
+    "FILC_PORTS_MINISIGN_KEY" => "untrusted comment: fake key\nRWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3\n"
+  }
+  sg_out, sg_err, sg_st = Open3.capture3(
+    sign_env,
+    "ruby", PACKAGE_SCRIPT,
+    "--sign-only",
+    "--parallel", "4",
+    "--out-dir", out_pb,
+    "--channel", "0.1.4",
+    "--arch", "x86_64-linux"
+  )
+  assert(sg_st.success?, "parallel --sign-only failed: #{sg_err}\n#{sg_out}")
+  assert(sg_out.include?("FILC_PORT bison signing stage=sign") && sg_out.include?("FILC_PORT bison signed stage=sign"),
+         "missing bison signing/signed markers: #{sg_out}")
+  assert(sg_out.include?("FILC_PORT rsync signing stage=sign") && sg_out.include?("FILC_PORT rsync signed stage=sign"),
+         "missing rsync signing/signed markers: #{sg_out}")
+  assert(sg_out.include?("FILC_STAGE_PROGRESS sign 2/2 "),
+         "missing sign 2/2 stage progress: #{sg_out}")
+  assert(sg_out.include?("PACKAGE_PORT: SIGNED channel=0.1.4 arch=x86_64-linux packages=2 parallel=2"),
+         "missing SIGNED summary banner: #{sg_out}")
+  pb_ch_dir = File.join(out_pb, "0.1.4", "x86_64-linux")
+  assert(File.file?(File.join(pb_ch_dir, "index.json.minisig")) && File.file?(File.join(pb_ch_dir, "SHA256SUMS.minisig")),
+         "missing .minisig outputs after --sign-only")
 end
 
-puts "TEST_PACKAGE_PORT: PASS (10/10)"
+puts "TEST_PACKAGE_PORT: PASS (11/11)"

@@ -782,25 +782,51 @@ module PortPackager
       raise "signing key missing for --sign-only" unless s1 && s2
 
       total_pkgs = pkg_names.length
-      pkg_names.each_with_index do |pkg_name, idx|
-        $stdout.puts("FILC_PORT #{pkg_name} signing stage=sign")
-        $stdout.flush
-        entry = pkg_map[pkg_name]
-        %w[source recipe binary].each do |kind|
-          art = entry[kind]
-          rel = art && art["path"]
-          expected = art && art["sha256"]
-          full = rel ? File.join(channel_dir, rel) : nil
-          unless full && File.file?(full) && sums_map[rel] == expected && file_sha256(full) == expected
-            raise "signed checksum verification failed for #{pkg_name} (#{kind})"
+      sign_mu = Mutex.new
+      sign_done = 0
+      sign_error = nil
+      sign_q = Queue.new
+      pkg_names.each { |n| sign_q << n }
+      sign_workers_cnt = [[opts[:parallel].to_i, 1].max, [total_pkgs, 1].max].min
+      sign_workers_cnt.times { sign_q << nil }
+
+      sign_threads = Array.new(sign_workers_cnt) do
+        Thread.new do
+          while (pkg_name = sign_q.pop)
+            next if sign_mu.synchronize { !sign_error.nil? }
+
+            sign_mu.synchronize do
+              $stdout.puts("FILC_PORT #{pkg_name} signing stage=sign")
+              $stdout.flush
+            end
+
+            begin
+              entry = pkg_map[pkg_name]
+              %w[source recipe binary].each do |kind|
+                art = entry[kind]
+                rel = art && art["path"]
+                expected = art && art["sha256"]
+                full = rel ? File.join(channel_dir, rel) : nil
+                unless full && File.file?(full) && sums_map[rel] == expected && file_sha256(full) == expected
+                  raise "signed checksum verification failed for #{pkg_name} (#{kind})"
+                end
+              end
+              sign_mu.synchronize do
+                sign_done += 1
+                $stdout.puts("FILC_PORT #{pkg_name} signed stage=sign")
+                $stdout.puts("FILC_STAGE_PROGRESS sign #{sign_done}/#{total_pkgs} #{pkg_name}")
+                $stdout.flush
+              end
+            rescue StandardError => e
+              sign_mu.synchronize { sign_error ||= e }
+            end
           end
         end
-        $stdout.puts("FILC_PORT #{pkg_name} signed stage=sign")
-        $stdout.puts("FILC_STAGE_PROGRESS sign #{idx + 1}/#{total_pkgs} #{pkg_name}")
-        $stdout.flush
       end
+      sign_threads.each(&:join)
+      raise sign_error if sign_error
 
-      puts "PACKAGE_PORT: SIGNED channel=#{opts[:channel]} arch=#{opts[:arch]} packages=#{total_pkgs}"
+      puts "PACKAGE_PORT: SIGNED channel=#{opts[:channel]} arch=#{opts[:arch]} packages=#{total_pkgs} parallel=#{sign_workers_cnt}"
       return 0
     end
 
@@ -864,6 +890,9 @@ module PortPackager
         nil
       end
       $stdout.puts("PACKAGER_MODE: phase=background parallel=#{bg_par} xz_threads=#{opts[:bg_xz_threads]} throttle=#{bg_prefix.empty? ? 'none' : bg_prefix.join(' ')}")
+      $stdout.flush
+    elsif builds_done
+      $stdout.puts("PACKAGER_MODE: phase=post-build parallel=#{opts[:parallel]} xz_threads=#{opts[:xz_threads]} throttle=off")
       $stdout.flush
     end
 

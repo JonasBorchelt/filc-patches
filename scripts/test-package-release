@@ -189,7 +189,15 @@ FILC_RELEASE_HIGHLIGHTS_FILE="$MOCK_HIGHLIGHTS" \
 
 (cd "$OUT_DIR" && sha256sum -c SHA256SUMS)
 ARCHIVE="$(ls "$OUT_DIR"/filc-0.0.0-mock-*-linux.tar.xz)"
+if [[ -f "$OUT_DIR/filc-x86_64-linux.tar.xz" ]]; then
+  LATEST_ARCHIVE="$OUT_DIR/filc-x86_64-linux.tar.xz"
+else
+  LATEST_ARCHIVE="$OUT_DIR/filc-aarch64-linux.tar.xz"
+fi
 test -s "$ARCHIVE"
+test -s "$LATEST_ARCHIVE"
+cmp -s "$ARCHIVE" "$LATEST_ARCHIVE"
+test "$(wc -l < "$OUT_DIR/SHA256SUMS" | tr -d ' ')" -eq 2
 test -s "$OUT_DIR/PROVENANCE"
 test -s "$OUT_DIR/MANIFEST"
 test -s "$OUT_DIR/RELEASE_NOTES.md"

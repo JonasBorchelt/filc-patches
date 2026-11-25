@@ -481,7 +481,8 @@ if hits:
 print(f"LEAK_GATE: PASS (files={scanned_files}, binaries={scanned_binaries}, hits=0)")
 PY
 
-# 8. Reproducible tar.xz archive + SHA256SUMS + release notes template
+# 8. Reproducible tar.xz archive + version-free latest alias + SHA256SUMS + release notes template
+LATEST_ARCHIVE_NAME="filc-${ARCH}-linux.tar.xz"
 echo "=== Creating reproducible archive $OUT_DIR/$ARCHIVE_NAME ==="
 tar --sort=name \
     --mtime="@${SOURCE_DATE_EPOCH}" \
@@ -492,11 +493,14 @@ tar --sort=name \
     -cf - -C "$STAGE_PARENT" "$ARCHIVE_STEM" \
   | xz -T0 --block-size=16777216 -6 > "$OUT_DIR/$ARCHIVE_NAME"
 
+ln -f "$OUT_DIR/$ARCHIVE_NAME" "$OUT_DIR/$LATEST_ARCHIVE_NAME" 2>/dev/null \
+  || cp -f "$OUT_DIR/$ARCHIVE_NAME" "$OUT_DIR/$LATEST_ARCHIVE_NAME"
+
 (
   cd "$OUT_DIR"
-  sha256sum "$ARCHIVE_NAME" > SHA256SUMS
+  sha256sum "$ARCHIVE_NAME" "$LATEST_ARCHIVE_NAME" > SHA256SUMS
 )
-ARCHIVE_SHA256="$(awk '{print $1}' "$OUT_DIR/SHA256SUMS")"
+ARCHIVE_SHA256="$(awk -v f="$ARCHIVE_NAME" '$2==f{print $1; exit}' "$OUT_DIR/SHA256SUMS")"
 ARCHIVE_BYTES="$(wc -c < "$OUT_DIR/$ARCHIVE_NAME" | tr -d ' ')"
 
 cp "$STAGE/PROVENANCE" "$OUT_DIR/PROVENANCE"
@@ -578,6 +582,7 @@ echo "==========================================================================
 echo "RELEASE PACKAGE REPORT (BELEG)"
 echo "================================================================================"
 echo "ARCHIVE:             $OUT_DIR/$ARCHIVE_NAME"
+echo "LATEST_ARCHIVE:      $OUT_DIR/$LATEST_ARCHIVE_NAME"
 echo "ARCHIVE_BYTES:       $ARCHIVE_BYTES"
 echo "ARCHIVE_SHA256:      $ARCHIVE_SHA256"
 echo "PATCH_SERIES_SHA256: $PATCH_SERIES_SHA256"

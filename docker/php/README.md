@@ -18,6 +18,7 @@ Drop-in container images for memory-safe PHP compiled with [Fil-C](https://filc.
 - Official paths and environment variables: `/usr/local/bin/php`, `/usr/local/sbin/php-fpm`, `PHP_INI_DIR=/usr/local/etc/php` with `php.ini-development`, `php.ini-production`, `conf.d/`, and `php-fpm.d/` (`www.conf`, `docker.conf`, `zz-docker.conf`).
 - Official `docker-php-entrypoint`, `WORKDIR /var/www/html`, `STOPSIGNAL SIGQUIT`, `EXPOSE 9000`, and `www-data` worker user for FPM.
 - Drop-in helper commands: `docker-php-ext-install`, `docker-php-ext-enable`, `docker-php-ext-configure`, and `docker-php-source`. Prebuilt Fil-C extensions are activated without invoking a C compiler; unavailable extensions exit with a clear Fil-C guidance message.
+- Prebuilt loadable shared extensions ready for `docker-php-ext-enable` / `docker-php-ext-install`: `mysqli`, `pdo_mysql`, `pgsql`, `pdo_pgsql`, `gmp`, and `soap` (plus built-in `openssl`, `curl`, `sqlite3`, `pdo_sqlite`, `intl`, `mbstring`, `sodium`, `bcmath`, `exif`, `pcntl`, `sockets`, `zlib`, `bz2`, and `opcache`).
 
 ## Usage
 
@@ -39,7 +40,7 @@ Swap `FROM` in an existing Dockerfile:
 ```dockerfile
 FROM jonasborchelt/filc-php:8.5-fpm
 RUN cp "$PHP_INI_DIR/php.ini-production" "$PHP_INI_DIR/php.ini" && \
-    docker-php-ext-install intl bcmath exif opcache sockets pcntl
+    docker-php-ext-install pdo_mysql mysqli pdo_pgsql pgsql gmp soap intl bcmath opcache
 COPY . /var/www/html
 ```
 

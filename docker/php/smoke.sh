@@ -90,12 +90,40 @@ EOF
 echo "$SCRIPT_OUT"
 printf '%s\n' "$SCRIPT_OUT" | grep -Fxq "FILC_PHP_DOCKER_SMOKE_OK"
 
-# 2. Verify unknown extension fails clearly with Fil-C hint
+# 2. Verify all 6 prebuilt shared extensions exist and activate cleanly via docker-php-ext-enable
+SHARED_EXTS="mysqli pdo_mysql pgsql pdo_pgsql gmp soap"
+SHARED_OUT="$(docker run --rm "${IMAGE}" sh -eux -c '
+  ext_dir="$(php -r "echo ini_get(\"extension_dir\");")"
+  for ext in mysqli pdo_mysql pgsql pdo_pgsql gmp soap; do
+    test -f "${ext_dir}/${ext}.so"
+  done
+  docker-php-ext-enable mysqli pdo_mysql pgsql pdo_pgsql gmp soap
+  php -d display_startup_errors=1 -d display_errors=1 -d error_reporting=E_ALL -d zend.assertions=1 -d assert.exception=1 -r '\''
+    foreach (["mysqli", "pdo_mysql", "pgsql", "pdo_pgsql", "gmp", "soap"] as $e) {
+      assert(extension_loaded($e), "missing:$e");
+    }
+    $drivers = PDO::getAvailableDrivers();
+    assert(in_array("mysql", $drivers, true));
+    assert(in_array("pgsql", $drivers, true));
+    assert(in_array("sqlite", $drivers, true));
+    assert(gmp_strval(gmp_add("123456789012345678901234567890", "1")) === "123456789012345678901234567891");
+    assert(class_exists("SoapClient") && class_exists("SoapServer"));
+    echo "SHARED_EXTS_ENABLE_OK\n";
+  '\''
+' 2>&1)"
+echo "$SHARED_OUT"
+printf '%s\n' "$SHARED_OUT" | grep -Fxq "SHARED_EXTS_ENABLE_OK"
+if printf '%s\n' "$SHARED_OUT" | grep -Eq 'Warning:|Cannot load'; then
+  echo "error: unexpected PHP startup warning while enabling shared extensions (${SHARED_EXTS})" >&2
+  exit 1
+fi
+
+# 3. Verify unknown extension fails clearly with Fil-C hint
 ERR_OUT="$(docker run --rm "${IMAGE}" sh -c 'docker-php-ext-install nonexistent_ext_filc 2>&1; echo "RC=$?"')"
 printf '%s\n' "$ERR_OUT" | grep -Fq "RC=1"
 printf '%s\n' "$ERR_OUT" | grep -Fqi "fil-c"
 
-# 3. Drop-in acceptance test (build a realistic downstream Dockerfile by only swapping FROM)
+# 4. Drop-in acceptance test (build a realistic downstream Dockerfile by only swapping FROM)
 TMP_CTX="$(mktemp -d)"
 DROPIN_TAG="filc-php-dropin-test:${PHP_SERIES}-${VARIANT}-$$"
 cleanup_dropin() {
@@ -116,6 +144,13 @@ echo json_encode([
     'sockets' => extension_loaded('sockets'),
     'pcntl' => extension_loaded('pcntl'),
     'opcache' => extension_loaded('Zend OPcache'),
+    'mysqli' => extension_loaded('mysqli'),
+    'pdo_mysql' => extension_loaded('pdo_mysql'),
+    'pgsql' => extension_loaded('pgsql'),
+    'pdo_pgsql' => extension_loaded('pdo_pgsql'),
+    'gmp' => extension_loaded('gmp'),
+    'soap' => extension_loaded('soap'),
+    'pdo_drivers' => PDO::getAvailableDrivers(),
 ]) . "\n";
 EOF
   cat > "${TMP_CTX}/Dockerfile" <<EOF
@@ -124,18 +159,28 @@ RUN cp "\$PHP_INI_DIR/php.ini-production" "\$PHP_INI_DIR/php.ini" && \\
     printf 'memory_limit=256M\n' > "\$PHP_INI_DIR/conf.d/99-app.ini" && \\
     docker-php-source extract && \\
     docker-php-ext-configure intl && \\
-    docker-php-ext-install -j2 intl bcmath exif opcache sockets pcntl && \\
+    docker-php-ext-install -j2 intl bcmath exif opcache sockets pcntl mysqli pdo_mysql pgsql pdo_pgsql gmp soap && \\
     docker-php-source delete
 WORKDIR /app
 COPY app.php /app/app.php
 CMD ["php", "/app/app.php"]
 EOF
   docker build -q -t "$DROPIN_TAG" "$TMP_CTX" >/dev/null
-  DROPIN_OUT="$(docker run --rm "$DROPIN_TAG")"
+  DROPIN_OUT="$(docker run --rm "$DROPIN_TAG" 2>&1)"
   echo "Drop-in CLI app output: $DROPIN_OUT"
+  if printf '%s\n' "$DROPIN_OUT" | grep -Eq 'Warning:|Cannot load'; then
+    echo "error: unexpected PHP warning in Drop-in CLI app" >&2
+    exit 1
+  fi
   printf '%s\n' "$DROPIN_OUT" | grep -Fq '"memory_limit":"256M"'
   printf '%s\n' "$DROPIN_OUT" | grep -Fq '"intl":true'
   printf '%s\n' "$DROPIN_OUT" | grep -Fq '"opcache":true'
+  printf '%s\n' "$DROPIN_OUT" | grep -Fq '"mysqli":true'
+  printf '%s\n' "$DROPIN_OUT" | grep -Fq '"pdo_mysql":true'
+  printf '%s\n' "$DROPIN_OUT" | grep -Fq '"pgsql":true'
+  printf '%s\n' "$DROPIN_OUT" | grep -Fq '"pdo_pgsql":true'
+  printf '%s\n' "$DROPIN_OUT" | grep -Fq '"gmp":true'
+  printf '%s\n' "$DROPIN_OUT" | grep -Fq '"soap":true'
 elif [[ "$VARIANT" == "fpm" ]]; then
   docker run --rm "${IMAGE}" sh -eu -c '
     test -x /usr/local/sbin/php-fpm
@@ -159,11 +204,23 @@ FROM ${IMAGE}
 RUN cp "\$PHP_INI_DIR/php.ini-production" "\$PHP_INI_DIR/php.ini" && \\
     printf 'memory_limit=256M\n' > "\$PHP_INI_DIR/conf.d/99-app.ini" && \\
     printf '[www]\npm.max_children = 8\n' > "\$PHP_INI_DIR/php-fpm.d/zz-app.conf" && \\
-    docker-php-ext-install intl bcmath opcache
+    docker-php-ext-install intl bcmath opcache mysqli pdo_mysql pgsql pdo_pgsql gmp soap
 COPY index.php /var/www/html/index.php
 EOF
   docker build -q -t "$DROPIN_TAG" "$TMP_CTX" >/dev/null
-  docker run --rm "$DROPIN_TAG" php-fpm -t
+  FPM_TEST_OUT="$(docker run --rm "$DROPIN_TAG" php-fpm -t 2>&1)"
+  echo "$FPM_TEST_OUT"
+  if printf '%s\n' "$FPM_TEST_OUT" | grep -Eq 'Warning:|Cannot load'; then
+    echo "error: unexpected warning in Drop-in FPM config test" >&2
+    exit 1
+  fi
+  FPM_MODS="$(docker run --rm "$DROPIN_TAG" php-fpm -m 2>&1)"
+  for ext in mysqli pdo_mysql pgsql pdo_pgsql gmp soap; do
+    printf '%s\n' "$FPM_MODS" | grep -Fxiq "$ext" || {
+      echo "error: expected shared extension missing in php-fpm -m: $ext" >&2
+      exit 1
+    }
+  done
   # Start php-fpm briefly as default CMD and confirm clean startup + SIGQUIT stop
   CID="$(docker run -d "$DROPIN_TAG")"
   sleep 2

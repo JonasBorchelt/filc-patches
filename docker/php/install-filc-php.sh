@@ -15,7 +15,7 @@ PHP_VERSION="${PHP_VERSION:?PHP_VERSION is required (e.g. 8.5)}"
 FILC_CHANNEL="${FILC_CHANNEL:-0.1.5}"
 FILC_BASE_URL="${FILC_BASE_URL:-https://filc.connected.link}"
 FILC_BASE_URL="${FILC_BASE_URL%/}"
-FILC_GITHUB_RELEASE_URL="${FILC_GITHUB_RELEASE_URL-https://github.com/JonasBorchelt/filc-patches/releases/download/v${FILC_CHANNEL}}"
+FILC_GITHUB_RELEASE_URL="${FILC_GITHUB_RELEASE_URL:-}"
 FILC_USER_AGENT="${FILC_USER_AGENT:-filc-image-ci/${PHP_VERSION}}"
 
 if [[ ! "$PHP_VERSION" =~ ^[0-9]+\.[0-9]+$ ]]; then

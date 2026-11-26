@@ -154,7 +154,7 @@ jobs:
             PHP_VERSION=${{ matrix.php_series }}
             PHP_FULL_VERSION=${{ matrix.php_full }}
             FILC_CHANNEL=${{ env.FILC_CHANNEL }}
-            FILC_GITHUB_RELEASE_URL=https://github.com/${{ github.repository }}/releases/download/v${{ env.FILC_CHANNEL }}
+            FILC_BASE_URL=https://filc.connected.link
             FILC_USER_AGENT=filc-image-ci/${{ matrix.php_series }}
             SUPPORT_TIER=${{ matrix.support }}
 
@@ -190,7 +190,7 @@ jobs:
             PHP_VERSION=${{ matrix.php_series }}
             PHP_FULL_VERSION=${{ matrix.php_full }}
             FILC_CHANNEL=${{ env.FILC_CHANNEL }}
-            FILC_GITHUB_RELEASE_URL=https://github.com/${{ github.repository }}/releases/download/v${{ env.FILC_CHANNEL }}
+            FILC_BASE_URL=https://filc.connected.link
             FILC_USER_AGENT=filc-image-ci/${{ matrix.php_series }}
             SUPPORT_TIER=${{ matrix.support }}
 

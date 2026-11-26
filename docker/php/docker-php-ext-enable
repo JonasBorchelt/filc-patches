@@ -110,6 +110,8 @@ for raw in $exts; do
 
   if [ -f "$target_ini" ] && grep -Fxq "$line" "$target_ini"; then
     echo "filc-php: '${mod}' already enabled in ${target_ini}"
+  elif is_loaded "$mod"; then
+    echo "filc-php: '${mod}' is already loaded (skipping duplicate ${target_ini})"
   else
     printf '%s\n' "$line" >> "$target_ini"
     echo "filc-php: enabled '${mod}' via ${target_ini}"

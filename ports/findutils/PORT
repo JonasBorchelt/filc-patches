@@ -15,13 +15,12 @@ CONFIGURE_ARGS=""
 MAKE_ARGS=""
 INSTALL_ARGS=""
 TEST_CMD=""
-POLICY_CLASS="P3-BuildOpt"
-POLICY_RATIONALE="Builds unmodified upstream GNU findutils 4.11.0 (find, xargs, locate, updatedb) with zero source patches. Passes -fno-builtin-sprintf because LLVM 23 SimplifyLibCalls lowers sprintf(p, \"%s\", s) in lib/regextype.c to stpcpy + ptrtoaddr (PtrToAddrInst), which FilPizlonator on 0.1.5 does not lower yet."
+POLICY_CLASS="P0-Clean"
+POLICY_RATIONALE="Builds unmodified upstream GNU findutils 4.11.0 (find, xargs, locate, updatedb) with zero source patches, matching upstream Fil-C optfil/build_opt.sh."
 FILC_ORIGIN_REF="optfil/build_opt.sh:findutils-4.11.0"
 
 port_configure() {
-  CFLAGS="${CFLAGS:-} -fno-builtin-sprintf" \
-    ./configure --prefix="$PIZFIX"
+  ./configure --prefix="$PIZFIX"
 }
 
 port_test() {

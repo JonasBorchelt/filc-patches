@@ -16,12 +16,11 @@ MAKE_ARGS=""
 INSTALL_ARGS=""
 TEST_CMD=""
 POLICY_CLASS="P3-BuildOpt"
-POLICY_RATIONALE="Builds unmodified upstream GNU Wget 1.25.0 with zero source patches against staged Fil-C OpenSSL, zlib, PCRE2, and libidn2. Passes -DOPENSSL_NO_SSL3_METHOD per optfil/build_opt.sh so wget skips the removed SSLv3_client_method() symbol cleanly, and -fno-builtin-sprintf because LLVM 23 SimplifyLibCalls lowers sprintf(p, \"%s\", s) in src/progress.c to stpcpy + ptrtoaddr (PtrToAddrInst), which FilPizlonator on 0.1.5 does not lower yet."
+POLICY_RATIONALE="Builds unmodified upstream GNU Wget 1.25.0 with zero source patches against staged Fil-C OpenSSL, zlib, PCRE2, and libidn2. Passes -DOPENSSL_NO_SSL3_METHOD per optfil/build_opt.sh so wget skips the removed SSLv3_client_method() symbol cleanly."
 FILC_ORIGIN_REF="optfil/build_opt.sh:wget-1.25.0"
 
 port_configure() {
-  CFLAGS="${CFLAGS:-} -fno-builtin-sprintf" \
-    CPPFLAGS="-DOPENSSL_NO_SSL3_METHOD -I$PIZFIX/include" \
+  CPPFLAGS="-DOPENSSL_NO_SSL3_METHOD -I$PIZFIX/include" \
     LDFLAGS="-L$PIZFIX/lib" \
     PKG_CONFIG="$PIZFIX/bin/pkg-config --define-prefix" \
     PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" \

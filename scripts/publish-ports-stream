@@ -1075,7 +1075,7 @@ module PublishPortsStream
     blockers.uniq.sort
   end
 
-  def write_ports_reports!(work_dir:, ports:, selected:, results:, duration_total:)
+  def write_ports_reports!(work_dir:, ports:, selected:, results:, duration_total:, fail_fast_port: nil)
     ordered = topo_sort(ports, selected)
     records = ordered.map { |n| results.fetch(n) }
     tested = records.count { |r| r["status"] == "tested" }
@@ -1085,6 +1085,7 @@ module PublishPortsStream
     failed_runner = records.count { |r| r["status"] == "failed" && r["failed_kind"] == "runner" }
     failed_package = records.count { |r| r["status"] == "failed" && r["failed_kind"] != "runner" }
     blocked = records.count { |r| r["status"] == "blocked" }
+    aborted = records.count { |r| r["status"] == "aborted" }
     unmodified = records.count { |r| r["patch_count"].to_i == 0 }
     patched = records.length - unmodified
     patches_total = records.sum { |r| r["patch_count"].to_i }
@@ -1095,6 +1096,7 @@ module PublishPortsStream
     report_obj = {
       "date_utc" => date_utc,
       "duration_seconds" => duration_total.to_i,
+      "fail_fast_port" => fail_fast_port,
       "summary" => {
         "total" => records.length,
         "tested" => tested,
@@ -1104,6 +1106,7 @@ module PublishPortsStream
         "failed_runner" => failed_runner,
         "failed_package" => failed_package,
         "blocked" => blocked,
+        "aborted" => aborted,
         "unmodified" => unmodified,
         "patched" => patched,
         "patches_total" => patches_total,
@@ -1128,12 +1131,14 @@ module PublishPortsStream
       "PORTS_FAILED_RUNNER=#{failed_runner}",
       "PORTS_FAILED_PACKAGE=#{failed_package}",
       "PORTS_BLOCKED=#{blocked}",
+      "PORTS_ABORTED=#{aborted}",
       "PORTS_UNMODIFIED=#{unmodified}",
       "PORTS_PATCHED=#{patched}",
       "PATCHES_TOTAL=#{patches_total} (+#{added_total}/-#{removed_total})",
-      "",
-      "PORTS:"
     ]
+    lines << "RESULT=failed (fail-fast after #{fail_fast_port})" if fail_fast_port
+    lines << ""
+    lines << "PORTS:"
     records.each do |r|
       st_label = if r["status"] == "failed"
                    r["failed_kind"] == "runner" ? "failed:runner" : "failed:package"
@@ -1200,6 +1205,7 @@ module PublishPortsStream
       require_release_provenance: false,
       warn_release_mismatch: false,
       verify_channel_only: false,
+      fail_fast: %w[1 true yes on].include?(ENV.fetch("FILC_PORTS_FAIL_FAST", "0").strip.downcase),
       lock_file: nil
     }
 
@@ -1240,6 +1246,8 @@ module PublishPortsStream
       o.on("--warn-release-mismatch", "Warn and continue on --release-provenance mismatch during dry-run (forbidden with --upload or --require-release-provenance)") { opts[:warn_release_mismatch] = true }
       o.on("--verify-channel-only", "Run channel/toolchain provenance verification only and exit") { opts[:verify_channel_only] = true }
       o.on("--lock-file PATH", "Exclusive lock file path to serialize concurrent runs on the same channel") { |v| opts[:lock_file] = v.empty? ? nil : File.expand_path(v) }
+      o.on("--fail-fast", "Abort remaining ports immediately on the first port failure (env: FILC_PORTS_FAIL_FAST=1)") { opts[:fail_fast] = true }
+      o.on("--no-fail-fast", "Continue building independent ports after a failure (default; env: FILC_PORTS_FAIL_FAST=0)") { opts[:fail_fast] = false }
       o.on("--build-port-bin PATH", "Override build-port executable (tests)") { |v| opts[:build_port_bin] = File.expand_path(v) }
       o.on("--package-port-bin PATH", "Override package-port executable (tests)") { |v| opts[:package_port_bin] = File.expand_path(v) }
       o.on("--upload-ports-bin PATH", "Override upload-ports executable (tests)") { |v| opts[:upload_ports_bin] = File.expand_path(v) }
@@ -1399,6 +1407,41 @@ module PublishPortsStream
     active_pids = Set.new
     abort_requested = false
     interrupted_signal = nil
+    fail_fast_port = nil
+    kill_active_workers = lambda do
+      pids_to_kill = pid_mu.synchronize { active_pids.to_a }
+      pids_to_kill.each do |pid|
+        begin
+          Process.kill("-TERM", pid)
+        rescue Errno::ESRCH, Errno::EPERM
+          begin
+            Process.kill("TERM", pid)
+          rescue StandardError
+            nil
+          end
+        end
+      end
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2.0
+      loop do
+        remaining = pid_mu.synchronize { active_pids.to_a }
+        break if remaining.empty?
+        break if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+
+        sleep 0.1
+      end
+      stragglers = pid_mu.synchronize { active_pids.to_a }
+      stragglers.each do |pid|
+        begin
+          Process.kill("-KILL", pid)
+        rescue Errno::ESRCH, Errno::EPERM
+          begin
+            Process.kill("KILL", pid)
+          rescue StandardError
+            nil
+          end
+        end
+      end
+    end
     sig_r, sig_w = IO.pipe
     sig_watcher = Thread.new do
       loop do
@@ -1415,18 +1458,7 @@ module PublishPortsStream
           interrupted_signal ||= sig_name
           cv.broadcast
         end
-        pids_to_kill = pid_mu.synchronize { active_pids.to_a }
-        pids_to_kill.each do |pid|
-          begin
-            Process.kill("-TERM", pid)
-          rescue Errno::ESRCH, Errno::EPERM
-            begin
-              Process.kill("TERM", pid)
-            rescue StandardError
-              nil
-            end
-          end
-        end
+        kill_active_workers.call
       end
     end
     prev_term = Signal.trap("TERM") do
@@ -1901,6 +1933,7 @@ module PublishPortsStream
           end
 
           port_dur = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - t_port_start).round(3)
+          trigger_fail_fast_kill = false
 
           mu.synchronize do
             active_count -= 1
@@ -1943,44 +1976,75 @@ module PublishPortsStream
                 $stdout.puts("FILC_PORT #{pname} #{build_status} policy=#{meta['policy_class']} duration=#{port_dur.round}")
               end
             else
-              fk = fail_kind == "runner" ? "runner" : "package"
-              results[pname] = {
-                "name" => pname,
-                "version" => meta["version"],
-                "tier" => meta["tier"],
-                "status" => "failed",
-                "failed_stage" => fail_stage || "build",
-                "failed_kind" => fk,
-                "failure_reason" => fail_reason || "unknown failure",
-                "policy_class" => meta["policy_class"],
-                "deps" => meta["deps"],
-                "blocked_by" => [],
-                "duration_seconds" => port_dur.round,
-                "patch_count" => meta["patch_count"],
-                "added_lines" => meta["added_lines"],
-                "removed_lines" => meta["removed_lines"],
-                "files_changed" => meta["files_changed"]
-              }
-              failures << {
-                "name" => pname,
-                "stage" => fail_stage || "build",
-                "kind" => fk,
-                "reason" => fail_reason || "unknown failure",
-                "details" => fail_details,
-                "log_file" => log_file
-              }
-              $stdout.puts("FILC_PORT #{pname} failed:#{fk} policy=#{meta['policy_class']} stage=#{fail_stage || 'build'} duration=#{port_dur.round}")
-              redact_tokens = secret_tokens_for_redaction(opts[:exact_tokens_env])
-              unless fail_details.empty?
-                $stdout.puts("STREAM_SLOT[#{slot_idx}] FAIL_DETAIL #{pname} (stage=#{fail_stage || 'build'}, kind=#{fk}):")
-                details_preview(fail_details, limit: 40).each { |dl| $stdout.puts("  | #{sanitize_log_line(dl, redact_tokens)}") }
+              if fail_fast_port && pname != fail_fast_port
+                abort_msg = "aborted (fail-fast after #{fail_fast_port})"
+                results[pname] = {
+                  "name" => pname,
+                  "version" => meta["version"],
+                  "tier" => meta["tier"],
+                  "status" => "aborted",
+                  "failed_stage" => "aborted",
+                  "failed_kind" => "runner",
+                  "failure_reason" => abort_msg,
+                  "policy_class" => meta["policy_class"],
+                  "deps" => meta["deps"],
+                  "blocked_by" => [fail_fast_port],
+                  "duration_seconds" => port_dur.round,
+                  "patch_count" => meta["patch_count"],
+                  "added_lines" => meta["added_lines"],
+                  "removed_lines" => meta["removed_lines"],
+                  "files_changed" => meta["files_changed"]
+                }
+                $stdout.puts("FILC_PORT #{pname} blocked policy=#{meta['policy_class']} blocked_by=#{fail_fast_port}")
+              else
+                fk = fail_kind == "runner" ? "runner" : "package"
+                results[pname] = {
+                  "name" => pname,
+                  "version" => meta["version"],
+                  "tier" => meta["tier"],
+                  "status" => "failed",
+                  "failed_stage" => fail_stage || "build",
+                  "failed_kind" => fk,
+                  "failure_reason" => fail_reason || "unknown failure",
+                  "policy_class" => meta["policy_class"],
+                  "deps" => meta["deps"],
+                  "blocked_by" => [],
+                  "duration_seconds" => port_dur.round,
+                  "patch_count" => meta["patch_count"],
+                  "added_lines" => meta["added_lines"],
+                  "removed_lines" => meta["removed_lines"],
+                  "files_changed" => meta["files_changed"]
+                }
+                failures << {
+                  "name" => pname,
+                  "stage" => fail_stage || "build",
+                  "kind" => fk,
+                  "reason" => fail_reason || "unknown failure",
+                  "details" => fail_details,
+                  "log_file" => log_file
+                }
+                $stdout.puts("FILC_PORT #{pname} failed:#{fk} policy=#{meta['policy_class']} stage=#{fail_stage || 'build'} duration=#{port_dur.round}")
+                redact_tokens = secret_tokens_for_redaction(opts[:exact_tokens_env])
+                unless fail_details.empty?
+                  $stdout.puts("STREAM_SLOT[#{slot_idx}] FAIL_DETAIL #{pname} (stage=#{fail_stage || 'build'}, kind=#{fk}):")
+                  details_preview(fail_details, limit: 40).each { |dl| $stdout.puts("  | #{sanitize_log_line(dl, redact_tokens)}") }
+                end
+                if opts[:fail_fast] && fail_fast_port.nil?
+                  fail_fast_port = pname
+                  abort_requested = true
+                  trigger_fail_fast_kill = true
+                  $stdout.puts("FILC_FAIL_FAST #{pname}")
+                  $stdout.puts("STREAM_FAIL_FAST: aborting remaining ports after first failure in #{pname}")
+                else
+                  # Only build/verify failures block downstream builds (upload failure leaves verified tree intact)
+                  propagate_blocked.call(pname) unless verify_ok
+                end
               end
-              # Only build/verify failures block downstream builds (upload failure leaves verified tree intact)
-              propagate_blocked.call(pname) unless verify_ok
             end
             $stdout.flush
             cv.broadcast
           end
+          kill_active_workers.call if trigger_fail_fast_kill
         end
       end
     end
@@ -2004,34 +2068,59 @@ module PublishPortsStream
 
     incomplete_ports = topo_order.reject { |n| results.key?(n) }
     unless incomplete_ports.empty?
-      abort_reason = interrupted_signal ? "aborted by SIG#{interrupted_signal}" : "incomplete stream: port did not complete"
-      incomplete_ports.each do |pname|
-        meta = all_ports[pname]
-        results[pname] = {
-          "name" => pname,
-          "version" => meta["version"],
-          "tier" => meta["tier"],
-          "status" => "failed",
-          "failed_stage" => "aborted",
-          "failed_kind" => "runner",
-          "failure_reason" => abort_reason,
-          "policy_class" => meta["policy_class"],
-          "deps" => meta["deps"],
-          "blocked_by" => [],
-          "duration_seconds" => 0,
-          "patch_count" => meta["patch_count"],
-          "added_lines" => meta["added_lines"],
-          "removed_lines" => meta["removed_lines"],
-          "files_changed" => meta["files_changed"]
-        }
-        failures << {
-          "name" => pname,
-          "stage" => "aborted",
-          "kind" => "runner",
-          "reason" => abort_reason,
-          "details" => [],
-          "log_file" => File.join(logs_dir, "#{pname}.log")
-        }
+      if fail_fast_port
+        abort_reason = "aborted (fail-fast after #{fail_fast_port})"
+        incomplete_ports.each do |pname|
+          meta = all_ports[pname]
+          results[pname] = {
+            "name" => pname,
+            "version" => meta["version"],
+            "tier" => meta["tier"],
+            "status" => "aborted",
+            "failed_stage" => "aborted",
+            "failed_kind" => "runner",
+            "failure_reason" => abort_reason,
+            "policy_class" => meta["policy_class"],
+            "deps" => meta["deps"],
+            "blocked_by" => [fail_fast_port],
+            "duration_seconds" => 0,
+            "patch_count" => meta["patch_count"],
+            "added_lines" => meta["added_lines"],
+            "removed_lines" => meta["removed_lines"],
+            "files_changed" => meta["files_changed"]
+          }
+          $stdout.puts("FILC_PORT #{pname} blocked policy=#{meta['policy_class']} blocked_by=#{fail_fast_port}")
+        end
+      else
+        abort_reason = interrupted_signal ? "aborted by SIG#{interrupted_signal}" : "incomplete stream: port did not complete"
+        incomplete_ports.each do |pname|
+          meta = all_ports[pname]
+          results[pname] = {
+            "name" => pname,
+            "version" => meta["version"],
+            "tier" => meta["tier"],
+            "status" => "failed",
+            "failed_stage" => "aborted",
+            "failed_kind" => "runner",
+            "failure_reason" => abort_reason,
+            "policy_class" => meta["policy_class"],
+            "deps" => meta["deps"],
+            "blocked_by" => [],
+            "duration_seconds" => 0,
+            "patch_count" => meta["patch_count"],
+            "added_lines" => meta["added_lines"],
+            "removed_lines" => meta["removed_lines"],
+            "files_changed" => meta["files_changed"]
+          }
+          failures << {
+            "name" => pname,
+            "stage" => "aborted",
+            "kind" => "runner",
+            "reason" => abort_reason,
+            "details" => [],
+            "log_file" => File.join(logs_dir, "#{pname}.log")
+          }
+        end
       end
     end
 
@@ -2042,19 +2131,30 @@ module PublishPortsStream
       ports: all_ports,
       selected: selected,
       results: results,
-      duration_total: total_duration
+      duration_total: total_duration,
+      fail_fast_port: fail_fast_port
     )
 
     blocked_records = results.values.select { |r| r["status"] == "blocked" }.sort_by { |r| r["name"] }
+    aborted_records = results.values.select { |r| r["status"] == "aborted" }.sort_by { |r| r["name"] }
     cached_records = results.values.select { |r| r["status"] == "cached" }.sort_by { |r| r["name"] }
     completed_ok = results.values.count { |r| %w[tested built cached].include?(r["status"]) }
     commit_allowed = !abort_requested &&
                      interrupted_signal.nil? &&
+                     fail_fast_port.nil? &&
                      incomplete_ports.empty? &&
                      failures.empty? &&
                      blocked_records.empty? &&
+                     aborted_records.empty? &&
                      results.size == selected.size &&
                      completed_ok == selected.size
+    run_result_label = if fail_fast_port
+                         "failed (fail-fast after #{fail_fast_port})"
+                       elsif commit_allowed
+                         "passed"
+                       else
+                         "failed"
+                       end
 
     summary_obj = {
       "channel" => opts[:channel],
@@ -2064,6 +2164,9 @@ module PublishPortsStream
       "slot_cores" => slot_cores,
       "isolated_prefix" => opts[:isolated_prefix],
       "schedule_order" => opts[:schedule_order],
+      "fail_fast" => opts[:fail_fast],
+      "fail_fast_port" => fail_fast_port,
+      "result" => run_result_label,
       "start_sequence" => start_sequence,
       "critical_paths" => cp_map,
       "toolchain_id" => toolchain_id,
@@ -2073,6 +2176,7 @@ module PublishPortsStream
       "selected_ports" => selected.size,
       "completed_ports" => completed_ok,
       "incomplete_ports" => incomplete_ports,
+      "aborted_ports" => aborted_records.map { |r| r["name"] },
       "interrupted_signal" => interrupted_signal,
       "commit_allowed" => commit_allowed,
       "failed_ports" => failures.sort_by { |f| f["name"] },
@@ -2086,10 +2190,12 @@ module PublishPortsStream
       $stdout.puts("FILC_PHASE stream-ports failure #{total_duration.round}")
       $stdout.puts("=" * 80)
       sig_note = interrupted_signal ? " (interrupted by SIG#{interrupted_signal})" : ""
+      ff_note = fail_fast_port ? " (fail-fast after #{fail_fast_port})" : ""
+      $stdout.puts("PUBLISH_PORTS_RESULT: #{run_result_label}") if fail_fast_port
       $stdout.puts(
         "PUBLISH_PORTS_COMMIT_BLOCKED: index commit prevented by #{failures.length} failed port(s), " \
-        "#{blocked_records.length} blocked port(s), and #{incomplete_ports.length} incomplete port(s) " \
-        "(completed=#{completed_ok}/#{selected.size})#{sig_note}"
+        "#{blocked_records.length} blocked port(s), #{aborted_records.length} aborted port(s), and #{incomplete_ports.length} incomplete port(s) " \
+        "(completed=#{completed_ok}/#{selected.size})#{sig_note}#{ff_note}"
       )
       $stdout.puts("FAILED PORTS PREVENTING INDEX COMMIT:")
       failures.sort_by { |f| f["name"] }.each do |f|

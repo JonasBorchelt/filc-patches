@@ -1030,5 +1030,139 @@ Dir.mktmpdir("filc-stream-test-") do |tmp|
   assert(!sig_out.include?("FILC_PHASE stream-ports success"), "must NEVER emit success phase marker on SIGTERM")
   puts "SIGTERM_ABORT_GUARD: PASS (rc=143, commit_allowed=false, interrupted_signal=TERM, incomplete=#{sig_summary['incomplete_ports'].length})"
 
+  puts "=== [13/13] Guard 4: FILC_PORTS_FAIL_FAST=1 kills siblings fast and default=0 preserves fault isolation ==="
+  work_ff = File.join(tmp, "work-failfast")
+  out_ff = File.join(tmp, "out-failfast")
+  ff_build = File.join(tmp, "fake-build-port-failfast")
+  File.write(ff_build, <<~SH)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    PORT="$1"
+    if [ "$PORT" = "liba" ]; then
+      sleep 0.4
+      echo "LIBA_ROOT_FAILURE_MARKER: intentional test failure in liba" >&2
+      exit 1
+    fi
+    if [ "$PORT" = "libb" ]; then
+      echo "LIBB_SLOW_START"
+      sleep 30
+      exit 0
+    fi
+    exec "#{fix[:mock_bp]}" "$@"
+  SH
+  File.chmod(0o755, ff_build)
+
+  t_ff_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  ff_out, ff_err, ff_st = Open3.capture3(
+    common_env.merge("FILC_PORTS_FAIL_FAST" => "1"),
+    "ruby", STREAM_BIN,
+    "--repo-root", REPO_ROOT,
+    "--ports-dir", fix[:ports_dir],
+    "--toolchain-root", fix[:tc_root],
+    "--work-dir", work_ff,
+    "--out-dir", out_ff,
+    "--ports-cache-dir", fix[:cache_dir],
+    "--channel", "0.1.4",
+    "--arch", "x86_64-linux",
+    "--parallel", "2",
+    "--total-jobs", "2",
+    "--no-pin-cpus",
+    "--isolated-prefix",
+    "--no-bootstrap-timings",
+    "--timings-file", "",
+    "--skip-package-smoke",
+    "--build-port-bin", ff_build
+  )
+  ff_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - t_ff_start
+  assert(ff_st.exitstatus != 0, "fail-fast run must exit non-zero, got #{ff_st.exitstatus}")
+  assert(ff_elapsed < 10.0, "fail-fast must abort slow sibling within a few seconds, took #{ff_elapsed.round(2)}s")
+  ff_summary = JSON.parse(File.read(File.join(work_ff, "publish-summary.json")))
+  assert(ff_summary["commit_allowed"] == false, "fail-fast commit_allowed must be false")
+  assert(ff_summary["fail_fast"] == true, "fail_fast must be true in summary")
+  assert(ff_summary["fail_fast_port"] == "liba", "fail_fast_port must be liba, got #{ff_summary['fail_fast_port'].inspect}")
+  assert(ff_summary["result"] == "failed (fail-fast after liba)", "unexpected result: #{ff_summary['result'].inspect}")
+  assert(Array(ff_summary["aborted_ports"]).include?("libb"), "in-flight sibling libb must be aborted: #{ff_summary['aborted_ports']}")
+  assert(Array(ff_summary["aborted_ports"]).include?("libc"), "queued port libc must be aborted: #{ff_summary['aborted_ports']}")
+  assert(!Array(ff_summary["start_sequence"]).include?("libc"), "queued port libc must NOT have started: #{ff_summary['start_sequence']}")
+  assert(!File.file?(File.join(out_ff, "0.1.4", "x86_64-linux", "index.json")), "index.json must NOT be finalized on fail-fast")
+  liba_log = File.read(File.join(work_ff, "ports-logs", "liba.log"))
+  assert(liba_log.include?("LIBA_ROOT_FAILURE_MARKER"), "triggering port liba log must stay intact: #{liba_log}")
+  ff_report = JSON.parse(File.read(File.join(work_ff, "ports-report.json")))
+  ff_by_name = ff_report["ports"].each_with_object({}) { |r, h| h[r["name"]] = r }
+  assert(ff_by_name.dig("liba", "status") == "failed", "liba must be failed in ports-report.json")
+  assert(ff_by_name.dig("libb", "status") == "aborted", "libb must be aborted in ports-report.json")
+  assert(ff_by_name.dig("libc", "status") == "aborted", "libc must be aborted in ports-report.json")
+  assert(ff_out.include?("FILC_FAIL_FAST liba"), "expected FILC_FAIL_FAST liba marker in stdout")
+
+  # Verify report-live.rb maps fail-fast run to status=failure + run_note with triggering port
+  ff_log_path = File.join(work_ff, "stream-combined.log")
+  File.write(ff_log_path, ff_out)
+  rl_out, rl_err, rl_st = Open3.capture3(
+    common_env.merge(
+      "CI_PIPELINE_NUMBER" => "999",
+      "CI_COMMIT_BRANCH" => "main",
+      "CI_COMMIT_SHA" => "0123456789abcdef0123456789abcdef01234567",
+      "CI_PIPELINE_EVENT" => "manual"
+    ),
+    "ruby", File.join(REPO_ROOT, "scripts", "report-live.rb"),
+    "--workflow", "publish-ports",
+    "--phase", "finish",
+    "--step", "stream-ports",
+    "--report", File.join(work_ff, "ports-report.txt"),
+    "--ports-json", File.join(work_ff, "ports-report.json"),
+    "--log", ff_log_path,
+    "--dry-run"
+  )
+  assert(rl_st.success?, "report-live.rb dry-run failed: #{rl_err}")
+  rl_payload = JSON.parse(rl_out)
+  assert(rl_payload["status"] == "failure", "report-live status must be failure on fail-fast, got #{rl_payload['status'].inspect}")
+  assert(rl_payload["run_note"] == "failed (fail-fast after liba)", "report-live run_note mismatch: #{rl_payload['run_note'].inspect}")
+
+  # Verify default (FILC_PORTS_FAIL_FAST=0 / unset) preserves fault isolation across independent ports
+  work_no_ff = File.join(tmp, "work-no-failfast")
+  out_no_ff = File.join(tmp, "out-no-failfast")
+  noff_build = File.join(tmp, "fake-build-port-no-ff")
+  File.write(noff_build, <<~SH)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    PORT="$1"
+    if [ "$PORT" = "liba" ]; then
+      echo "LIBA_FAIL_DEFAULT_MODE" >&2
+      exit 1
+    fi
+    exec "#{fix[:mock_bp]}" "$@"
+  SH
+  File.chmod(0o755, noff_build)
+  _noff_out, _noff_err, noff_st = Open3.capture3(
+    common_env,
+    "ruby", STREAM_BIN,
+    "--repo-root", REPO_ROOT,
+    "--ports-dir", fix[:ports_dir],
+    "--toolchain-root", fix[:tc_root],
+    "--work-dir", work_no_ff,
+    "--out-dir", out_no_ff,
+    "--ports-cache-dir", fix[:cache_dir],
+    "--channel", "0.1.4",
+    "--arch", "x86_64-linux",
+    "--parallel", "2",
+    "--total-jobs", "2",
+    "--no-pin-cpus",
+    "--isolated-prefix",
+    "--no-bootstrap-timings",
+    "--timings-file", "",
+    "--skip-package-smoke",
+    "--build-port-bin", noff_build
+  )
+  assert(noff_st.exitstatus != 0, "default mode with failing liba must still exit non-zero")
+  noff_summary = JSON.parse(File.read(File.join(work_no_ff, "publish-summary.json")))
+  assert(noff_summary["fail_fast"] == false, "default fail_fast must be false")
+  assert(noff_summary["fail_fast_port"].nil?, "default fail_fast_port must be nil")
+  assert(Array(noff_summary["aborted_ports"]).empty?, "default mode must not abort independent ports")
+  noff_report = JSON.parse(File.read(File.join(work_no_ff, "ports-report.json")))
+  noff_by_name = noff_report["ports"].each_with_object({}) { |r, h| h[r["name"]] = r }
+  assert(noff_by_name.dig("libb", "status") == "tested", "independent port libb must still complete when fail-fast=0")
+  assert(noff_by_name.dig("libc", "status") == "tested", "independent port libc must still complete when fail-fast=0")
+  puts "FAIL_FAST_GUARD: PASS (ff_elapsed=#{ff_elapsed.round(2)}s, result=#{ff_summary['result']}, aborted=#{ff_summary['aborted_ports'].length}, default_isolation=OK)"
+
   puts "ALL PUBLISH-PORTS-STREAM TESTS PASSED"
 end

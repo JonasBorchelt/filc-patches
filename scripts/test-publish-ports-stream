@@ -496,7 +496,7 @@ Dir.mktmpdir("filc-stream-test-") do |tmp|
   RB
   File.chmod(0o755, mock_upload_bin)
 
-  run_cached_stream = lambda do |tag, extra_env: {}, force: nil|
+  run_cached_stream = lambda do |tag, extra_env: {}, force: nil, upload: true|
     wdir = File.join(tmp, "work-cache-#{tag}")
     odir = File.join(tmp, "out-cache-#{tag}")
     File.write(mock_upload_log, "", encoding: "UTF-8")
@@ -518,12 +518,12 @@ Dir.mktmpdir("filc-stream-test-") do |tmp|
       "--no-bootstrap-timings",
       "--cache-manifest", cache_manifest,
       "--local-artifact-cache", local_art_cache,
-      "--upload",
       "--upload-url", "http://127.0.0.1:1",
       "--build-port-bin", fix[:mock_bp],
       "--upload-ports-bin", mock_upload_bin,
       "--source-date-epoch", "1700000000"
     ]
+    cmd << "--upload" if upload
     cmd.concat(["--force", force]) if force
     out, err, st = Open3.capture3(common_env.merge("MOCK_UPLOAD_LOG" => mock_upload_log).merge(extra_env), *cmd)
     assert(st.success?, "cache run #{tag} failed:\nOUT:\n#{out}\nERR:\n#{err}")
@@ -534,17 +534,38 @@ Dir.mktmpdir("filc-stream-test-") do |tmp|
   end
 
   # 5a. Cold run populates cache (6 builds + 6 staged uploads)
-  s1, _r1, ops1, _o1 = run_cached_stream.call("cold")
+  s1, _r1, ops1, o1 = run_cached_stream.call("cold")
   assert(s1["cached_ports"].empty?, "cold run must build all 6 ports")
   assert(ops1.count { |l| l.start_with?("stage ") } == 6, "cold run should stage-upload 6 ports: #{ops1}")
+  assert(o1.include?("CACHE_CHECK port=liba ") && o1.include?("head=skip reason=no_entry"),
+         "cold run must emit CACHE_CHECK no_entry diagnostics:\n#{o1}")
+
+  # Simulate a fresh build-toolchain CI run producing different binary/archive bytes
+  # (e.g. non-deterministic ar member mtimes in libc++.a or linker build-IDs in clang)
+  # with identical UPSTREAM / llvm / runtime / libc inputs: toolchain_id MUST stay stable!
+  File.write(File.join(fix[:tc_root], "build", "bin", "clang"), "#!/bin/sh\n# rebuilt timestamp 2\necho mock-clang\n")
+  File.chmod(0o755, File.join(fix[:tc_root], "build", "bin", "clang"))
+  File.binwrite(File.join(fix[:tc_root], "pizfix", "lib", "libc++.a"), "!<arch>\nrebuilt-mtime-2\n".b)
 
   # 5b. Warm run: ALL 6 ports skipped (cached) via HEAD-only check, 0 builds, 0 stage uploads!
-  s2, r2, ops2, _o2 = run_cached_stream.call("warm")
+  s2, r2, ops2, o2 = run_cached_stream.call("warm")
+  assert(s2["toolchain_id"] == s1["toolchain_id"],
+         "toolchain_id must stay stable across identical-source toolchain rebuilds: #{s1['toolchain_id']} vs #{s2['toolchain_id']}")
   assert(s2["cached_ports"].sort == %w[app liba libb libc mid1 mid2], "warm run must cache all 6: #{s2['cached_ports']}")
   assert(s2["summary"]["cached"] == 6 && s2["summary"]["tested"] == 0, "expected 6 cached / 0 tested: #{s2['summary']}")
   assert(ops2.count { |l| l.start_with?("head ") } == 6, "warm run must HEAD-verify all 6: #{ops2}")
   assert(ops2.none? { |l| l.start_with?("stage ") }, "warm run must NOT upload anything: #{ops2}")
   assert(r2.include?("skipped (cached)"), "report must label cached ports 'skipped (cached)'")
+  assert(o2.include?("CACHE_CHECK port=liba ") && o2.include?("head=hit reason=cached"),
+         "warm run must emit CACHE_CHECK head=hit reason=cached:\n#{o2}")
+
+  # 5b-dry: Dry-run with --upload-url (no --upload) ALSO verifies cache via read-only HEAD and skips all 6!
+  s2d, r2d, ops2d, o2d = run_cached_stream.call("warm-dry", upload: false)
+  assert(s2d["cached_ports"].sort == %w[app liba libb libc mid1 mid2], "warm dry-run must cache all 6: #{s2d['cached_ports']}")
+  assert(ops2d.count { |l| l.start_with?("head ") } == 6, "warm dry-run with --upload-url must HEAD-verify all 6: #{ops2d}")
+  assert(ops2d.none? { |l| l.start_with?("stage ") }, "warm dry-run must NOT upload anything: #{ops2d}")
+  assert(r2d.include?("skipped (cached)"), "warm dry-run report must label cached ports 'skipped (cached)'")
+  assert(o2d.include?("head=hit reason=cached"), "warm dry-run must log head=hit reason=cached:\n#{o2d}")
 
   # 5c. Dependency recipe change (libb) -> libb, mid2, app rebuild; liba, mid1, libc stay cached!
   libb_port = File.join(fix[:ports_dir], "libb", "PORT")
@@ -663,6 +684,20 @@ Dir.mktmpdir("filc-stream-test-") do |tmp|
   assert(anchored_tail.any? { |l| l.include?("trailing cleanup line 120") },
          "expected EOF trailing line to still be included:\n#{anchored_tail.join("\n")}")
   puts "FAILURE_ANCHORED_LOG_TAIL: PASS (anchor window + omission banner + EOF tail)"
+
+  puts "=== [9/9] Toolchain identity reacts to UPSTREAM/patch changes, ignores rebuilt binary mtimes ==="
+  repo_a = File.join(tmp, "tc-repo-a")
+  FileUtils.mkdir_p(File.join(repo_a, "llvm"))
+  File.write(File.join(repo_a, "UPSTREAM"), "FILC_COMMIT=aaaa\n", encoding: "UTF-8")
+  File.write(File.join(repo_a, "llvm", "01.patch"), "diff a\n", encoding: "UTF-8")
+  id1 = PublishPortsStream.compute_toolchain_identity(toolchain_root: fix[:tc_root], repo_root: repo_a, channel: "0.1.4", arch: "x86_64-linux")
+  File.binwrite(File.join(fix[:tc_root], "pizfix", "lib", "libc++.a"), "!<arch>\nrebuilt-mtime-3\n".b)
+  id2 = PublishPortsStream.compute_toolchain_identity(toolchain_root: fix[:tc_root], repo_root: repo_a, channel: "0.1.4", arch: "x86_64-linux")
+  assert(id1 == id2, "toolchain_id must ignore freshly rebuilt binary/archive mtimes: #{id1} vs #{id2}")
+  File.write(File.join(repo_a, "UPSTREAM"), "FILC_COMMIT=bbbb\n", encoding: "UTF-8")
+  id3 = PublishPortsStream.compute_toolchain_identity(toolchain_root: fix[:tc_root], repo_root: repo_a, channel: "0.1.4", arch: "x86_64-linux")
+  assert(id3 != id1, "toolchain_id MUST change when UPSTREAM changes: #{id1} vs #{id3}")
+  puts "TOOLCHAIN_IDENTITY_DETERMINISM: PASS (stable across binary rebuilds, invalidates on UPSTREAM bump)"
 
   puts "ALL PUBLISH-PORTS-STREAM TESTS PASSED"
 end

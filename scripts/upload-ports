@@ -263,9 +263,14 @@ module PortsUploader
     head_req = Net::HTTP::Head.new(path)
     head_req["Authorization"] = "Bearer #{token}"
     head_res = http.request(head_req)
-    head_res.code == "200" && head_res["x-content-sha256"] == item[:sha256]
-  rescue StandardError
-    false
+    return [false, "http=#{head_res.code}(#{item[:rel]})"] unless head_res.code == "200"
+
+    got_sha = head_res["x-content-sha256"].to_s
+    return [false, "sha_mismatch(#{item[:rel]}:got=#{got_sha[0, 12]},want=#{item[:sha256][0, 12]})"] unless got_sha == item[:sha256]
+
+    [true, "ok"]
+  rescue StandardError => e
+    [false, "error=#{e.class}:#{e.message}"]
   end
 
   def upload_artifact(base_uri, channel, arch, item, token)
@@ -387,12 +392,17 @@ module PortsUploader
       raise ArgumentError, "--base-url or FILC_PORTS_UPLOAD_URL is required" if opts[:base_url].empty?
 
       base_uri = URI.parse(opts[:base_url])
-      all_present = items.all? { |item| head_verify_artifact(base_uri, opts[:channel], opts[:arch], item, token) }
+      miss_reason = nil
+      all_present = items.all? do |item|
+        ok, reason = head_verify_artifact(base_uri, opts[:channel], opts[:arch], item, token)
+        miss_reason = reason unless ok
+        ok
+      end
       if all_present
         puts "UPLOAD_PORTS_HEAD_VERIFY: HIT port=#{pkg_name} channel=#{opts[:channel]} arch=#{opts[:arch]} files=#{items.length}"
         return 0
       else
-        puts "UPLOAD_PORTS_HEAD_VERIFY: MISS port=#{pkg_name} channel=#{opts[:channel]} arch=#{opts[:arch]}"
+        puts "UPLOAD_PORTS_HEAD_VERIFY: MISS port=#{pkg_name} channel=#{opts[:channel]} arch=#{opts[:arch]} reason=#{miss_reason}"
         return 1
       end
     end

@@ -160,30 +160,46 @@ module PublishPortsStream
     h.hexdigest
   end
 
+  TOOLCHAIN_INPUT_FILES = %w[
+    UPSTREAM
+    scripts/build-toolchain
+    scripts/fetch
+    scripts/fetch-runtime
+    scripts/fetch-musl
+  ].freeze
+  TOOLCHAIN_INPUT_DIRS = %w[
+    llvm
+    runtime
+    libc
+  ].freeze
+
+  # Computes a deterministic toolchain identity from the pinned upstream sources,
+  # toolchain patches, and build scripts rather than freshly compiled binaries or
+  # static archives (whose ar member mtimes / linker build-IDs vary per CI run).
   def compute_toolchain_identity(toolchain_root:, repo_root:, channel:, arch:)
+    _ = toolchain_root
     h = Digest::SHA256.new
-    h.update("channel=#{channel}\0arch=#{arch}\0")
-    upstream_file = File.join(repo_root, "UPSTREAM")
-    if File.file?(upstream_file)
-      h.update("UPSTREAM\0")
-      h.update(File.binread(upstream_file))
-      h.update("\0")
-    end
-    %w[
-      PROVENANCE
-      build/bin/clang
-      build/bin/ld.lld
-      pizfix/lib/libpizlo.so
-      pizfix/lib/libyoloc.so
-      pizfix/lib/libc.so
-      pizfix/lib/libc++.a
-    ].each do |rel|
-      full = File.join(toolchain_root, rel)
+    h.update("schema=2\0channel=#{channel}\0arch=#{arch}\0")
+    TOOLCHAIN_INPUT_FILES.each do |rel|
+      full = File.join(repo_root, rel)
       next unless File.file?(full)
 
-      h.update("#{rel}\0")
-      h.update(sha256_file(full))
+      h.update("file:#{rel}\0")
+      h.update(File.binread(full))
       h.update("\0")
+    end
+    TOOLCHAIN_INPUT_DIRS.each do |dir_rel|
+      dir_abs = File.join(repo_root, dir_rel)
+      next unless File.directory?(dir_abs)
+
+      Dir.glob(File.join(dir_abs, "**", "*")).sort.each do |full|
+        next unless File.file?(full) && !File.symlink?(full)
+
+        rel = full.sub("#{repo_root}/", "")
+        h.update("dir:#{rel}\0")
+        h.update(File.binread(full))
+        h.update("\0")
+      end
     end
     "#{channel}:#{h.hexdigest}"
   end
@@ -1124,6 +1140,8 @@ module PublishPortsStream
     cache_entries = load_cache_manifest(opts[:cache_manifest])
     updated_cache_entries = cache_entries.dup
     force_mode, force_set = parse_force_spec(opts[:force_spec])
+    $stdout.puts("TOOLCHAIN_IDENTITY: #{toolchain_id} cache_entries=#{cache_entries.size}")
+    $stdout.flush
     t_run_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
     propagate_blocked = lambda do |failed_port|
@@ -1198,10 +1216,28 @@ module PublishPortsStream
           # Incremental cache check: skip build & upload when build_key matches AND
           # artifacts are verified present via HEAD + X-Content-SHA256 (zero GET/downloads).
           cache_hit = false
+          cache_head = "skip"
+          cache_reason = nil
           cached_rec = (!forced && opts[:cache_manifest]) ? cache_entries[pname] : nil
-          if cached_rec.is_a?(Hash) && cached_rec["build_key"] == build_key &&
-             cached_rec["channel"] == opts[:channel] && cached_rec["arch"] == opts[:arch] &&
-             cached_rec["package"].is_a?(Hash)
+          do_remote_head = opts[:upload] ||
+                           (!opts[:upload_url].to_s.strip.empty? &&
+                            !ENV["FILC_PORTS_UPLOAD_TOKEN"].to_s.strip.empty?)
+
+          if forced
+            cache_reason = "forced"
+          elsif !opts[:cache_manifest]
+            cache_reason = "no_manifest"
+          elsif !cached_rec.is_a?(Hash)
+            cache_reason = "no_entry"
+          elsif cached_rec["channel"] != opts[:channel] || cached_rec["arch"] != opts[:arch]
+            cache_reason = "channel_or_arch_mismatch"
+          elsif cached_rec["toolchain_id"] != toolchain_id
+            cache_reason = "toolchain_mismatch"
+          elsif cached_rec["build_key"] != build_key
+            cache_reason = "key_mismatch"
+          elsif !cached_rec["package"].is_a?(Hash)
+            cache_reason = "invalid_entry"
+          else
             cached_pkg = cached_rec["package"]
             staged_meta_path = File.join(staged_dir, "#{pname}.json")
             staged_payload = {
@@ -1223,9 +1259,11 @@ module PublishPortsStream
                 local_cache_dir: opts[:local_artifact_cache],
                 pkg_entry: cached_pkg
               )
-              if local_ok
+              if !local_ok
+                cache_reason = "local_artifact_miss"
+              else
                 remote_ok = true
-                if opts[:upload]
+                if do_remote_head
                   up_env = clean_env_without(%w[FILC_PORTS_MINISIGN_KEY FILC_PORTS_MINISIGN_PASSWORD FILC_LEAK_EXACT_TOKENS FILC_LIVE_TOKEN])
                   hv_cmd = [
                     upload_ports_bin,
@@ -1235,8 +1273,15 @@ module PublishPortsStream
                     "--base-url", opts[:upload_url],
                     "--head-verify-meta", tmp_probe
                   ]
-                  rc_hv, _out_hv = run_logged_cmd(hv_cmd, env: up_env, log_file: log_file)
+                  rc_hv, out_hv = run_logged_cmd(hv_cmd, env: up_env, log_file: log_file)
                   remote_ok = (rc_hv == 0)
+                  if remote_ok
+                    cache_head = "hit"
+                  else
+                    cache_head = "miss"
+                    hv_reason = out_hv[/UPLOAD_PORTS_HEAD_VERIFY: MISS[^\n]*reason=(\S+)/, 1]
+                    cache_reason = hv_reason ? "head_miss(#{hv_reason})" : "head_miss(rc=#{rc_hv})"
+                  end
                 end
                 if remote_ok
                   bin_abs = File.join(channel_dir, cached_pkg.dig("binary", "path"))
@@ -1250,13 +1295,21 @@ module PublishPortsStream
                   File.rename(tmp_probe, staged_meta_path)
                   tmp_probe = nil
                   cache_hit = true
+                  cache_reason = do_remote_head ? "cached" : "cached_local"
                 end
               end
-            rescue StandardError
+            rescue StandardError => e
               cache_hit = false
+              cache_head = "miss" if do_remote_head
+              cache_reason = "cache_error(#{e.class})"
             ensure
               File.unlink(tmp_probe) if tmp_probe && File.exist?(tmp_probe)
             end
+          end
+
+          mu.synchronize do
+            $stdout.puts("CACHE_CHECK port=#{pname} key=#{build_key[0, 12]} head=#{cache_head} reason=#{cache_reason}")
+            $stdout.flush
           end
 
           if cache_hit

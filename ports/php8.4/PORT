@@ -112,14 +112,12 @@ port_test() {
     return 1
   fi
 
-  local smoke_rc=0 smoke_out=""
-  smoke_out="$("$php_bin" -n \
+  echo "=== Combined -d extension= diagnostic (-m and --ri mysqli) ==="
+  "$php_bin" -n \
     -d extension_dir="$ext_dir" \
     -d display_startup_errors=1 \
     -d display_errors=1 \
     -d error_reporting=E_ALL \
-    -d zend.assertions=1 \
-    -d assert.exception=1 \
     -d zend_extension=opcache \
     -d opcache.enable_cli=1 \
     -d extension=mysqli \
@@ -128,6 +126,47 @@ port_test() {
     -d extension=pdo_pgsql \
     -d extension=gmp \
     -d extension=soap \
+    -m 2>&1 || true
+  "$php_bin" -n \
+    -d extension_dir="$ext_dir" \
+    -d display_startup_errors=1 \
+    -d display_errors=1 \
+    -d error_reporting=E_ALL \
+    -d zend_extension=opcache \
+    -d opcache.enable_cli=1 \
+    -d extension=mysqli \
+    -d extension=pdo_mysql \
+    -d extension=pgsql \
+    -d extension=pdo_pgsql \
+    -d extension=gmp \
+    -d extension=soap \
+    --ri mysqli 2>&1 || true
+
+  local smoke_ini
+  smoke_ini="$(mktemp)"
+  cat > "$smoke_ini" <<SMOKEINI
+extension_dir="$ext_dir"
+display_startup_errors=1
+display_errors=1
+error_reporting=E_ALL
+zend.assertions=1
+assert.exception=1
+zend_extension=opcache
+opcache.enable_cli=1
+extension=mysqli
+extension=pdo_mysql
+extension=pgsql
+extension=pdo_pgsql
+extension=gmp
+extension=soap
+SMOKEINI
+
+  echo "=== Combined -c smoke.ini diagnostic (-m and --ri mysqli) ==="
+  PHP_INI_SCAN_DIR="" "$php_bin" -c "$smoke_ini" -m 2>&1 || true
+  PHP_INI_SCAN_DIR="" "$php_bin" -c "$smoke_ini" --ri mysqli 2>&1 || true
+
+  local smoke_rc=0 smoke_out=""
+  smoke_out="$(PHP_INI_SCAN_DIR="" "$php_bin" -c "$smoke_ini" \
     <<'EOF' 2>&1
 <?php
 // 1. WeakMap + WeakReference + GC (zexact_ptrtable + tagged pointers)
@@ -241,6 +280,7 @@ assert(extension_loaded("soap") && class_exists("SoapClient") && class_exists("S
 echo "PHP84_FILC_SMOKE_OK\n";
 EOF
   )" || smoke_rc=$?
+  rm -f "$smoke_ini"
   printf '%s\n' "$smoke_out"
   if [[ "$smoke_rc" -ne 0 ]] || ! printf '%s\n' "$smoke_out" | grep -Fxq 'PHP84_FILC_SMOKE_OK'; then
     echo "error: PHP84 port_test smoke failed (rc=$smoke_rc)" >&2
@@ -281,22 +321,27 @@ port_package_smoke() {
   fpm_ver="${out%%$'\n'*}"
   printf '%s\n' "$fpm_ver" | grep -q '^PHP 8\.4\.28 '
 
+  local smoke_ini
+  smoke_ini="$(mktemp)"
+  cat > "$smoke_ini" <<SMOKEINI
+extension_dir="$ext_dir"
+display_startup_errors=1
+display_errors=1
+error_reporting=E_ALL
+zend.assertions=1
+assert.exception=1
+zend_extension=opcache
+opcache.enable_cli=1
+extension=mysqli
+extension=pdo_mysql
+extension=pgsql
+extension=pdo_pgsql
+extension=gmp
+extension=soap
+SMOKEINI
+
   local smoke_rc=0 smoke_out=""
-  smoke_out="$("$php_bin" -n \
-    -d extension_dir="$ext_dir" \
-    -d display_startup_errors=1 \
-    -d display_errors=1 \
-    -d error_reporting=E_ALL \
-    -d zend.assertions=1 \
-    -d assert.exception=1 \
-    -d zend_extension=opcache \
-    -d opcache.enable_cli=1 \
-    -d extension=mysqli \
-    -d extension=pdo_mysql \
-    -d extension=pgsql \
-    -d extension=pdo_pgsql \
-    -d extension=gmp \
-    -d extension=soap \
+  smoke_out="$(PHP_INI_SCAN_DIR="" "$php_bin" -c "$smoke_ini" \
     <<'EOF' 2>&1
 <?php
 $prefix = realpath(getenv("PKG_PREFIX"));
@@ -345,6 +390,7 @@ assert(extension_loaded("soap") && class_exists("SoapClient"));
 echo "PHP84_PKG_SMOKE_OK\n";
 EOF
   )" || smoke_rc=$?
+  rm -f "$smoke_ini"
   printf '%s\n' "$smoke_out"
   if [[ "$smoke_rc" -ne 0 ]] || ! printf '%s\n' "$smoke_out" | grep -Fxq 'PHP84_PKG_SMOKE_OK'; then
     echo "error: PHP84 port_package_smoke failed (rc=$smoke_rc)" >&2

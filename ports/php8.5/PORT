@@ -1,0 +1,289 @@
+NAME="php8.5"
+VERSION="8.5.13"
+LICENSE="PHP-3.01"
+UPSTREAM_URL="https://www.php.net/distributions/php-8.5.13.tar.xz"
+UPSTREAM_SHA256="607602acaf0c3061818e9916ec44a058e8b3d43959a83862b9cd3ec7bf5b785f"
+UPSTREAM_SHA256_SOURCE="pgp:https://www.php.net/distributions/php-8.5.13.tar.xz.asc key:ports/pgp-keys/php-8.5-dusch-release-key.asc fpr:49D9AF6BC72A80D6691719C8AA23F5BE9C7097D4"
+UPSTREAM_SIG_URL="https://www.php.net/distributions/php-8.5.13.tar.xz.asc"
+UPSTREAM_PGP_KEY="ports/pgp-keys/php-8.5-dusch-release-key.asc"
+UPSTREAM_PGP_FPR="49D9AF6BC72A80D6691719C8AA23F5BE9C7097D4"
+EXTRACT_DIR="php-8.5.13"
+TIER=5
+DEPS="openssl zlib bzip2 curl sqlite libxml2 pcre2 icu libedit oniguruma libsodium pkgconf"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--disable-fiber-asm --without-pcre-jit --disable-opcache-jit --disable-huge-code-pages --with-external-pcre --enable-fpm --with-openssl --with-zlib --with-curl --with-sqlite3 --with-pdo-sqlite --enable-intl --with-libedit --enable-mbstring --with-sodium --enable-bcmath --enable-calendar --enable-exif --enable-pcntl --enable-sockets"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P4-Audit"
+POLICY_RATIONALE="Adopted from upstream Fil-C (8553fcd026b9:projects/php.projeny + build_php.sh), refreshed cleanly to latest PHP 8.5 security release 8.5.13 (23 files, +222/-38, 0 fuzz, 0 offset; lexbor relocated to ext/lexbor in PHP 8.5), and split into 4 thematic patches: (01) tracked system allocator default with peak tracking and strcase pointer-provenance fix, (02) portable C paths replacing inline assembly/asm-goto and omitting .debug_gdb_scripts, (03) capability-preserving typed-property/WeakRef pointer tagging plus weak zexact_ptrtable mappings for WeakMap keys, ext/lexbor dynamic IDs, and ext/dom namespace_compat node keys, and (04) fiber stack-limit calculation from __builtin_frame_address(0) plus MAP_PRIVATE opcache mapping. Uses --disable-fiber-asm (musl ucontext/zfiber_context), --without-pcre-jit, --disable-opcache-jit, --disable-huge-code-pages, ac_cv_have_decl_UFFDIO_WRITEPROTECT_MODE_WP=no, php_cv_have_fpu_inline_asm_x86=no, and php_cv_preserve_none=no (portable call VM instead of preserve_none tailcall VM); OPcache is statically built-in in PHP 8.5; installed with versioned suffix 8.5 and versioned lib/include/etc/share/var directories for side-by-side multi-version PHP coexistence."
+FILC_ORIGIN_REF="8553fcd026b9:projects/php.projeny"
+
+port_configure() {
+  PATH="$PIZFIX/bin:$PATH" \
+    CPPFLAGS="-I$PIZFIX/include -I$PIZFIX/include/ncursesw" \
+    LDFLAGS="-L$PIZFIX/lib" \
+    PKG_CONFIG="$PIZFIX/bin/pkg-config --define-prefix" \
+    PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" \
+    EXTENSION_DIR="$PIZFIX/lib/php8.5/extensions" \
+    PHP_UNAME="Linux" \
+    PHP_BUILD_SYSTEM="Linux" \
+    PHP_BUILD_PROVIDER="Fil-C" \
+    ac_cv_have_decl_UFFDIO_WRITEPROTECT_MODE_WP=no \
+    php_cv_have_fpu_inline_asm_x86=no \
+    php_cv_preserve_none=no \
+    ./configure --prefix="$PIZFIX" \
+      --with-layout=GNU \
+      --program-suffix=8.5 \
+      --libdir="$PIZFIX/lib/php8.5" \
+      --includedir="$PIZFIX/include/php8.5" \
+      --datadir="$PIZFIX/share/php8.5" \
+      --mandir="$PIZFIX/share/man" \
+      --sysconfdir="$PIZFIX/etc/php8.5" \
+      --localstatedir="$PIZFIX/var/php8.5" \
+      --with-config-file-path="$PIZFIX/etc/php8.5" \
+      --with-config-file-scan-dir="$PIZFIX/etc/php8.5/conf.d" \
+      --disable-fiber-asm \
+      --without-pcre-jit \
+      --disable-opcache-jit \
+      --disable-huge-code-pages \
+      --with-external-pcre \
+      --enable-fpm \
+      --with-openssl \
+      --with-zlib \
+      --with-bz2="$PIZFIX" \
+      --with-curl \
+      --with-sqlite3 \
+      --with-pdo-sqlite \
+      --enable-intl \
+      --with-libedit \
+      --enable-mbstring \
+      --with-sodium \
+      --enable-bcmath \
+      --enable-calendar \
+      --enable-exif \
+      --enable-pcntl \
+      --enable-sockets
+}
+
+port_test() {
+  local php_bin fpm_bin ext_dir out ver fpm_ver
+  php_bin="$PIZFIX/bin/php8.5"
+  fpm_bin="$PIZFIX/sbin/php-fpm8.5"
+  ext_dir="$PIZFIX/lib/php8.5/extensions"
+
+  out="$("$php_bin" -n -v)"
+  ver="${out%%$'\n'*}"
+  echo "php8.5 version: $ver"
+  printf '%s\n' "$ver" | grep -q '^PHP 8\.5\.13 '
+
+  out="$("$fpm_bin" -n -v)"
+  fpm_ver="${out%%$'\n'*}"
+  echo "php-fpm8.5 version: $fpm_ver"
+  printf '%s\n' "$fpm_ver" | grep -q '^PHP 8\.5\.13 '
+
+  # OPcache is statically built-in in PHP 8.5 (no zend_extension=opcache needed)
+  "$php_bin" -n \
+    -d extension_dir="$ext_dir" \
+    -d zend.assertions=1 \
+    -d assert.exception=1 \
+    -d opcache.enable_cli=1 \
+    <<'EOF' | grep -Fxq 'PHP85_FILC_SMOKE_OK'
+<?php
+// 1. WeakMap + WeakReference + GC (zexact_ptrtable + tagged pointers)
+$m = new WeakMap();
+$o = new stdClass();
+$wr = WeakReference::create($o);
+$m[$o] = 1;
+foreach ($m as $k => $v) {
+    assert($k === $o && $v === 1);
+}
+assert($wr->get() === $o);
+unset($o, $k);
+gc_collect_cycles();
+assert(count($m) === 0);
+assert($wr->get() === null);
+
+// 2. Fibers: ping-pong suspend/resume, nested fibers, exception throw, and stack limit
+$pingpong = new Fiber(function (string $init): string {
+    $a = Fiber::suspend("step1:" . $init);
+    $inner = new Fiber(function (int $x): int {
+        $y = Fiber::suspend($x * 2);
+        return $y + 1;
+    });
+    assert($inner->start(21) === 42);
+    assert($inner->resume(99) === null);
+    assert($inner->getReturn() === 100);
+    $b = Fiber::suspend("step2:" . $a);
+    return "done:" . $b;
+});
+assert($pingpong->start("go") === "step1:go");
+assert($pingpong->resume("mid") === "step2:mid");
+assert($pingpong->resume("end") === null);
+assert($pingpong->getReturn() === "done:end");
+
+$throwing = new Fiber(function (): void {
+    try {
+        Fiber::suspend("ready");
+    } catch (RuntimeException $e) {
+        Fiber::suspend("caught:" . $e->getMessage());
+    }
+});
+assert($throwing->start() === "ready");
+assert($throwing->throw(new RuntimeException("boom")) === "caught:boom");
+$throwing->resume();
+
+function recurse_overflow(int $n): array {
+    return array_map("recurse_overflow", [$n + 1]);
+}
+$stack_fiber = new Fiber(function (): void {
+    try {
+        recurse_overflow(0);
+    } catch (Error $e) {
+        Fiber::suspend($e->getMessage());
+    }
+});
+$stack_msg = $stack_fiber->start();
+assert(is_string($stack_msg) && str_starts_with($stack_msg, "Maximum call stack size"));
+
+// 3. ext/dom HTMLDocument (ext/lexbor dynamic IDs via zexact_ptrtable) + XML C14N
+$doc = Dom\HTMLDocument::createFromString("<custom-el data-x=y>hi</custom-el>", LIBXML_NOERROR);
+assert($doc->querySelector("custom-el")->getAttribute("data-x") === "y");
+$xml = new DOMDocument();
+$xml->loadXML('<root xmlns="urn:test"><child a="1">ok</child></root>');
+assert(str_contains($xml->C14N(), '<child a="1">ok</child>'));
+
+// 4. PHP 8.5 features: ext/uri (RFC 3986 + WHATWG via ext/lexbor), pipe operator, array_first/last
+$rfc = new Uri\Rfc3986\Uri("https://example.invalid:8443/path/to/doc?a=1");
+assert($rfc->getHost() === "example.invalid" && $rfc->getPort() === 8443);
+$whatwg = new Uri\WhatWg\Url("https://EXAMPLE.INVALID/a/../b");
+assert($whatwg->getAsciiHost() === "example.invalid" && $whatwg->getPath() === "/b");
+assert(("  Fil-C PHP 8.5  " |> trim(...) |> strtolower(...)) === "fil-c php 8.5");
+assert(array_first([10, 20, 30]) === 10 && array_last([10, 20, 30]) === 30);
+
+// 5. Overflow arithmetic (portable builtins), strcase provenance, built-in opcache, tracked allocator
+$i = PHP_INT_MAX;
+$i++;
+assert(is_float($i));
+assert(strtolower("Fil-C PHP 8.5") === "fil-c php 8.5");
+assert(strtoupper("Fil-C php 8.5") === "FIL-C PHP 8.5");
+assert(opcache_get_status(false)["opcache_enabled"] === true);
+assert(memory_get_usage(true) % (2 << 20) !== 0);
+assert(memory_get_peak_usage(true) >= memory_get_usage(true));
+
+// 6. Core extensions: OpenSSL, zlib, bz2, SQLite3/PDO, PCRE2, JSON, curl, intl, mbstring, sodium, bcmath
+assert(hash("sha256", "hello\n") === "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03");
+assert(openssl_digest("hello\n", "sha256") === "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03");
+assert(gzuncompress(gzcompress("filc-zlib-php")) === "filc-zlib-php");
+assert(bzdecompress(bzcompress("filc-bz2-php")) === "filc-bz2-php");
+assert(preg_match('/^([a-z]+)-(\d+)$/', 'filc-85', $matches) === 1 && $matches[2] === '85');
+assert(json_decode(json_encode(["ok" => [1, 2, 3]]), true)["ok"] === [1, 2, 3]);
+assert(is_array(curl_version()) && !empty(curl_version()["version"]));
+assert(mb_strlen("hällo", "UTF-8") === 5);
+assert(mb_ereg_replace("([0-9]+)", "[\\1]", "v85") === "v[85]");
+$coll = new Collator("en_US");
+assert($coll->compare("a", "b") < 0);
+$hash = sodium_crypto_generichash("filc-sodium");
+assert(strlen($hash) === SODIUM_CRYPTO_GENERICHASH_BYTES);
+assert(bcadd("12345678901234567890", "1", 0) === "12345678901234567891");
+
+$db = new SQLite3(":memory:");
+$db->exec("CREATE TABLE t (v INT)");
+$db->exec("INSERT INTO t VALUES (42)");
+assert($db->querySingle("SELECT v FROM t") === 42);
+$db->close();
+
+$pdo = new PDO("sqlite::memory:");
+$pdo->exec("CREATE TABLE p (s TEXT)");
+$pdo->exec("INSERT INTO p VALUES ('ok')");
+assert($pdo->query("SELECT s FROM p")->fetchColumn() === "ok");
+
+echo "PHP85_FILC_SMOKE_OK\n";
+EOF
+
+  # Curated upstream run-tests.php suite covering fibers, weakrefs, uri,
+  # sqlite3, json, and bz2 (parallelized across available jobs).
+  local run_tests_log="$SRC_DIR/.filc-run-tests.log"
+  TEST_PHP_EXECUTABLE="$php_bin" \
+    NO_INTERACTION=1 \
+    REPORT_EXIT_STATUS=1 \
+    "$php_bin" -n "$SRC_DIR/run-tests.php" \
+      -q \
+      -j"$JOBS" \
+      -p "$php_bin" \
+      -d extension_dir="$ext_dir" \
+      --show-diff \
+      "$SRC_DIR/Zend/tests/fibers" \
+      "$SRC_DIR/Zend/tests/weakrefs" \
+      "$SRC_DIR/ext/bz2/tests" \
+      "$SRC_DIR/ext/json/tests" \
+      "$SRC_DIR/ext/sqlite3/tests" \
+      "$SRC_DIR/ext/uri/tests" \
+      2>&1 | tee "$run_tests_log"
+}
+
+port_package_smoke() {
+  local php_bin fpm_bin ext_dir out ver fpm_ver
+  php_bin="$PKG_PREFIX/bin/php8.5"
+  fpm_bin="$PKG_PREFIX/sbin/php-fpm8.5"
+  ext_dir="$PKG_PREFIX/lib/php8.5/extensions"
+
+  out="$("$php_bin" -n -v)"
+  ver="${out%%$'\n'*}"
+  printf '%s\n' "$ver" | grep -q '^PHP 8\.5\.13 '
+
+  out="$("$fpm_bin" -n -v)"
+  fpm_ver="${out%%$'\n'*}"
+  printf '%s\n' "$fpm_ver" | grep -q '^PHP 8\.5\.13 '
+
+  "$php_bin" -n \
+    -d extension_dir="$ext_dir" \
+    -d zend.assertions=1 \
+    -d assert.exception=1 \
+    -d opcache.enable_cli=1 \
+    <<'EOF' | grep -Fxq 'PHP85_PKG_SMOKE_OK'
+<?php
+$prefix = realpath(getenv("PKG_PREFIX"));
+assert(is_string($prefix) && str_starts_with(realpath(PHP_BINARY), $prefix . "/"));
+
+$m = new WeakMap();
+$o = new stdClass();
+$wr = WeakReference::create($o);
+$m[$o] = 1;
+assert($wr->get() === $o);
+unset($o);
+gc_collect_cycles();
+assert(count($m) === 0 && $wr->get() === null);
+
+$f = new Fiber(function (string $s): string {
+    $v = Fiber::suspend("hi:" . $s);
+    return "ok:" . $v;
+});
+assert($f->start("filc") === "hi:filc");
+assert($f->resume("85") === null && $f->getReturn() === "ok:85");
+
+$doc = Dom\HTMLDocument::createFromString("<custom-el data-x=y>hi</custom-el>", LIBXML_NOERROR);
+assert($doc->querySelector("custom-el")->getAttribute("data-x") === "y");
+$url = new Uri\WhatWg\Url("https://EXAMPLE.INVALID/a/../b");
+assert($url->getAsciiHost() === "example.invalid" && $url->getPath() === "/b");
+assert(("  PHP 8.5  " |> trim(...) |> strtolower(...)) === "php 8.5");
+
+assert(opcache_get_status(false)["opcache_enabled"] === true);
+assert(openssl_digest("hello\n", "sha256") === "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03");
+assert(gzuncompress(gzcompress("filc-zlib-php")) === "filc-zlib-php");
+assert(bzdecompress(bzcompress("filc-bz2-php")) === "filc-bz2-php");
+assert(preg_match('/^([a-z]+)-(\d+)$/', 'filc-85', $matches) === 1 && $matches[2] === '85');
+assert(is_array(curl_version()) && !empty(curl_version()["version"]));
+assert(mb_ereg_replace("([0-9]+)", "[\\1]", "v85") === "v[85]");
+assert((new Collator("en_US"))->compare("a", "b") < 0);
+assert(strlen(sodium_crypto_generichash("filc-sodium")) === SODIUM_CRYPTO_GENERICHASH_BYTES);
+assert(bcadd("12345678901234567890", "1", 0) === "12345678901234567891");
+
+$db = new SQLite3(":memory:");
+$db->exec("CREATE TABLE t (v INT); INSERT INTO t VALUES (42);");
+assert($db->querySingle("SELECT v FROM t") === 42);
+$db->close();
+
+echo "PHP85_PKG_SMOKE_OK\n";
+EOF
+}

@@ -1,0 +1,58 @@
+Subject: Adapt fiber stack limit measurement and private opcache mmap for Fil-C
+Policy-Class: P4-Audit
+Rationale: With --disable-fiber-asm, Fil-C runs ucontext fibers on runtime-allocated native stacks, so compute EG(stack_base)/EG(stack_limit) from __builtin_frame_address(0). For opcache, capabilities are per-process, so map the opcache region MAP_PRIVATE instead of MAP_SHARED and skip the MAP_32BIT huge-page unmap/remap sequence under __FILC__.
+Upstream-Status: Fil-C-Specific
+Fil-C-Origin-Commits: fd1f26a649078e4e12cb01026cf43199b6e6d160
+Origin-Kind: filc-upstream
+Origin-Project: pizlonator/fil-c
+Origin-Commit: fd1f26a649078e4e12cb01026cf43199b6e6d160
+Origin-URL: https://github.com/pizlonator/fil-c/commit/fd1f26a649078e4e12cb01026cf43199b6e6d160
+
+diff --git a/Zend/zend_fibers.c b/Zend/zend_fibers.c
+index 8c3a080..c2b8d2f 100644
+--- a/Zend/zend_fibers.c
++++ b/Zend/zend_fibers.c
+@@ -633,8 +633,15 @@ static ZEND_STACK_ALIGNED void zend_fiber_execute(zend_fiber_transfer *transfer)
+ 		EG(error_reporting) = error_reporting;
+ 
+ #ifdef ZEND_CHECK_STACK_LIMIT
++# ifdef __FILC__
++		/* Fil-C runs the fiber on a native stack of the requested size that
++		 * its runtime allocates, not on stack->pointer; measure from here. */
++		EG(stack_base) = __builtin_frame_address(0);
++		EG(stack_limit) = (int8_t*)EG(stack_base) - fiber->context.stack->size + EG(reserved_stack_size);
++# else
+ 		EG(stack_base) = zend_fiber_stack_base(fiber->context.stack);
+ 		EG(stack_limit) = zend_fiber_stack_limit(fiber->context.stack);
++# endif
+ #endif
+ 
+ 		fiber->fci.retval = &fiber->result;
+diff --git a/ext/opcache/shared_alloc_mmap.c b/ext/opcache/shared_alloc_mmap.c
+index 46e510d..82516aa 100644
+--- a/ext/opcache/shared_alloc_mmap.c
++++ b/ext/opcache/shared_alloc_mmap.c
+@@ -44,6 +44,14 @@
+ #if defined(MAP_ANON) && !defined(MAP_ANONYMOUS)
+ # define MAP_ANONYMOUS MAP_ANON
+ #endif
++#ifdef __FILC__
++/* Fil-C keeps pointer capabilities per process, so a pointer one process
++ * stores in a shared mapping has none in another: an FPM worker trapped
++ * reading the hash entry of a script another worker had cached. Map the
++ * cache privately; forked workers still start from what the parent cached. */
++# undef MAP_SHARED
++# define MAP_SHARED MAP_PRIVATE
++#endif
+ #if defined(MAP_ALIGNED_SUPER)
+ # include <sys/types.h>
+ # include <sys/sysctl.h>
+@@ -241,7 +249,7 @@ static int create_segments(size_t requested_size, zend_shared_segment ***shared_
+ 	 * (boot time config only, but enabled by default on most arches).
+ 	 */
+ 	if (requested_size >= huge_page_size && requested_size % huge_page_size == 0) {
+-# if defined(__x86_64__) && defined(MAP_32BIT)
++# if defined(__x86_64__) && defined(MAP_32BIT) && !defined(__FILC__)
+ 		/* to got HUGE PAGES in low 32-bit address we have to reserve address
+ 		   space and then remap it using MAP_HUGETLB */
+ 

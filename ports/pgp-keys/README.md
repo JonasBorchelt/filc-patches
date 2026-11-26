@@ -22,4 +22,5 @@ Armored OpenPGP release signing keys pinned for `scripts/verify-pins`:
 - `openssh-release-key.asc`: Damien Miller (`https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/RELEASE_KEY.asc`), fingerprint `7168B983815A5EEF59A4ADFD2A3F414E736060BA`.
 - `php-8.3-zelenka-release-key.asc`: Jakub Zelenka (`keys.openpgp.org`, PHP 8.3 Release Manager), fingerprint `C28D937575603EB4ABB725861C0779DC5C0A9DE4`.
 - `php-8.4-takamachi-release-key.asc`: Saki Takamachi (`keyserver.ubuntu.com`, PHP 8.4 Release Manager, cross-checked against `https://www.php.net/gpg-keys.php`), fingerprint `0616E93D95AF471243E26761770426E17EBBB3DD`.
+- `php-8.5-dusch-release-key.asc`: Volker Dusch (`keyserver.ubuntu.com`, PHP 8.5 Release Manager, cross-checked against `https://www.php.net/gpg-keys.php`), fingerprint `49D9AF6BC72A80D6691719C8AA23F5BE9C7097D4`.
 - `python-wouters-release-key.asc`: Thomas Wouters (`keyserver.ubuntu.com`, Python 3.12 Release Manager), fingerprint `7169605F62C751356D054A26A821E680E5FA6305`.

@@ -1,0 +1,115 @@
+Subject: Use portable C paths instead of inline assembly and drop .debug_gdb_scripts under Fil-C
+Policy-Class: P2-Package
+Rationale: Take Zend's portable C paths for zend_string_equal_val, zend_safe_address, and overflow arithmetic (avoiding asm goto callbr), guard x87 inline asm to __i386__, spell xgetbv directly instead of raw .byte opcodes, and omit the raw inline-asm .debug_gdb_scripts section under __FILC__.
+Upstream-Status: Upstream-Candidate
+Fil-C-Origin-Commits: fd1f26a649078e4e12cb01026cf43199b6e6d160 95f267d64fd1615bae8c6c25425d9b7857bee326
+Origin-Kind: filc-upstream
+Origin-Project: pizlonator/fil-c
+Origin-Commit: fd1f26a649078e4e12cb01026cf43199b6e6d160
+Origin-URL: https://github.com/pizlonator/fil-c/commit/fd1f26a649078e4e12cb01026cf43199b6e6d160
+
+diff --git a/Zend/zend_cpuinfo.c b/Zend/zend_cpuinfo.c
+index 45857a7..9f81758 100644
+--- a/Zend/zend_cpuinfo.c
++++ b/Zend/zend_cpuinfo.c
+@@ -81,7 +81,7 @@ static unsigned get_xcr0_eax(void) {
+ 	// directly because older assemblers do not include support for xgetbv and
+ 	// there is no easy way to conditionally compile based on the assembler used.
+ 	unsigned eax, edx;
+-	__asm__(".byte 0x0f, 0x01, 0xd0" : "=a"(eax), "=d"(edx) : "c"(0));
++	__asm__("xgetbv" : "=a"(eax), "=d"(edx) : "c"(0));
+ 	return eax;
+ # elif defined(ZEND_WIN32) && defined(_XCR_XFEATURE_ENABLED_MASK)
+ 	return _xgetbv(_XCR_XFEATURE_ENABLED_MASK);
+diff --git a/Zend/zend_float.h b/Zend/zend_float.h
+index 63e0f6f..9e5843a 100644
+--- a/Zend/zend_float.h
++++ b/Zend/zend_float.h
+@@ -314,7 +314,7 @@ END_EXTERN_C()
+                 return _xpfpa_result; \
+             } while (0)
+ 
+-#elif defined(HAVE_FPU_INLINE_ASM_X86) && !defined(__x86_64__)
++#elif defined(HAVE_FPU_INLINE_ASM_X86) && defined(__i386__)
+ 
+ /*
+   Custom x86 inline assembler implementation.
+diff --git a/Zend/zend_multiply.h b/Zend/zend_multiply.h
+index 200bedd..e25e043 100644
+--- a/Zend/zend_multiply.h
++++ b/Zend/zend_multiply.h
+@@ -174,7 +174,7 @@ static zend_always_inline size_t zend_safe_address(size_t nmemb, size_t size, si
+ 	return res;
+ }
+ 
+-#elif defined(__GNUC__) && defined(__x86_64__)
++#elif defined(__GNUC__) && defined(__x86_64__) && !defined(__FILC__)
+ 
+ static zend_always_inline size_t zend_safe_address(size_t nmemb, size_t size, size_t offset, bool *overflow)
+ {
+diff --git a/Zend/zend_operators.h b/Zend/zend_operators.h
+index b8326ed..76efa8b 100644
+--- a/Zend/zend_operators.h
++++ b/Zend/zend_operators.h
+@@ -544,7 +544,10 @@ ZEND_API void zend_reset_lc_ctype_locale(void);
+ #define ZVAL_OFFSETOF_TYPE	\
+ 	(offsetof(zval, u1.type_info) - offsetof(zval, value))
+ 
+-#if defined(HAVE_ASM_GOTO) && !__has_feature(memory_sanitizer)
++/* Fil-C: configure's asm goto probe passes, but these asm goto blocks write
++ * through a pointer operand, and FilPizlonatorPass crashes on that callbr.
++ * Use the overflow builtins instead. */
++#if defined(HAVE_ASM_GOTO) && !__has_feature(memory_sanitizer) && !defined(__FILC__)
+ # define ZEND_USE_ASM_ARITHMETIC 1
+ #else
+ # define ZEND_USE_ASM_ARITHMETIC 0
+diff --git a/Zend/zend_string.c b/Zend/zend_string.c
+index ab58c27..72de591 100644
+--- a/Zend/zend_string.c
++++ b/Zend/zend_string.c
+@@ -391,7 +391,7 @@ ZEND_API void zend_interned_strings_switch_storage(bool request)
+ 	}
+ }
+ 
+-#if defined(__GNUC__) && (defined(__i386__) || (defined(__x86_64__) && !defined(__ILP32__)))
++#if defined(__GNUC__) && (defined(__i386__) || (defined(__x86_64__) && !defined(__ILP32__))) && !defined(__FILC__)
+ /* Even if we don't build with valgrind support, include the symbol so that valgrind available
+  * only at runtime will not result in false positives. */
+ #ifndef I_REPLACE_SONAME_FNNAME_ZU
+@@ -449,7 +449,7 @@ ZEND_API zend_never_inline NOIPA bool ZEND_FASTCALL zend_string_equal_val(const
+ 	return ret;
+ }
+ 
+-#elif defined(__GNUC__) && defined(__x86_64__) && !defined(__ILP32__)
++#elif defined(__GNUC__) && defined(__x86_64__) && !defined(__ILP32__) && !defined(__FILC__)
+ ZEND_API zend_never_inline NOIPA bool ZEND_FASTCALL zend_string_equal_val(const zend_string *s1, const zend_string *s2)
+ {
+ 	const char *ptr = ZSTR_VAL(s1);
+diff --git a/Zend/zend_string.h b/Zend/zend_string.h
+index c69ef44..9cc08bb 100644
+--- a/Zend/zend_string.h
++++ b/Zend/zend_string.h
+@@ -441,7 +441,7 @@ static zend_always_inline bool zend_string_equals_cstr(const zend_string *s1, co
+ 	return ZSTR_LEN(s1) == s2_length && !memcmp(ZSTR_VAL(s1), s2, s2_length);
+ }
+ 
+-#if defined(__GNUC__) && (defined(__i386__) || (defined(__x86_64__) && !defined(__ILP32__)))
++#if defined(__GNUC__) && (defined(__i386__) || (defined(__x86_64__) && !defined(__ILP32__))) && !defined(__FILC__)
+ BEGIN_EXTERN_C()
+ ZEND_API bool ZEND_FASTCALL zend_string_equal_val(const zend_string *s1, const zend_string *s2);
+ END_EXTERN_C()
+diff --git a/main/debug_gdb_scripts.c b/main/debug_gdb_scripts.c
+index 6db215f..aeba261 100644
+Binary files a/main/debug_gdb_scripts.c and b/main/debug_gdb_scripts.c differ
+--- a/main/debug_gdb_scripts.c
++++ b/main/debug_gdb_scripts.c
+@@ -1,3 +1,4 @@
++#ifndef __FILC__
+ /*
+  * Generated by debug_gdb_scripts_gen.php.
+  *
+@@ -1688,3 +1689,4 @@
+     ".byte 0\n"
+     ".popsection\n"
+ );
++#endif

@@ -20,9 +20,12 @@ POLICY_RATIONALE="Adopted from upstream Fil-C (8553fcd026b9:projects/php.projeny
 FILC_ORIGIN_REF="8553fcd026b9:projects/php.projeny"
 
 port_configure() {
+  # Bind defined function symbols locally inside shared extensions so Fil-C's
+  # pizlonatedFO_get_module -> pizlonatedFIP<sig>_get_module relocation cannot
+  # be interposed by an earlier RTLD_GLOBAL extension on musl (no RTLD_DEEPBIND).
   PATH="$PIZFIX/bin:$PATH" \
     CPPFLAGS="-I$PIZFIX/include -I$PIZFIX/include/ncursesw" \
-    LDFLAGS="-L$PIZFIX/lib -Wl,-rpath,$PIZFIX/lib" \
+    LDFLAGS="-L$PIZFIX/lib -Wl,-rpath,$PIZFIX/lib -Wl,-Bsymbolic-functions" \
     PKG_CONFIG="$PIZFIX/bin/pkg-config --define-prefix" \
     PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" \
     EXTENSION_DIR="$PIZFIX/lib/php8.5/extensions" \
@@ -96,6 +99,10 @@ port_test() {
     if command -v readelf >/dev/null 2>&1 && [[ -f "$ext_dir/${ext}.so" ]]; then
       echo "readelf ${ext}.so:"
       readelf -d "$ext_dir/${ext}.so" 2>&1 | grep -E 'NEEDED|RPATH|RUNPATH' || true
+      if readelf -rW "$ext_dir/${ext}.so" 2>&1 | grep -Eq 'pizlonatedFIP[0-9]+_get_module'; then
+        echo "error: ${ext}.so still has a preemptible pizlonatedFIP*_get_module relocation" >&2
+        ext_failed=1
+      fi
     fi
     ext_rc=0
     ext_out="$("$php_bin" -n \
@@ -115,8 +122,8 @@ port_test() {
     return 1
   fi
 
-  echo "=== Combined -d extension= diagnostic (-m and --ri mysqli) ==="
-  "$php_bin" -n \
+  local cli_multi_rc=0 cli_multi_out=""
+  cli_multi_out="$("$php_bin" -n \
     -d extension_dir="$ext_dir" \
     -d display_startup_errors=1 \
     -d display_errors=1 \
@@ -128,20 +135,12 @@ port_test() {
     -d extension=pdo_pgsql \
     -d extension=gmp \
     -d extension=soap \
-    -m 2>&1 || true
-  "$php_bin" -n \
-    -d extension_dir="$ext_dir" \
-    -d display_startup_errors=1 \
-    -d display_errors=1 \
-    -d error_reporting=E_ALL \
-    -d opcache.enable_cli=1 \
-    -d extension=mysqli \
-    -d extension=pdo_mysql \
-    -d extension=pgsql \
-    -d extension=pdo_pgsql \
-    -d extension=gmp \
-    -d extension=soap \
-    --ri mysqli 2>&1 || true
+    -r 'foreach (["mysqli","pdo_mysql","pgsql","pdo_pgsql","gmp","soap"] as $e) { if (!extension_loaded($e)) { fwrite(STDERR, "MISSING:$e\n"); exit(1); } } echo "CLI_MULTI_EXT_OK\n";' 2>&1)" || cli_multi_rc=$?
+  printf '%s\n' "$cli_multi_out"
+  if [[ "$cli_multi_rc" -ne 0 ]] || ! printf '%s\n' "$cli_multi_out" | grep -Fxq 'CLI_MULTI_EXT_OK' || printf '%s\n' "$cli_multi_out" | grep -q 'Warning:'; then
+    echo "error: PHP85 combined -d extension= load failed (rc=$cli_multi_rc)" >&2
+    return 1
+  fi
 
   local smoke_ini
   smoke_ini="$(mktemp)"
@@ -160,10 +159,6 @@ extension=pdo_pgsql
 extension=gmp
 extension=soap
 SMOKEINI
-
-  echo "=== Combined -c smoke.ini diagnostic (-m and --ri mysqli) ==="
-  PHP_INI_SCAN_DIR="" "$php_bin" -c "$smoke_ini" -m 2>&1 || true
-  PHP_INI_SCAN_DIR="" "$php_bin" -c "$smoke_ini" --ri mysqli 2>&1 || true
 
   local smoke_rc=0 smoke_out=""
   smoke_out="$(PHP_INI_SCAN_DIR="" "$php_bin" -c "$smoke_ini" \
@@ -290,7 +285,7 @@ EOF
   )" || smoke_rc=$?
   rm -f "$smoke_ini"
   printf '%s\n' "$smoke_out"
-  if [[ "$smoke_rc" -ne 0 ]] || ! printf '%s\n' "$smoke_out" | grep -Fxq 'PHP85_FILC_SMOKE_OK'; then
+  if [[ "$smoke_rc" -ne 0 ]] || ! printf '%s\n' "$smoke_out" | grep -Fxq 'PHP85_FILC_SMOKE_OK' || printf '%s\n' "$smoke_out" | grep -q 'Warning:'; then
     echo "error: PHP85 port_test smoke failed (rc=$smoke_rc)" >&2
     return 1
   fi
@@ -403,7 +398,7 @@ EOF
   )" || smoke_rc=$?
   rm -f "$smoke_ini"
   printf '%s\n' "$smoke_out"
-  if [[ "$smoke_rc" -ne 0 ]] || ! printf '%s\n' "$smoke_out" | grep -Fxq 'PHP85_PKG_SMOKE_OK'; then
+  if [[ "$smoke_rc" -ne 0 ]] || ! printf '%s\n' "$smoke_out" | grep -Fxq 'PHP85_PKG_SMOKE_OK' || printf '%s\n' "$smoke_out" | grep -q 'Warning:'; then
     echo "error: PHP85 port_package_smoke failed (rc=$smoke_rc)" >&2
     return 1
   fi

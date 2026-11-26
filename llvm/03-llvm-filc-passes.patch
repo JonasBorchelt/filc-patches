@@ -15170,7 +15170,7 @@ index 000000000..8f2617fac
 +      return;
 +    }
 +
-+    if (isa<PtrToIntInst>(I)) {
++    if (isa<PtrToIntInst>(I) || isa<PtrToAddrInst>(I)) {
 +      I->getOperandUse(0) = flightPtrPtr(I->getOperand(0), I);
 +      return;
 +    }
@@ -15839,7 +15839,7 @@ index 000000000..8f2617fac
 +      if (isa<CallBase>(I) || isa<LoadInst>(I) || isa<AtomicCmpXchgInst>(I) ||
 +          isa<AtomicRMWInst>(I) || isa<CmpInst>(I) || isa<VAArgInst>(I) ||
 +          isa<ExtractElementInst>(I) || isa<ExtractValueInst>(I) || isa<LandingPadInst>(I) ||
-+          isa<FPToUIInst>(I) || isa<FPToSIInst>(I)) {
++          isa<FPToUIInst>(I) || isa<FPToSIInst>(I) || isa<PtrToAddrInst>(I)) {
 +        InferredCapabilities[I] = InferredCapability(CapabilityInferenceState::Bottom, nullptr);
 +        continue;
 +      }

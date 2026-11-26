@@ -1134,6 +1134,141 @@ else
   FAILURES=$((FAILURES + 1))
 fi
 
+echo "=== Running (k) LLVM 23 PtrToAddrInst & sprintf(\"%s\") -O2 Regression ==="
+cat > "$TEST_DIR/ptrtoaddr_sprintf_test.c" <<'EOF'
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+__attribute__((noinline))
+static size_t format_joined(char *buf, const char *const *items, size_t n) {
+    char *p = buf;
+    for (size_t i = 0; i < n; ++i) {
+        if (i > 0) {
+            strcpy(p, ", ");
+            p += 2;
+        }
+        p += sprintf(p, "%s", items[i]);
+    }
+    return (size_t)(p - buf);
+}
+
+int main(void) {
+    const char *items[] = {"alpha", "beta", "gamma"};
+    char *buf = (char *)malloc(64);
+    if (!buf)
+        return 1;
+    size_t len = format_joined(buf, items, 3);
+    if (len != 18 || strcmp(buf, "alpha, beta, gamma") != 0) {
+        fprintf(stderr, "unexpected format_joined result: len=%zu buf='%s'\n", len, buf);
+        free(buf);
+        return 2;
+    }
+    printf("PTRTOADDR_SPRINTF_OK %s (len=%zu)\n", buf, len);
+    free(buf);
+    return 0;
+}
+EOF
+
+cat > "$TEST_DIR/ptrtoaddr_ir_driver.c" <<'EOF'
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+extern int64_t filc_test_ptrtoaddr_diff(const void *a, const void *b);
+extern volatile char *filc_test_ptrtoaddr_noprov(const void *a);
+
+int main(void) {
+    char *buf = (char *)malloc(32);
+    if (!buf)
+        return 1;
+    buf[0] = 'X';
+    int64_t diff = filc_test_ptrtoaddr_diff(buf + 3, buf + 19);
+    if (diff != 16) {
+        fprintf(stderr, "ptrtoaddr diff mismatch: got %lld, want 16\n", (long long)diff);
+        free(buf);
+        return 2;
+    }
+
+    fflush(NULL);
+    pid_t pid = fork();
+    if (pid < 0)
+        return 3;
+    if (pid == 0) {
+        volatile char *bad = filc_test_ptrtoaddr_noprov(buf);
+        char v = *bad;
+        printf("UNEXPECTED_PTRTOADDR_PROV_LEAK=%d\n", (int)v);
+        fflush(stdout);
+        _exit(0);
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0)
+        return 4;
+    if (!WIFSIGNALED(status)) {
+        fprintf(stderr, "ptrtoaddr inttoptr child did not trap (status=0x%x)\n", status);
+        free(buf);
+        return 5;
+    }
+    printf("PTRTOADDR_IR_OK diff=%lld\n", (long long)diff);
+    free(buf);
+    return 0;
+}
+EOF
+
+PTRTOADDR_OK=1
+"$CLANG" -O2 -Wall -Wextra -Werror "$TEST_DIR/ptrtoaddr_sprintf_test.c" -o "$TEST_DIR/ptrtoaddr_sprintf_test"
+run_and_capture ptrtoaddr_sprintf_test "$TEST_DIR/ptrtoaddr_sprintf_test"
+RC_PTRTOADDR_SPRINTF="$(cat "$TEST_DIR/ptrtoaddr_sprintf_test.rc")"
+if [[ "$RC_PTRTOADDR_SPRINTF" -ne 0 ]] || ! grep -Fxq "PTRTOADDR_SPRINTF_OK alpha, beta, gamma (len=18)" "$TEST_DIR/ptrtoaddr_sprintf_test.stdout"; then
+  echo "error: ptrtoaddr_sprintf_test failed (rc=$RC_PTRTOADDR_SPRINTF)" >&2
+  cat "$TEST_DIR/ptrtoaddr_sprintf_test.stdout" >&2
+  cat "$TEST_DIR/ptrtoaddr_sprintf_test.stderr" >&2
+  PTRTOADDR_OK=0
+fi
+
+"$CLANG" -O2 -S -emit-llvm -Xclang -disable-llvm-passes "$TEST_DIR/ptrtoaddr_sprintf_test.c" -o "$TEST_DIR/ptrtoaddr_hdr.ll"
+grep -E '^target (datalayout|triple) =' "$TEST_DIR/ptrtoaddr_hdr.ll" > "$TEST_DIR/ptrtoaddr_ir.ll"
+cat >> "$TEST_DIR/ptrtoaddr_ir.ll" <<'EOF'
+
+define dso_local i64 @filc_test_ptrtoaddr_diff(ptr noundef %a, ptr noundef %b) {
+entry:
+  %ia = ptrtoaddr ptr %a to i64
+  %ib = ptrtoaddr ptr %b to i64
+  %d = sub i64 %ib, %ia
+  ret i64 %d
+}
+
+define dso_local ptr @filc_test_ptrtoaddr_noprov(ptr noundef %a) {
+entry:
+  %ia = ptrtoaddr ptr %a to i64
+  %p = inttoptr i64 %ia to ptr
+  ret ptr %p
+}
+EOF
+
+"$CLANG" -O2 -c -x ir "$TEST_DIR/ptrtoaddr_ir.ll" -o "$TEST_DIR/ptrtoaddr_ir.o"
+"$CLANG" -O2 -Wall -Wextra -Werror "$TEST_DIR/ptrtoaddr_ir_driver.c" "$TEST_DIR/ptrtoaddr_ir.o" -o "$TEST_DIR/ptrtoaddr_ir_test"
+run_and_capture ptrtoaddr_ir_test "$TEST_DIR/ptrtoaddr_ir_test"
+RC_PTRTOADDR_IR="$(cat "$TEST_DIR/ptrtoaddr_ir_test.rc")"
+if [[ "$RC_PTRTOADDR_IR" -ne 0 ]] \
+  || grep -q "UNEXPECTED_PTRTOADDR_PROV_LEAK" "$TEST_DIR/ptrtoaddr_ir_test.stdout" \
+  || ! grep -Fxq "PTRTOADDR_IR_OK diff=16" "$TEST_DIR/ptrtoaddr_ir_test.stdout" \
+  || ! grep -qi "filc safety error" "$TEST_DIR/ptrtoaddr_ir_test.stderr"; then
+  echo "error: ptrtoaddr_ir_test failed (rc=$RC_PTRTOADDR_IR)" >&2
+  cat "$TEST_DIR/ptrtoaddr_ir_test.stdout" >&2
+  cat "$TEST_DIR/ptrtoaddr_ir_test.stderr" >&2
+  PTRTOADDR_OK=0
+fi
+
+if [[ "$PTRTOADDR_OK" -eq 1 ]]; then
+  STATUS_PTRTOADDR="PASS"
+else
+  STATUS_PTRTOADDR="FAIL"
+  FAILURES=$((FAILURES + 1))
+fi
+
 OVERALL_STATUS="PASS"
 if (( FAILURES > 0 )); then
   OVERALL_STATUS="FAIL"
@@ -1251,6 +1386,9 @@ ARCH="$(uname -m)"
   echo ""
   echo "--- TEST (j) FIBER CONTEXT (<ucontext.h>) GC & STACK OVERFLOW [$STATUS_FIBER] ---"
   echo "GC_EXIT_CODE: $RC_FIBER_GC  OVERFLOW_TRAP_RC: $RC_FIBER_OVF"
+  echo ""
+  echo "--- TEST (k) LLVM 23 PTRTOADDR & SPRINTF(\"%s\") -O2 [$STATUS_PTRTOADDR] ---"
+  echo "SPRINTF_EXIT_CODE: $RC_PTRTOADDR_SPRINTF  IR_EXIT_CODE: $RC_PTRTOADDR_IR"
   echo "================================================================================"
 } > "$REPORT_FILE"
 

@@ -15,7 +15,7 @@ PHP_VERSION="${PHP_VERSION:?PHP_VERSION is required (e.g. 8.5)}"
 FILC_CHANNEL="${FILC_CHANNEL:-0.1.5}"
 FILC_BASE_URL="${FILC_BASE_URL:-https://filc.connected.link}"
 FILC_BASE_URL="${FILC_BASE_URL%/}"
-FILC_GITHUB_RELEASE_URL="${FILC_GITHUB_RELEASE_URL:-https://github.com/JonasBorchelt/filc-patches/releases/download/v${FILC_CHANNEL}}"
+FILC_GITHUB_RELEASE_URL="${FILC_GITHUB_RELEASE_URL-https://github.com/JonasBorchelt/filc-patches/releases/download/v${FILC_CHANNEL}}"
 FILC_USER_AGENT="${FILC_USER_AGENT:-filc-image-ci/${PHP_VERSION}}"
 
 if [[ ! "$PHP_VERSION" =~ ^[0-9]+\.[0-9]+$ ]]; then
@@ -55,7 +55,11 @@ export FILC_ROOT="/opt/filc/${FILC_CHANNEL}"
 export FILC_BASE_URL
 export FILC_PORTS_PUBKEY
 export FILC_USER_AGENT
-export FILC_GITHUB_LATEST_URL="${FILC_GITHUB_RELEASE_URL%/}"
+if [[ -n "$FILC_GITHUB_RELEASE_URL" ]]; then
+  export FILC_GITHUB_LATEST_URL="${FILC_GITHUB_RELEASE_URL%/}"
+else
+  unset FILC_GITHUB_LATEST_URL || true
+fi
 
 INSTALL_SH="$TMP_WORK/install.sh"
 echo "Fetching installer from ${FILC_BASE_URL}/install.sh (UA=${FILC_USER_AGENT}) ..."

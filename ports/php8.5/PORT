@@ -9,9 +9,9 @@ UPSTREAM_PGP_KEY="ports/pgp-keys/php-8.5-dusch-release-key.asc"
 UPSTREAM_PGP_FPR="49D9AF6BC72A80D6691719C8AA23F5BE9C7097D4"
 EXTRACT_DIR="php-8.5.13"
 TIER=5
-DEPS="openssl zlib bzip2 curl sqlite libxml2 pcre2 icu libedit oniguruma libsodium pkgconf"
+DEPS="openssl zlib bzip2 curl sqlite libxml2 pcre2 icu libedit oniguruma libsodium gmp postgresql-client pkgconf"
 BUILD_SYSTEM="autotools"
-CONFIGURE_ARGS="--disable-fiber-asm --without-pcre-jit --disable-opcache-jit --disable-huge-code-pages --with-external-pcre --enable-fpm --with-openssl --with-zlib --with-curl --with-sqlite3 --with-pdo-sqlite --enable-intl --with-libedit --enable-mbstring --with-sodium --enable-bcmath --enable-calendar --enable-exif --enable-pcntl --enable-sockets"
+CONFIGURE_ARGS="--disable-fiber-asm --without-pcre-jit --disable-opcache-jit --disable-huge-code-pages --with-external-pcre --enable-fpm --with-openssl --with-zlib --with-curl --with-sqlite3 --with-pdo-sqlite --enable-intl --with-libedit --enable-mbstring --with-sodium --enable-bcmath --enable-calendar --enable-exif --enable-pcntl --enable-sockets --enable-mysqlnd --with-mysqli=shared,mysqlnd --with-pdo-mysql=shared,mysqlnd --with-pgsql=shared --with-pdo-pgsql=shared --with-gmp=shared --enable-soap=shared"
 MAKE_ARGS=""
 INSTALL_ARGS=""
 TEST_CMD=""
@@ -63,7 +63,14 @@ port_configure() {
       --enable-calendar \
       --enable-exif \
       --enable-pcntl \
-      --enable-sockets
+      --enable-sockets \
+      --enable-mysqlnd \
+      --with-mysqli=shared,mysqlnd \
+      --with-pdo-mysql=shared,mysqlnd \
+      --with-pgsql=shared,"$PIZFIX" \
+      --with-pdo-pgsql=shared,"$PIZFIX" \
+      --with-gmp=shared,"$PIZFIX" \
+      --enable-soap=shared
 }
 
 port_test() {
@@ -88,6 +95,12 @@ port_test() {
     -d zend.assertions=1 \
     -d assert.exception=1 \
     -d opcache.enable_cli=1 \
+    -d extension=mysqli \
+    -d extension=pdo_mysql \
+    -d extension=pgsql \
+    -d extension=pdo_pgsql \
+    -d extension=gmp \
+    -d extension=soap \
     <<'EOF' | grep -Fxq 'PHP85_FILC_SMOKE_OK'
 <?php
 // 1. WeakMap + WeakReference + GC (zexact_ptrtable + tagged pointers)
@@ -198,6 +211,14 @@ $pdo->exec("CREATE TABLE p (s TEXT)");
 $pdo->exec("INSERT INTO p VALUES ('ok')");
 assert($pdo->query("SELECT s FROM p")->fetchColumn() === "ok");
 
+// 7. Shared extensions: mysqli, pdo_mysql, pgsql, pdo_pgsql, gmp, soap
+assert(extension_loaded("mysqli") && extension_loaded("pdo_mysql"));
+assert(in_array("mysql", PDO::getAvailableDrivers(), true));
+assert(extension_loaded("pgsql") && extension_loaded("pdo_pgsql"));
+assert(in_array("pgsql", PDO::getAvailableDrivers(), true));
+assert(extension_loaded("gmp") && gmp_strval(gmp_add("123456789012345678901234567890", "1")) === "123456789012345678901234567891");
+assert(extension_loaded("soap") && class_exists("SoapClient") && class_exists("SoapServer"));
+
 echo "PHP85_FILC_SMOKE_OK\n";
 EOF
 
@@ -241,6 +262,12 @@ port_package_smoke() {
     -d zend.assertions=1 \
     -d assert.exception=1 \
     -d opcache.enable_cli=1 \
+    -d extension=mysqli \
+    -d extension=pdo_mysql \
+    -d extension=pgsql \
+    -d extension=pdo_pgsql \
+    -d extension=gmp \
+    -d extension=soap \
     <<'EOF' | grep -Fxq 'PHP85_PKG_SMOKE_OK'
 <?php
 $prefix = realpath(getenv("PKG_PREFIX"));
@@ -283,6 +310,11 @@ $db = new SQLite3(":memory:");
 $db->exec("CREATE TABLE t (v INT); INSERT INTO t VALUES (42);");
 assert($db->querySingle("SELECT v FROM t") === 42);
 $db->close();
+
+assert(extension_loaded("mysqli") && extension_loaded("pdo_mysql") && in_array("mysql", PDO::getAvailableDrivers(), true));
+assert(extension_loaded("pgsql") && extension_loaded("pdo_pgsql") && in_array("pgsql", PDO::getAvailableDrivers(), true));
+assert(extension_loaded("gmp") && gmp_strval(gmp_add("123456789012345678901234567890", "1")) === "123456789012345678901234567891");
+assert(extension_loaded("soap") && class_exists("SoapClient"));
 
 echo "PHP85_PKG_SMOKE_OK\n";
 EOF

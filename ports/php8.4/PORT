@@ -23,9 +23,11 @@ port_configure() {
   # Bind defined function symbols locally inside shared extensions so Fil-C's
   # pizlonatedFO_get_module -> pizlonatedFIP<sig>_get_module relocation cannot
   # be interposed by an earlier RTLD_GLOBAL extension on musl (no RTLD_DEEPBIND).
+  # Pass via EXTRA_LDFLAGS so configure always forwards it to PHP_SHARED_MODULE.
   PATH="$PIZFIX/bin:$PATH" \
     CPPFLAGS="-I$PIZFIX/include -I$PIZFIX/include/ncursesw" \
     LDFLAGS="-L$PIZFIX/lib -Wl,-rpath,$PIZFIX/lib -Wl,-Bsymbolic-functions" \
+    EXTRA_LDFLAGS="-L$PIZFIX/lib -Wl,-rpath,$PIZFIX/lib -Wl,-Bsymbolic-functions" \
     PKG_CONFIG="$PIZFIX/bin/pkg-config --define-prefix" \
     PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" \
     EXTENSION_DIR="$PIZFIX/lib/php8.4/extensions" \
@@ -91,13 +93,15 @@ port_test() {
   printf '%s\n' "$fpm_ver" | grep -q '^PHP 8\.4\.28 '
 
   ls -la "$ext_dir"
-  local ext ext_rc ext_out ext_failed=0
+  local ext ext_rc ext_out ext_failed=0 ext_failures="" reloc_hits=""
   for ext in mysqli pdo_mysql pgsql pdo_pgsql gmp soap; do
     if command -v readelf >/dev/null 2>&1 && [[ -f "$ext_dir/${ext}.so" ]]; then
       echo "readelf ${ext}.so:"
       readelf -d "$ext_dir/${ext}.so" 2>&1 | grep -E 'NEEDED|RPATH|RUNPATH' || true
-      if readelf -rW "$ext_dir/${ext}.so" 2>&1 | grep -Eq 'pizlonatedFIP[0-9]+_get_module'; then
-        echo "error: ${ext}.so still has a preemptible pizlonatedFIP*_get_module relocation" >&2
+      reloc_hits="$(readelf -rW "$ext_dir/${ext}.so" 2>&1 | grep -E 'pizlonatedFIP[0-9]+_get_module' || true)"
+      if [[ -n "$reloc_hits" ]]; then
+        echo "error: ${ext}.so still has a preemptible pizlonatedFIP*_get_module relocation: $reloc_hits" >&2
+        ext_failures+=" ${ext}:preemptible-get_module"
         ext_failed=1
       fi
     fi
@@ -112,10 +116,12 @@ port_test() {
     echo "shared-ext ${ext}: rc=${ext_rc} out=${ext_out}"
     if [[ "$ext_rc" -ne 0 ]] || ! printf '%s\n' "$ext_out" | grep -Fxq "LOADED:${ext}"; then
       echo "error: shared extension ${ext} failed to load (rc=${ext_rc})" >&2
+      ext_failures+=" ${ext}:load-rc=${ext_rc}"
       ext_failed=1
     fi
   done
   if [[ "$ext_failed" -ne 0 ]]; then
+    echo "error: PHP84 shared extension check failed:${ext_failures}" >&2
     return 1
   fi
 

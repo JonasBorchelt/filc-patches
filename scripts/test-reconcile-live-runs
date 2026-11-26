@@ -1,0 +1,112 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Unit tests for scripts/reconcile-live-runs.rb (in-process, no sockets/servers).
+
+require "json"
+require "time"
+
+SCRIPT = File.expand_path("reconcile-live-runs.rb", __dir__)
+load SCRIPT
+
+@passed = 0
+@failed = 0
+
+def assert(cond, msg = "assertion failed")
+  raise msg unless cond
+end
+
+def assert_equal(expected, actual, msg = nil)
+  return if expected == actual
+
+  raise(msg || "expected #{expected.inspect}, got #{actual.inspect}")
+end
+
+def run_test(name)
+  yield
+  @passed += 1
+  puts "PASS: #{name}"
+rescue StandardError => e
+  @failed += 1
+  warn "FAIL: #{name}: #{e.message}"
+end
+
+run_test("parse_int_list and parse_status_specs") do
+  assert_equal([284, 286], parse_int_list("284, 286 284"))
+  assert_equal({ 285 => "success", 284 => "aborted" }, parse_status_specs("285=success, 284=aborted"))
+  raised = false
+  begin
+    parse_status_specs("285=running")
+  rescue ArgumentError
+    raised = true
+  end
+  assert(raised, "running must not be accepted as target status")
+end
+
+run_test("build_update_payload repairs #285 to success and clears phase/non-schema keys") do
+  now = Time.utc(2026, 11, 26, 13, 30, 0)
+  existing = {
+    "number" => 285,
+    "status" => "failure",
+    "workflow" => "release",
+    "seq" => 999,
+    "created_at" => "2026-11-26T12:00:00Z",
+    "updated_at" => "2026-11-26T13:20:00Z",
+    "started_at" => "2026-11-26T12:00:00Z",
+    "finished_at" => "2026-11-26T13:20:00Z",
+    "failure_excerpt" => "bogus excerpt",
+    "log_tail" => "tail",
+    "steps" => [{ "name" => "build-and-package-release", "status" => "failure" }],
+    "progress" => { "percent" => 94.0, "phase" => "test-release-archive", "extra_bogus" => 1 },
+  }
+  payload = build_update_payload(existing, "success", now)
+  assert_equal(285, payload["number"])
+  assert_equal("success", payload["status"])
+  assert_equal("release", payload["workflow"])
+  assert_equal("2026-11-26T13:20:00Z", payload["finished_at"])
+  assert_equal([{ "name" => "build-and-package-release", "status" => "success" }], payload["steps"])
+  assert_equal({ "percent" => 100 }, payload["progress"])
+  assert(!payload.key?("seq"), "must not send server-owned seq")
+  assert(!payload.key?("failure_excerpt"), "must not send failure_excerpt on success")
+  assert(!payload.key?("log_tail"), "must not send log_tail on success")
+end
+
+run_test("build_update_payload aborts #284 and maps running step to killed") do
+  now = Time.utc(2026, 11, 26, 13, 30, 0)
+  existing = {
+    "number" => 284,
+    "status" => "running",
+    "workflow" => "release",
+    "started_at" => "2026-11-26T11:50:00Z",
+    "updated_at" => "2026-11-26T11:55:00Z",
+    "steps" => [{ "name" => "build-and-package-release", "status" => "running" }],
+  }
+  payload = build_update_payload(existing, "aborted", now)
+  assert_equal(284, payload["number"])
+  assert_equal("aborted", payload["status"])
+  assert_equal("2026-11-26T13:30:00Z", payload["finished_at"])
+  assert_equal([{ "name" => "build-and-package-release", "status" => "killed" }], payload["steps"])
+  assert(!payload.key?("progress"))
+end
+
+run_test("select_runs_to_abort catches stale running, stale_aborted virtual runs, and respects active_numbers") do
+  now = Time.utc(2026, 11, 26, 13, 30, 0)
+  runs = [
+    { "number" => 280, "status" => "success", "updated_at" => "2026-11-26T10:00:00Z" },
+    { "number" => 281, "status" => "aborted", "stale_aborted" => true, "updated_at" => "2026-11-26T11:00:00Z" },
+    { "number" => 284, "status" => "running", "updated_at" => "2026-11-26T13:25:00Z" }, # 5m old
+    { "number" => 287, "status" => "running", "updated_at" => "2026-11-26T13:29:50Z" }, # 10s old
+    { "number" => 288, "status" => "running", "updated_at" => "2026-11-26T13:28:00Z" }, # 2m old
+  ]
+
+  # Without active_numbers (600s threshold): only #281 (stale_aborted) matches
+  cands1 = select_runs_to_abort(runs, active_numbers: nil, exclude_numbers: [], stale_seconds: 600, min_age_seconds: 30, now_time: now)
+  assert_equal([281], cands1.map { |r, _| r["number"] })
+
+  # With authoritative active_numbers=[287] and min_age=30: #281, #284, #288 match; #287 kept
+  cands2 = select_runs_to_abort(runs, active_numbers: [287], exclude_numbers: [288], stale_seconds: 600, min_age_seconds: 30, now_time: now)
+  assert_equal([281, 284], cands2.map { |r, _| r["number"] })
+end
+
+puts "RECONCILE_LIVE_RUNS_TESTS: #{@passed} passed, #{@failed} failed"
+exit(@failed.zero? ? 0 : 1)

@@ -22,7 +22,7 @@ FILC_ORIGIN_REF="8553fcd026b9:projects/php.projeny"
 port_configure() {
   PATH="$PIZFIX/bin:$PATH" \
     CPPFLAGS="-I$PIZFIX/include -I$PIZFIX/include/ncursesw" \
-    LDFLAGS="-L$PIZFIX/lib" \
+    LDFLAGS="-L$PIZFIX/lib -Wl,-rpath,$PIZFIX/lib" \
     PKG_CONFIG="$PIZFIX/bin/pkg-config --define-prefix" \
     PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" \
     EXTENSION_DIR="$PIZFIX/lib/php8.4/extensions" \
@@ -87,8 +87,37 @@ port_test() {
   echo "php-fpm8.4 version: $fpm_ver"
   printf '%s\n' "$fpm_ver" | grep -q '^PHP 8\.4\.28 '
 
-  "$php_bin" -n \
+  ls -la "$ext_dir"
+  local ext ext_rc ext_out ext_failed=0
+  for ext in mysqli pdo_mysql pgsql pdo_pgsql gmp soap; do
+    if command -v readelf >/dev/null 2>&1 && [[ -f "$ext_dir/${ext}.so" ]]; then
+      echo "readelf ${ext}.so:"
+      readelf -d "$ext_dir/${ext}.so" 2>&1 | grep -E 'NEEDED|RPATH|RUNPATH' || true
+    fi
+    ext_rc=0
+    ext_out="$("$php_bin" -n \
+      -d extension_dir="$ext_dir" \
+      -d display_startup_errors=1 \
+      -d display_errors=1 \
+      -d error_reporting=E_ALL \
+      -d extension="$ext" \
+      -r "echo extension_loaded('${ext}') ? 'LOADED:${ext}' : 'MISSING:${ext}';" 2>&1)" || ext_rc=$?
+    echo "shared-ext ${ext}: rc=${ext_rc} out=${ext_out}"
+    if [[ "$ext_rc" -ne 0 ]] || ! printf '%s\n' "$ext_out" | grep -Fxq "LOADED:${ext}"; then
+      echo "error: shared extension ${ext} failed to load (rc=${ext_rc})" >&2
+      ext_failed=1
+    fi
+  done
+  if [[ "$ext_failed" -ne 0 ]]; then
+    return 1
+  fi
+
+  local smoke_rc=0 smoke_out=""
+  smoke_out="$("$php_bin" -n \
     -d extension_dir="$ext_dir" \
+    -d display_startup_errors=1 \
+    -d display_errors=1 \
+    -d error_reporting=E_ALL \
     -d zend.assertions=1 \
     -d assert.exception=1 \
     -d zend_extension=opcache \
@@ -99,7 +128,7 @@ port_test() {
     -d extension=pdo_pgsql \
     -d extension=gmp \
     -d extension=soap \
-    <<'EOF' | grep -Fxq 'PHP84_FILC_SMOKE_OK'
+    <<'EOF' 2>&1
 <?php
 // 1. WeakMap + WeakReference + GC (zexact_ptrtable + tagged pointers)
 $m = new WeakMap();
@@ -211,6 +240,12 @@ assert(extension_loaded("soap") && class_exists("SoapClient") && class_exists("S
 
 echo "PHP84_FILC_SMOKE_OK\n";
 EOF
+  )" || smoke_rc=$?
+  printf '%s\n' "$smoke_out"
+  if [[ "$smoke_rc" -ne 0 ]] || ! printf '%s\n' "$smoke_out" | grep -Fxq 'PHP84_FILC_SMOKE_OK'; then
+    echo "error: PHP84 port_test smoke failed (rc=$smoke_rc)" >&2
+    return 1
+  fi
 
   # Curated upstream run-tests.php suite covering fibers, weakrefs, dom/modern,
   # sqlite3, json, and bz2 (parallelized across available jobs).
@@ -246,8 +281,12 @@ port_package_smoke() {
   fpm_ver="${out%%$'\n'*}"
   printf '%s\n' "$fpm_ver" | grep -q '^PHP 8\.4\.28 '
 
-  "$php_bin" -n \
+  local smoke_rc=0 smoke_out=""
+  smoke_out="$("$php_bin" -n \
     -d extension_dir="$ext_dir" \
+    -d display_startup_errors=1 \
+    -d display_errors=1 \
+    -d error_reporting=E_ALL \
     -d zend.assertions=1 \
     -d assert.exception=1 \
     -d zend_extension=opcache \
@@ -258,7 +297,7 @@ port_package_smoke() {
     -d extension=pdo_pgsql \
     -d extension=gmp \
     -d extension=soap \
-    <<'EOF' | grep -Fxq 'PHP84_PKG_SMOKE_OK'
+    <<'EOF' 2>&1
 <?php
 $prefix = realpath(getenv("PKG_PREFIX"));
 assert(is_string($prefix) && str_starts_with(realpath(PHP_BINARY), $prefix . "/"));
@@ -305,4 +344,10 @@ assert(extension_loaded("soap") && class_exists("SoapClient"));
 
 echo "PHP84_PKG_SMOKE_OK\n";
 EOF
+  )" || smoke_rc=$?
+  printf '%s\n' "$smoke_out"
+  if [[ "$smoke_rc" -ne 0 ]] || ! printf '%s\n' "$smoke_out" | grep -Fxq 'PHP84_PKG_SMOKE_OK'; then
+    echo "error: PHP84 port_package_smoke failed (rc=$smoke_rc)" >&2
+    return 1
+  fi
 }

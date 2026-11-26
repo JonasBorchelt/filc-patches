@@ -575,7 +575,7 @@ module PortPackager
       allowed << {
         "file" => gh[:file],
         "pattern" => gh[:pattern],
-        "token" => gh[:token],
+        "token_sha256" => Digest::SHA256.hexdigest(gh[:token]),
         "upstream_source" => src_rel
       }
     end

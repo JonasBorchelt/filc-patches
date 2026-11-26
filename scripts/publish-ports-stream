@@ -204,6 +204,25 @@ module PublishPortsStream
     Digest::SHA256.hexdigest(JSON.generate(sort_json(payload)))
   end
 
+  def sanitize_provenance_allowed(prov)
+    return {} unless prov.is_a?(Hash)
+
+    out = {}
+    prov.each do |k, entries|
+      out[k] = Array(entries).map do |entry|
+        next entry unless entry.is_a?(Hash)
+
+        cleaned = entry.dup
+        if cleaned.key?("token")
+          tok = cleaned.delete("token").to_s
+          cleaned["token_sha256"] ||= Digest::SHA256.hexdigest(tok)
+        end
+        cleaned
+      end
+    end
+    out
+  end
+
   def load_cache_manifest(path)
     return {} if path.nil? || path.empty? || !File.file?(path)
 
@@ -1191,7 +1210,7 @@ module PublishPortsStream
               "name" => pname,
               "package" => cached_pkg,
               "sums" => cached_rec["sums"] || {},
-              "provenance_allowed" => cached_rec["provenance_allowed"] || {},
+              "provenance_allowed" => sanitize_provenance_allowed(cached_rec["provenance_allowed"]),
               "size_record" => cached_rec["size_record"],
               "smoke" => cached_rec["smoke"] || { "ran_smoke" => false, "symlinks" => 0, "hardlinks" => 0 },
               "cached" => true
@@ -1450,18 +1469,21 @@ module PublishPortsStream
               cv.broadcast
             end
 
-            # Stage 3: Per-port staged upload (artifacts only; NEVER commits index.json)
+            # Stage 3: Per-port staged upload / dry-run upload gate (artifacts only; NEVER commits index.json).
+            # In dry-run mode (--upload unset), still run upload-ports --stage-port-meta --dry-run
+            # so metadata leak-gate, SHA-256, and size-limit checks execute without network PUTs.
             if opts[:upload]
               mu.synchronize do
                 $stdout.puts("FILC_PORT #{pname} uploading policy=#{meta['policy_class']} stage=upload")
                 $stdout.flush
               end
-              up_env = clean_env_without(%w[FILC_PORTS_MINISIGN_KEY FILC_PORTS_MINISIGN_PASSWORD FILC_LEAK_EXACT_TOKENS FILC_LIVE_TOKEN])
+              up_env = clean_env_without(%w[FILC_PORTS_MINISIGN_KEY FILC_PORTS_MINISIGN_PASSWORD FILC_LIVE_TOKEN])
               up_cmd = [
                 upload_ports_bin,
                 "--channel-dir", channel_dir,
                 "--channel", opts[:channel],
                 "--arch", opts[:arch],
+                "--exact-tokens-env", opts[:exact_tokens_env],
                 "--base-url", opts[:upload_url],
                 "--stage-port-meta", File.join(staged_dir, "#{pname}.json")
               ]
@@ -1471,8 +1493,29 @@ module PublishPortsStream
               else
                 upload_ok = false
                 fail_stage = "upload"
-                fail_kind = "runner"
+                fail_kind = (out_u.include?("LEAK_GATE FAILED") || out_u.include?("SIZE_LIMIT FAILED")) ? "package" : "runner"
                 fail_reason = extract_short_reason(out_u, "upload-ports --stage-port-meta exited with code #{rc_u}")
+                fail_details = extract_failure_details(out_u)
+              end
+            else
+              up_env = clean_env_without(%w[FILC_PORTS_MINISIGN_KEY FILC_PORTS_MINISIGN_PASSWORD FILC_PORTS_UPLOAD_TOKEN FILC_LIVE_TOKEN])
+              up_cmd = [
+                upload_ports_bin,
+                "--channel-dir", channel_dir,
+                "--channel", opts[:channel],
+                "--arch", opts[:arch],
+                "--exact-tokens-env", opts[:exact_tokens_env],
+                "--stage-port-meta", File.join(staged_dir, "#{pname}.json"),
+                "--dry-run"
+              ]
+              rc_u, out_u = run_logged_cmd(up_cmd, env: up_env, log_file: log_file)
+              if rc_u == 0
+                upload_ok = true
+              else
+                upload_ok = false
+                fail_stage = "upload"
+                fail_kind = (out_u.include?("LEAK_GATE FAILED") || out_u.include?("SIZE_LIMIT FAILED")) ? "package" : "runner"
+                fail_reason = extract_short_reason(out_u, "upload-ports --stage-port-meta --dry-run exited with code #{rc_u}")
                 fail_details = extract_failure_details(out_u)
               end
             end

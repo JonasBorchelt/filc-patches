@@ -326,6 +326,7 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
 
   # 3. Upload script MUST refuse unsigned channel
   _uo, uerr, ust = Open3.capture3(
+    BASE_ENV,
     "ruby", UPLOAD_SCRIPT,
     "--channel-dir", ch_dir,
     "--channel", "0.1.3",
@@ -376,7 +377,7 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
 
   begin
     uo2, ue2, ust2 = Open3.capture3(
-      { "FILC_PORTS_UPLOAD_TOKEN" => "ci-upload-secret" },
+      BASE_ENV.merge("FILC_PORTS_UPLOAD_TOKEN" => "ci-upload-secret"),
       "ruby", UPLOAD_SCRIPT,
       "--channel-dir", ch_dir,
       "--channel", "0.1.3",
@@ -409,6 +410,7 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
   assert(pk_lines[0].end_with?(key_id_hex), "pubkey comment key ID mismatch (expected #{key_id_hex})")
 
   _uo3, ue3, ust3 = Open3.capture3(
+    BASE_ENV,
     "ruby", UPLOAD_SCRIPT,
     "--channel-dir", ch_dir,
     "--channel", "0.1.3",
@@ -664,6 +666,14 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
   rb_prov = rep.dig("provenance_allowed", "ruby") || []
   assert(rb_prov.any? { |e| e["upstream_source"].include?("rbs-3.4.0.gem!stdlib/socket/0/socket.rbs") },
          "expected nested .gem provenance for ruby rbs")
+  # Metadata/report must NEVER store plaintext matched tokens, only SHA-256 hashes
+  rep.fetch("provenance_allowed").each do |pkg_k, entries|
+    entries.each do |entry|
+      assert(!entry.key?("token"), "plaintext token leaked in provenance_allowed for #{pkg_k}: #{entry.inspect}")
+      assert(/\A[0-9a-f]{64}\z/.match?(entry["token_sha256"].to_s),
+             "missing valid token_sha256 in provenance_allowed for #{pkg_k}: #{entry.inspect}")
+    end
+  end
 
   # Verify bash loadable builtins inside the packaged tarball were relocated to $ORIGIN/..
   bash_ext = File.join(td, "bash-ext")
@@ -821,7 +831,7 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
 
   begin
     _fuo, _fue, fust = Open3.capture3(
-      { "FILC_PORTS_UPLOAD_TOKEN" => "ci-upload-secret" },
+      BASE_ENV.merge("FILC_PORTS_UPLOAD_TOKEN" => "ci-upload-secret"),
       "ruby", UPLOAD_SCRIPT,
       "--channel-dir", ov_ch_dir,
       "--channel", "0.1.4",
@@ -1159,6 +1169,7 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
   File.write(File.join(hl_ch_dir, "index.json.minisig"), "untrusted comment: test\nAA==\ntrusted comment: t\nAA==\n")
   File.write(File.join(hl_ch_dir, "SHA256SUMS.minisig"), "untrusted comment: test\nAA==\ntrusted comment: t\nAA==\n")
   _ulim_o, ulim_e, ulim_st = Open3.capture3(
+    BASE_ENV,
     "ruby", UPLOAD_SCRIPT,
     "--channel-dir", hl_ch_dir,
     "--channel", "0.1.4",
@@ -1224,7 +1235,7 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
 
   begin
     ruo, rue, rust = Open3.capture3(
-      { "FILC_PORTS_UPLOAD_TOKEN" => "ci-upload-secret" },
+      BASE_ENV.merge("FILC_PORTS_UPLOAD_TOKEN" => "ci-upload-secret"),
       "ruby", UPLOAD_SCRIPT,
       "--channel-dir", hl_ch_dir,
       "--channel", "0.1.4",
@@ -1469,4 +1480,185 @@ Dir.mktmpdir("filc-pkg-dotfile-") do |td|
   assert(pkg_meta.fetch("files").key?(packlist_rel), ".packlist missing from filc-pkg.json files map")
 end
 
-puts "TEST_PACKAGE_PORT: PASS (16/16)"
+# 17. Staged metadata provenance hashing + upload-ports exact-token leak gate:
+#     (a) A port with upstream private-IP / dotted-version strings in docs passes
+#         package-port --single-port (no plaintext tokens in staged JSON) AND upload-ports
+#         (--dry-run and live staged PUT).
+#     (b) upload-ports blocks a real internal IP from FILC_LEAK_EXACT_TOKENS (without echoing
+#         the secret), blocks plaintext provenance tokens, and aborts when secret env is missing.
+Dir.mktmpdir("filc-upload-leak-test-") do |td|
+  up_repo = File.join(td, "repo")
+  up_work = File.join(td, "work")
+  up_pizfix = File.join(td, "pizfix")
+  up_state = File.join(up_work, "ports-state")
+  up_cache = File.join(up_work, "ports-cache")
+  up_out = File.join(td, "out")
+  up_staged = File.join(td, "staged")
+  FileUtils.mkdir_p([
+    File.join(up_repo, "ports", "docip"),
+    File.join(up_pizfix, "share", "doc", "docip"),
+    up_state, up_cache, up_out, up_staged
+  ])
+  FileUtils.cp(File.join(REPO_ROOT, "UPSTREAM"), File.join(up_repo, "UPSTREAM"))
+  up_ip = ip4(192, 168, 1, 1)
+  up_ver = ip4(10, "04", 46, 57)
+  doc_body = "Upstream docs example host #{up_ip} and date-version #{up_ver}\n"
+  up_tar = File.join(td, "docip-1.0.tar.gz")
+  up_sha = make_tar_gz(up_tar, { "docip-1.0/README" => doc_body })
+  FileUtils.cp(up_tar, File.join(up_cache, "docip-1.0-#{up_sha[0, 12]}-docip-1.0.tar.gz"))
+  File.write(File.join(up_repo, "ports", "docip", "PORT"), <<~PORT)
+    NAME=docip
+    VERSION=1.0
+    LICENSE=MIT
+    UPSTREAM_URL=https://example.invalid/docip-1.0.tar.gz
+    UPSTREAM_SHA256=#{up_sha}
+    EXTRACT_DIR=docip-1.0
+    TIER=0
+    DEPS=""
+    BUILD_SYSTEM=autotools
+    POLICY_CLASS=P0-Clean
+  PORT
+  File.write(File.join(up_pizfix, "share", "doc", "docip", "README"), doc_body)
+  File.write(File.join(up_state, "docip.manifest.json"), JSON.pretty_generate(
+    "port" => "docip",
+    "files" => ["share/doc/docip/README"]
+  ) + "\n")
+
+  sp_o, sp_e, sp_st = Open3.capture3(
+    BASE_ENV,
+    "ruby", PACKAGE_SCRIPT,
+    "--repo-root", up_repo,
+    "--work-dir", up_work,
+    "--pizfix", up_pizfix,
+    "--neutral-prefix", up_pizfix,
+    "--ports-cache-dir", up_cache,
+    "--out-dir", up_out,
+    "--staged-dir", up_staged,
+    "--channel", "0.1.4",
+    "--arch", "x86_64-linux",
+    "--single-port", "docip",
+    "--skip-package-smoke"
+  )
+  assert(sp_st.success?, "docip single-port packaging failed: #{sp_o}\n#{sp_e}")
+  meta_path = File.join(up_staged, "docip.json")
+  meta_raw = File.read(meta_path, encoding: "UTF-8")
+  assert(!meta_raw.include?(up_ip), "staged metadata must not contain plaintext upstream IP #{up_ip}:\n#{meta_raw}")
+  assert(!meta_raw.include?(up_ver), "staged metadata must not contain plaintext upstream token #{up_ver}:\n#{meta_raw}")
+  meta_obj = JSON.parse(meta_raw)
+  docip_prov = meta_obj.dig("provenance_allowed", "docip") || []
+  assert(docip_prov.length == 2, "expected 2 hashed provenance entries for docip, got: #{docip_prov.inspect}")
+  assert(docip_prov.all? { |e| !e.key?("token") && /\A[0-9a-f]{64}\z/.match?(e["token_sha256"].to_s) },
+         "all provenance entries must use token_sha256 without plaintext token: #{docip_prov.inspect}")
+
+  up_ch_dir = File.join(up_out, "0.1.4", "x86_64-linux")
+  # 17a-1: upload-ports --stage-port-meta --dry-run must PASS
+  dr_o, dr_e, dr_st = Open3.capture3(
+    BASE_ENV,
+    "ruby", UPLOAD_SCRIPT,
+    "--channel-dir", up_ch_dir,
+    "--channel", "0.1.4",
+    "--arch", "x86_64-linux",
+    "--stage-port-meta", meta_path,
+    "--dry-run"
+  )
+  assert(dr_st.success?, "upload-ports --dry-run failed on docip with upstream IP: #{dr_o}\n#{dr_e}")
+  assert(dr_o.include?("UPLOAD_PORTS_STAGE: DRY_RUN OK port=docip"), "missing DRY_RUN OK banner: #{dr_o}")
+
+  # 17a-2: upload-ports --stage-port-meta against mock HTTP server must PASS
+  st_puts = []
+  st_srv = TCPServer.new("127.0.0.1", 0)
+  st_port = st_srv.addr[1]
+  st_thr = Thread.new do
+    loop do
+      sock = begin
+        st_srv.accept
+      rescue IOError
+        break
+      end
+      req_head = +""
+      while (line = sock.gets)
+        req_head << line
+        break if line == "\r\n"
+      end
+      method, path, = req_head.lines.first.to_s.strip.split(" ", 3)
+      cl = req_head[/^Content-Length:\s*(\d+)/i, 1].to_i
+      sock.read(cl) if cl > 0
+      if method == "HEAD"
+        sock.write("HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+      elsif method == "PUT"
+        st_puts << path
+        resp = JSON.generate("ok" => true, "created" => true)
+        sock.write("HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: #{resp.bytesize}\r\nConnection: close\r\n\r\n#{resp}")
+      end
+      sock.close
+    end
+  end
+  begin
+    lv_o, lv_e, lv_st = Open3.capture3(
+      BASE_ENV.merge("FILC_PORTS_UPLOAD_TOKEN" => "ci-upload-secret"),
+      "ruby", UPLOAD_SCRIPT,
+      "--channel-dir", up_ch_dir,
+      "--channel", "0.1.4",
+      "--arch", "x86_64-linux",
+      "--stage-port-meta", meta_path,
+      "--base-url", "http://127.0.0.1:#{st_port}"
+    )
+    assert(lv_st.success?, "staged upload failed for docip with upstream IP: #{lv_o}\n#{lv_e}")
+    assert(st_puts.length == 3, "expected 3 PUT uploads for docip, got #{st_puts.inspect}")
+  ensure
+    st_srv.close
+    st_thr.join(2)
+  end
+
+  # 17b-1: Real internal IP from FILC_LEAK_EXACT_TOKENS in metadata MUST be blocked (without echoing secret)
+  secret_ip = ip4(198, 51, 100, 10)
+  bad_secret_meta = File.join(up_staged, "docip-secret-leak.json")
+  bad_obj = JSON.parse(meta_raw)
+  bad_obj["provenance_allowed"]["docip"].first["upstream_source"] = "docip-1.0/leak-#{secret_ip}.txt"
+  File.write(bad_secret_meta, JSON.pretty_generate(bad_obj) + "\n", encoding: "UTF-8")
+  _bs_o, bs_e, bs_st = Open3.capture3(
+    BASE_ENV,
+    "ruby", UPLOAD_SCRIPT,
+    "--channel-dir", up_ch_dir,
+    "--channel", "0.1.4",
+    "--arch", "x86_64-linux",
+    "--stage-port-meta", bad_secret_meta,
+    "--dry-run"
+  )
+  assert(!bs_st.success?, "upload-ports must block exact internal IP from FILC_LEAK_EXACT_TOKENS")
+  assert(bs_e.include?("LEAK_GATE FAILED") && bs_e.include?("matches exact forbidden infra token"),
+         "expected exact-token LEAK_GATE failure, got: #{bs_e}")
+  assert(!bs_e.include?(secret_ip), "upload-ports stderr must not echo secret IP token: #{bs_e}")
+
+  # 17b-2: Plaintext 'token' key in provenance_allowed MUST be blocked
+  bad_plain_meta = File.join(up_staged, "docip-plain-token.json")
+  plain_obj = JSON.parse(meta_raw)
+  plain_obj["provenance_allowed"]["docip"].first["token"] = up_ip
+  File.write(bad_plain_meta, JSON.pretty_generate(plain_obj) + "\n", encoding: "UTF-8")
+  _bp_o, bp_e, bp_st = Open3.capture3(
+    BASE_ENV,
+    "ruby", UPLOAD_SCRIPT,
+    "--channel-dir", up_ch_dir,
+    "--channel", "0.1.4",
+    "--arch", "x86_64-linux",
+    "--stage-port-meta", bad_plain_meta,
+    "--dry-run"
+  )
+  assert(!bp_st.success?, "upload-ports must block plaintext provenance token in metadata")
+  assert(bp_e.include?("plaintext provenance token forbidden"), "expected plaintext token error, got: #{bp_e}")
+
+  # 17b-3: Missing FILC_LEAK_EXACT_TOKENS MUST hard-abort upload-ports
+  _ns_o, ns_e, ns_st = Open3.capture3(
+    { "FILC_LEAK_EXACT_TOKENS" => nil },
+    "ruby", UPLOAD_SCRIPT,
+    "--channel-dir", up_ch_dir,
+    "--channel", "0.1.4",
+    "--arch", "x86_64-linux",
+    "--stage-port-meta", meta_path,
+    "--dry-run"
+  )
+  assert(!ns_st.success?, "upload-ports must abort when FILC_LEAK_EXACT_TOKENS is unset")
+  assert(ns_e.include?("LEAK_GATE CONFIG ERROR"), "expected LEAK_GATE CONFIG ERROR, got: #{ns_e}")
+end
+
+puts "TEST_PACKAGE_PORT: PASS (17/17)"

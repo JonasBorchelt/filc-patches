@@ -314,6 +314,13 @@ Dir.mktmpdir("filc-stream-test-") do |tmp|
       assert(to_s == "3600", "expected scaled FILC_PORT_TIMEOUT=3600 for #{p}, got #{to_s}")
     end
 
+    # Verify dry-run executed upload-ports --stage-port-meta --dry-run (without network PUT)
+    %w[liba libb libc mid1 mid2 app].each do |p|
+      plog = File.read(File.join(work_dir, "ports-logs", "#{p}.log"), encoding: "UTF-8")
+      assert(plog.include?("UPLOAD_PORTS_STAGE: DRY_RUN OK port=#{p}"),
+             "expected dry-run upload gate check in #{p}.log:\n#{plog}")
+    end
+
     # Verify pristine base pizfix was NEVER mutated!
     after_snapshot = Dir.glob(File.join(fix[:tc_root], "pizfix", "**", "*")).sort
     assert(after_snapshot == base_snapshot, "pristine base pizfix was modified during #{order} run!")

@@ -260,6 +260,7 @@ Dir.mktmpdir("filc-stream-test-") do |tmp|
   unset_run_vars = ENV.keys
                       .select { |k| k == "FILC_PORTS" || k.start_with?("FILC_PORTS_", "FILC_PORT_") }
                       .each_with_object({}) { |k, h| h[k] = nil }
+  unset_run_vars.each_key { |k| ENV.delete(k) }
   common_env = unset_run_vars.merge(
     "LANG" => "C",
     "LC_ALL" => "C",
@@ -982,6 +983,7 @@ Dir.mktmpdir("filc-stream-test-") do |tmp|
   sig_err = +""
   sig_rc = nil
   Open3.popen3(
+    common_env,
     "ruby", STREAM_BIN,
     "--repo-root", REPO_ROOT,
     "--ports-dir", fix[:ports_dir],

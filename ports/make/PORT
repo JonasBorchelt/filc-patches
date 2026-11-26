@@ -24,7 +24,9 @@ port_configure() {
 }
 
 port_test() {
-  "$PIZFIX/bin/make" --version | grep -q 'GNU Make 4\.4\.1'
+  local out
+  out="$("$PIZFIX/bin/make" --version)"
+  grep -q 'GNU Make 4\.4\.1' <<<"$out"
 
   local td
   td="$(mktemp -d)"
@@ -38,13 +40,16 @@ all: out.txt
 out.txt:
 	@printf '%s-%s\n' "$(GREETING)" "$(TARGET)" > $@
 EOF
-  "$PIZFIX/bin/make" -C "$td" TARGET=make441 | grep -Fxq 'hello-make441'
+  out="$("$PIZFIX/bin/make" -C "$td" TARGET=make441)"
+  grep -Fxq 'hello-make441' <<<"$out"
   test -f "$td/out.txt"
   rm -rf "$td"
 }
 
 port_package_smoke() {
-  "$PKG_PREFIX/bin/make" --version | grep -q 'GNU Make 4\.4\.1'
+  local out
+  out="$("$PKG_PREFIX/bin/make" --version)"
+  grep -q 'GNU Make 4\.4\.1' <<<"$out"
 
   local td
   td="$(mktemp -d)"
@@ -53,6 +58,7 @@ ITEMS := a b c
 all:
 	@printf '%s\n' "$(words $(ITEMS)):$(strip $(ITEMS))"
 EOF
-  "$PKG_PREFIX/bin/make" -C "$td" | grep -Fxq '3:a b c'
+  out="$("$PKG_PREFIX/bin/make" -C "$td")"
+  grep -Fxq '3:a b c' <<<"$out"
   rm -rf "$td"
 }

@@ -36,7 +36,9 @@ port_configure() {
 }
 
 port_test() {
-  "$PIZFIX/bin/vim" --version | grep -q 'VIM - Vi IMproved 9\.2'
+  local ver
+  ver="$("$PIZFIX/bin/vim" --version)"
+  grep -q 'VIM - Vi IMproved 9\.2' <<<"$ver"
 
   local td
   td="$(mktemp -d)"
@@ -51,7 +53,9 @@ port_test() {
 }
 
 port_package_smoke() {
-  "$PKG_PREFIX/bin/vim" --version | grep -q 'VIM - Vi IMproved 9\.2'
+  local ver
+  ver="$("$PKG_PREFIX/bin/vim" --version)"
+  grep -q 'VIM - Vi IMproved 9\.2' <<<"$ver"
 
   local td
   td="$(mktemp -d)"

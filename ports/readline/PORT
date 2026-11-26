@@ -64,7 +64,9 @@ EOF
   "$CC" -O2 -I"$PIZFIX/include" "$SRC_DIR/_filc_test_readline.c" \
     -L"$PIZFIX/lib" -lreadline -lhistory -lncursesw \
     -o "$SRC_DIR/_filc_test_readline"
-  "$SRC_DIR/_filc_test_readline" | grep -q '^READLINE_OK 8\.3'
+  local out
+  out="$("$SRC_DIR/_filc_test_readline")"
+  grep -q '^READLINE_OK 8\.3' <<<"$out"
 }
 
 port_package_smoke() {

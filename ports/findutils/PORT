@@ -15,17 +15,21 @@ CONFIGURE_ARGS=""
 MAKE_ARGS=""
 INSTALL_ARGS=""
 TEST_CMD=""
-POLICY_CLASS="P0-Clean"
-POLICY_RATIONALE="Builds unmodified upstream GNU findutils 4.11.0 (find, xargs, locate, updatedb) with zero source patches, matching upstream Fil-C optfil/build_opt.sh."
+POLICY_CLASS="P3-BuildOpt"
+POLICY_RATIONALE="Builds unmodified upstream GNU findutils 4.11.0 (find, xargs, locate, updatedb) with zero source patches. Passes -fno-builtin-sprintf because LLVM 23 SimplifyLibCalls lowers sprintf(p, \"%s\", s) in lib/regextype.c to stpcpy + ptrtoaddr (PtrToAddrInst), which FilPizlonator on 0.1.5 does not lower yet."
 FILC_ORIGIN_REF="optfil/build_opt.sh:findutils-4.11.0"
 
 port_configure() {
-  ./configure --prefix="$PIZFIX"
+  CFLAGS="${CFLAGS:-} -fno-builtin-sprintf" \
+    ./configure --prefix="$PIZFIX"
 }
 
 port_test() {
-  "$PIZFIX/bin/find" --version | grep -q 'find (GNU findutils) 4\.11\.0'
-  "$PIZFIX/bin/xargs" --version | grep -q 'xargs (GNU findutils) 4\.11\.0'
+  local out
+  out="$("$PIZFIX/bin/find" --version)"
+  grep -q 'find (GNU findutils) 4\.11\.0' <<<"$out"
+  out="$("$PIZFIX/bin/xargs" --version)"
+  grep -q 'xargs (GNU findutils) 4\.11\.0' <<<"$out"
 
   local td
   td="$(mktemp -d)"
@@ -45,8 +49,11 @@ port_test() {
 }
 
 port_package_smoke() {
-  "$PKG_PREFIX/bin/find" --version | grep -q 'find (GNU findutils) 4\.11\.0'
-  "$PKG_PREFIX/bin/xargs" --version | grep -q 'xargs (GNU findutils) 4\.11\.0'
+  local out
+  out="$("$PKG_PREFIX/bin/find" --version)"
+  grep -q 'find (GNU findutils) 4\.11\.0' <<<"$out"
+  out="$("$PKG_PREFIX/bin/xargs" --version)"
+  grep -q 'xargs (GNU findutils) 4\.11\.0' <<<"$out"
 
   local td
   td="$(mktemp -d)"
@@ -55,7 +62,9 @@ port_package_smoke() {
   printf 'two\n' > "$td/nested/2.txt"
   printf 'ignored\n' > "$td/nested/3.bin"
 
-  "$PKG_PREFIX/bin/find" "$td" -type f -name '*.txt' -exec grep -h . {} \; | sort | tr '\n' ':' | grep -Fxq 'one:two:'
-  "$PKG_PREFIX/bin/find" "$td" -type f -name '*.txt' -print0 | "$PKG_PREFIX/bin/xargs" -0 wc -l | grep -q '2 total'
+  out="$("$PKG_PREFIX/bin/find" "$td" -type f -name '*.txt' -exec grep -h . {} \; | sort | tr '\n' ':')"
+  grep -Fxq 'one:two:' <<<"$out"
+  out="$("$PKG_PREFIX/bin/find" "$td" -type f -name '*.txt' -print0 | "$PKG_PREFIX/bin/xargs" -0 wc -l)"
+  grep -q '2 total' <<<"$out"
   rm -rf "$td"
 }

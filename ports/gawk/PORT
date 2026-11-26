@@ -24,24 +24,30 @@ port_configure() {
 }
 
 port_test() {
-  "$PIZFIX/bin/gawk" --version | grep -q 'GNU Awk 5\.4\.2'
+  local out
+  out="$("$PIZFIX/bin/gawk" --version)"
+  grep -q 'GNU Awk 5\.4\.2' <<<"$out"
   test -x "$PIZFIX/bin/awk"
 
-  printf 'alpha 10\nbeta 20\nalpha 12\n' | "$PIZFIX/bin/gawk" '
+  out="$(printf 'alpha 10\nbeta 20\nalpha 12\n' | "$PIZFIX/bin/gawk" '
     { sum[$1] += $2 }
     END {
       out = gensub(/^a/, "A", 1, "alpha")
       printf "%s=%d beta=%d\n", out, sum["alpha"], sum["beta"]
     }
-  ' | grep -Fxq 'Alpha=22 beta=20'
+  ')"
+  grep -Fxq 'Alpha=22 beta=20' <<<"$out"
 }
 
 port_package_smoke() {
-  "$PKG_PREFIX/bin/gawk" --version | grep -q 'GNU Awk 5\.4\.2'
+  local out
+  out="$("$PKG_PREFIX/bin/gawk" --version)"
+  grep -q 'GNU Awk 5\.4\.2' <<<"$out"
   test -x "$PKG_PREFIX/bin/awk"
 
-  printf 'x:3\ny:4\nx:5\n' | "$PKG_PREFIX/bin/awk" -F: '
+  out="$(printf 'x:3\ny:4\nx:5\n' | "$PKG_PREFIX/bin/awk" -F: '
     { acc[$1] += $2 }
     END { printf "x=%d,y=%d\n", acc["x"], acc["y"] }
-  ' | grep -Fxq 'x=8,y=4'
+  ')"
+  grep -Fxq 'x=8,y=4' <<<"$out"
 }

@@ -33,19 +33,30 @@ port_configure() {
 }
 
 port_test() {
-  "$PIZFIX/bin/ps" --version | grep -q 'procps-ng 4\.0\.7'
-  "$PIZFIX/bin/free" --version | grep -q 'procps-ng 4\.0\.7'
-  "$PIZFIX/bin/ps" -p "$$" -o pid=,comm= | grep -q "$$"
-  "$PIZFIX/bin/free" -b | grep -qi 'mem:'
+  local out
+  out="$("$PIZFIX/bin/ps" --version)"
+  grep -q 'procps-ng 4\.0\.7' <<<"$out"
+  out="$("$PIZFIX/bin/free" --version)"
+  grep -q 'procps-ng 4\.0\.7' <<<"$out"
+  out="$("$PIZFIX/bin/ps" -p "$$" -o pid=,comm=)"
+  grep -q "$$" <<<"$out"
+  out="$("$PIZFIX/bin/free" -b)"
+  grep -qi 'mem:' <<<"$out"
   "$PIZFIX/bin/pgrep" -x -f ".*" >/dev/null || "$PIZFIX/bin/pgrep" -P 0 >/dev/null || true
-  "$PIZFIX/bin/uptime" -p | grep -qi 'up'
+  out="$("$PIZFIX/bin/uptime" -p)"
+  grep -qi 'up' <<<"$out"
 }
 
 port_package_smoke() {
-  "$PKG_PREFIX/bin/ps" --version | grep -q 'procps-ng 4\.0\.7'
-  "$PKG_PREFIX/bin/free" --version | grep -q 'procps-ng 4\.0\.7'
-  "$PKG_PREFIX/bin/ps" -p "$$" -o pid= | tr -d ' ' | grep -Fxq "$$"
-  "$PKG_PREFIX/bin/free" -b | grep -qi 'mem:'
+  local out
+  out="$("$PKG_PREFIX/bin/ps" --version)"
+  grep -q 'procps-ng 4\.0\.7' <<<"$out"
+  out="$("$PKG_PREFIX/bin/free" --version)"
+  grep -q 'procps-ng 4\.0\.7' <<<"$out"
+  out="$("$PKG_PREFIX/bin/ps" -p "$$" -o pid= | tr -d ' ')"
+  grep -Fxq "$$" <<<"$out"
+  out="$("$PKG_PREFIX/bin/free" -b)"
+  grep -qi 'mem:' <<<"$out"
   test -f "$PKG_PREFIX/lib/libproc2.so"
   test -f "$PKG_PREFIX/lib/pkgconfig/libproc2.pc"
 }

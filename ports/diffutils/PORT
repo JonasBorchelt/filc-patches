@@ -24,8 +24,11 @@ port_configure() {
 }
 
 port_test() {
-  "$PIZFIX/bin/diff" --version | grep -q 'diff (GNU diffutils) 3\.12'
-  "$PIZFIX/bin/cmp" --version | grep -q 'cmp (GNU diffutils) 3\.12'
+  local out rc
+  out="$("$PIZFIX/bin/diff" --version)"
+  grep -q 'diff (GNU diffutils) 3\.12' <<<"$out"
+  out="$("$PIZFIX/bin/cmp" --version)"
+  grep -q 'cmp (GNU diffutils) 3\.12' <<<"$out"
 
   local td
   td="$(mktemp -d)"
@@ -37,26 +40,30 @@ port_test() {
     rm -rf "$td"
     return 1
   fi
-  "$PIZFIX/bin/diff" -u "$td/a.txt" "$td/b.txt" | grep -Fxq '+new' || test $? -eq 0
-  local out
-  out="$("$PIZFIX/bin/diff" -u "$td/a.txt" "$td/b.txt" || true)"
-  printf '%s\n' "$out" | grep -Fxq -- '-old'
-  printf '%s\n' "$out" | grep -Fxq -- '+new'
+  rc=0
+  out="$("$PIZFIX/bin/diff" -u "$td/a.txt" "$td/b.txt")" || rc=$?
+  test "$rc" -eq 1
+  grep -Fxq -- '-old' <<<"$out"
+  grep -Fxq -- '+new' <<<"$out"
   rm -rf "$td"
 }
 
 port_package_smoke() {
-  "$PKG_PREFIX/bin/diff" --version | grep -q 'diff (GNU diffutils) 3\.12'
-  "$PKG_PREFIX/bin/cmp" --version | grep -q 'cmp (GNU diffutils) 3\.12'
+  local td out rc
+  out="$("$PKG_PREFIX/bin/diff" --version)"
+  grep -q 'diff (GNU diffutils) 3\.12' <<<"$out"
+  out="$("$PKG_PREFIX/bin/cmp" --version)"
+  grep -q 'cmp (GNU diffutils) 3\.12' <<<"$out"
 
-  local td out
   td="$(mktemp -d)"
   printf 'alpha\nbeta\n' > "$td/1.txt"
   printf 'alpha\ngamma\n' > "$td/2.txt"
 
   "$PKG_PREFIX/bin/cmp" -s "$td/1.txt" "$td/1.txt"
-  out="$("$PKG_PREFIX/bin/diff" -u "$td/1.txt" "$td/2.txt" || true)"
-  printf '%s\n' "$out" | grep -Fxq -- '-beta'
-  printf '%s\n' "$out" | grep -Fxq -- '+gamma'
+  rc=0
+  out="$("$PKG_PREFIX/bin/diff" -u "$td/1.txt" "$td/2.txt")" || rc=$?
+  test "$rc" -eq 1
+  grep -Fxq -- '-beta' <<<"$out"
+  grep -Fxq -- '+gamma' <<<"$out"
   rm -rf "$td"
 }

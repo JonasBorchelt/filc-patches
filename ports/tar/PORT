@@ -29,7 +29,9 @@ port_configure() {
 }
 
 port_test() {
-  "$PIZFIX/bin/tar" --version | grep -q 'tar (GNU tar) 1\.35'
+  local out
+  out="$("$PIZFIX/bin/tar" --version)"
+  grep -q 'tar (GNU tar) 1\.35' <<<"$out"
 
   local td
   td="$(mktemp -d)"
@@ -50,7 +52,9 @@ port_test() {
 }
 
 port_package_smoke() {
-  "$PKG_PREFIX/bin/tar" --version | grep -q 'tar (GNU tar) 1\.35'
+  local out
+  out="$("$PKG_PREFIX/bin/tar" --version)"
+  grep -q 'tar (GNU tar) 1\.35' <<<"$out"
 
   local td
   td="$(mktemp -d)"

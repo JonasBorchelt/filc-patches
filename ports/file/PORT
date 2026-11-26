@@ -29,7 +29,9 @@ port_configure() {
 }
 
 port_test() {
-  "$PIZFIX/bin/file" --version | grep -q 'file-5\.48'
+  local out
+  out="$("$PIZFIX/bin/file" --version)"
+  grep -q 'file-5\.48' <<<"$out"
   test -f "$PIZFIX/include/magic.h"
   test -f "$PIZFIX/lib/libmagic.so"
   test -f "$PIZFIX/lib/pkgconfig/libmagic.pc"
@@ -40,18 +42,24 @@ port_test() {
   printf 'hello filc world\n' > "$td/hello.txt"
   printf '#!/bin/sh\necho ok\n' > "$td/run.sh"
 
-  "$PIZFIX/bin/file" -b "$td/hello.txt" | grep -qi 'ASCII text'
-  "$PIZFIX/bin/file" -b "$td/run.sh" | grep -qi 'POSIX shell script'
-  "$PIZFIX/bin/file" -b "$PIZFIX/bin/file" | grep -q 'ELF'
+  out="$("$PIZFIX/bin/file" -b "$td/hello.txt")"
+  grep -qi 'ASCII text' <<<"$out"
+  out="$("$PIZFIX/bin/file" -b "$td/run.sh")"
+  grep -qi 'POSIX shell script' <<<"$out"
+  out="$("$PIZFIX/bin/file" -b "$PIZFIX/bin/file")"
+  grep -q 'ELF' <<<"$out"
   if command -v gzip >/dev/null 2>&1; then
     gzip -c "$td/hello.txt" > "$td/hello.txt.gz"
-    "$PIZFIX/bin/file" -b -z "$td/hello.txt.gz" | grep -qi 'ASCII text'
+    out="$("$PIZFIX/bin/file" -b -z "$td/hello.txt.gz")"
+    grep -qi 'ASCII text' <<<"$out"
   fi
   rm -rf "$td"
 }
 
 port_package_smoke() {
-  "$PKG_PREFIX/bin/file" --version | grep -q 'file-5\.48'
+  local out
+  out="$("$PKG_PREFIX/bin/file" --version)"
+  grep -q 'file-5\.48' <<<"$out"
   test -f "$PKG_PREFIX/include/magic.h"
   test -f "$PKG_PREFIX/lib/libmagic.so"
   test -f "$PKG_PREFIX/lib/pkgconfig/libmagic.pc"
@@ -62,12 +70,16 @@ port_package_smoke() {
   printf 'packaged filc test\n' > "$td/sample.txt"
   printf '#!/bin/sh\ntrue\n' > "$td/sample.sh"
 
-  "$PKG_PREFIX/bin/file" -m "$PKG_PREFIX/share/misc/magic.mgc" -b "$td/sample.txt" | grep -qi 'ASCII text'
-  "$PKG_PREFIX/bin/file" -m "$PKG_PREFIX/share/misc/magic.mgc" -b "$td/sample.sh" | grep -qi 'POSIX shell script'
-  "$PKG_PREFIX/bin/file" -m "$PKG_PREFIX/share/misc/magic.mgc" -b "$PKG_PREFIX/bin/file" | grep -q 'ELF'
+  out="$("$PKG_PREFIX/bin/file" -m "$PKG_PREFIX/share/misc/magic.mgc" -b "$td/sample.txt")"
+  grep -qi 'ASCII text' <<<"$out"
+  out="$("$PKG_PREFIX/bin/file" -m "$PKG_PREFIX/share/misc/magic.mgc" -b "$td/sample.sh")"
+  grep -qi 'POSIX shell script' <<<"$out"
+  out="$("$PKG_PREFIX/bin/file" -m "$PKG_PREFIX/share/misc/magic.mgc" -b "$PKG_PREFIX/bin/file")"
+  grep -q 'ELF' <<<"$out"
   if command -v gzip >/dev/null 2>&1; then
     gzip -c "$td/sample.txt" > "$td/sample.txt.gz"
-    "$PKG_PREFIX/bin/file" -m "$PKG_PREFIX/share/misc/magic.mgc" -b -z "$td/sample.txt.gz" | grep -qi 'ASCII text'
+    out="$("$PKG_PREFIX/bin/file" -m "$PKG_PREFIX/share/misc/magic.mgc" -b -z "$td/sample.txt.gz")"
+    grep -qi 'ASCII text' <<<"$out"
   fi
   rm -rf "$td"
 }

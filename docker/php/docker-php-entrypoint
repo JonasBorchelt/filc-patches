@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+
+# First arg is `-f` or `--some-option`
+if [ "${1#-}" != "$1" ]; then
+  if [ -x /usr/local/sbin/php-fpm ]; then
+    set -- php-fpm "$@"
+  else
+    set -- php "$@"
+  fi
+fi
+
+exec "$@"

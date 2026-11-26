@@ -1,0 +1,116 @@
+# syntax=docker/dockerfile:1.7
+
+ARG DEBIAN_IMAGE=debian:trixie-slim
+
+FROM ${DEBIAN_IMAGE} AS builder
+
+ARG PHP_VERSION=8.5
+ARG FILC_CHANNEL=0.1.5
+ARG FILC_BASE_URL=https://filc.connected.link
+ARG FILC_GITHUB_RELEASE_URL=https://github.com/JonasBorchelt/filc-patches/releases/download/v0.1.5
+ARG FILC_PORTS_PUBKEY=RWT2dYx3VZcu1VQHTUZVtNBb3pczC9wO94+zUWYQt2gE0+I8KuF3PGy/
+ARG FILC_USER_AGENT=
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update -qq && \
+    apt-get install -y -qq --no-install-recommends \
+      bash ca-certificates coreutils curl linux-libc-dev mawk minisign patchelf tar xz-utils && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY ports/ports-pubkey.pub /tmp/ports-pubkey.pub
+COPY docker/php/install-filc-php.sh /tmp/install-filc-php.sh
+
+RUN chmod 0755 /tmp/install-filc-php.sh && \
+    PHP_VERSION="${PHP_VERSION}" \
+    FILC_CHANNEL="${FILC_CHANNEL}" \
+    FILC_BASE_URL="${FILC_BASE_URL}" \
+    FILC_GITHUB_RELEASE_URL="${FILC_GITHUB_RELEASE_URL}" \
+    FILC_PORTS_PUBKEY="${FILC_PORTS_PUBKEY}" \
+    FILC_PUBKEY_FILE="/tmp/ports-pubkey.pub" \
+    FILC_USER_AGENT="${FILC_USER_AGENT:-filc-image-ci/${PHP_VERSION}}" \
+    /tmp/install-filc-php.sh /runtime && \
+    rm -f /tmp/install-filc-php.sh /tmp/ports-pubkey.pub
+
+FROM ${DEBIAN_IMAGE} AS base
+
+ARG PHP_VERSION=8.5
+ARG PHP_FULL_VERSION=8.5.13
+ARG FILC_CHANNEL=0.1.5
+ARG SUPPORT_TIER=active
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    FILC_CHANNEL="${FILC_CHANNEL}" \
+    PHP_VERSION="${PHP_FULL_VERSION}" \
+    PHP_SERIES="${PHP_VERSION}" \
+    PHP_INI_DIR="/usr/local/etc/php" \
+    SSL_CERT_FILE="/etc/ssl/certs/ca-certificates.crt" \
+    SSL_CERT_DIR="/etc/ssl/certs" \
+    PATH="/usr/local/sbin:/usr/local/bin:/opt/filc/${FILC_CHANNEL}/pizfix/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+LABEL org.opencontainers.image.vendor="filc-patches" \
+      org.opencontainers.image.source="https://github.com/JonasBorchelt/filc-patches" \
+      org.opencontainers.image.url="https://filc.connected.link" \
+      org.opencontainers.image.licenses="PHP-3.01 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND MIT" \
+      org.opencontainers.image.version="${PHP_FULL_VERSION}" \
+      dev.filc.channel="${FILC_CHANNEL}" \
+      dev.filc.php.series="${PHP_VERSION}" \
+      support="${SUPPORT_TIER}"
+
+RUN apt-get update -qq && \
+    apt-get install -y -qq --no-install-recommends ca-certificates tzdata && \
+    rm -rf /var/lib/apt/lists/* && \
+    mkdir -p /var/www/html && \
+    chown www-data:www-data /var/www/html && \
+    chmod 1777 /var/www/html
+
+COPY --from=builder /runtime/opt/filc /opt/filc
+COPY docker/php/docker-php-entrypoint /usr/local/bin/docker-php-entrypoint
+
+RUN chmod 0755 /usr/local/bin/docker-php-entrypoint && \
+    ln -sfn "/opt/filc/${FILC_CHANNEL}/pizfix/etc/php${PHP_VERSION}" /usr/local/etc/php && \
+    ln -sfn "/opt/filc/${FILC_CHANNEL}/pizfix/bin/php${PHP_VERSION}" /usr/local/bin/php && \
+    if [ -x "/opt/filc/${FILC_CHANNEL}/pizfix/bin/php-cgi${PHP_VERSION}" ]; then \
+      ln -sfn "/opt/filc/${FILC_CHANNEL}/pizfix/bin/php-cgi${PHP_VERSION}" /usr/local/bin/php-cgi; \
+    fi && \
+    if [ -x "/opt/filc/${FILC_CHANNEL}/pizfix/bin/phpdbg${PHP_VERSION}" ]; then \
+      ln -sfn "/opt/filc/${FILC_CHANNEL}/pizfix/bin/phpdbg${PHP_VERSION}" /usr/local/bin/phpdbg; \
+    fi
+
+FROM base AS cli
+
+ARG PHP_VERSION=8.5
+ARG PHP_FULL_VERSION=8.5.13
+
+LABEL org.opencontainers.image.title="filc-php ${PHP_VERSION} CLI" \
+      org.opencontainers.image.description="Memory-safe PHP ${PHP_FULL_VERSION} CLI compiled with Fil-C"
+
+RUN rm -f "/opt/filc/${FILC_CHANNEL}/pizfix/sbin/php-fpm${PHP_VERSION}"
+
+ENTRYPOINT ["docker-php-entrypoint"]
+CMD ["php", "-a"]
+
+FROM base AS fpm
+
+ARG PHP_VERSION=8.5
+ARG PHP_FULL_VERSION=8.5.13
+
+LABEL org.opencontainers.image.title="filc-php ${PHP_VERSION} FPM" \
+      org.opencontainers.image.description="Memory-safe PHP ${PHP_FULL_VERSION} FPM compiled with Fil-C"
+
+COPY docker/php/fpm/php-fpm.conf /tmp/filc-php-fpm.conf
+COPY docker/php/fpm/www.conf /tmp/filc-php-www.conf
+
+RUN ln -sfn "/opt/filc/${FILC_CHANNEL}/pizfix/sbin/php-fpm${PHP_VERSION}" /usr/local/sbin/php-fpm && \
+    mkdir -p "/opt/filc/${FILC_CHANNEL}/pizfix/etc/php${PHP_VERSION}/php-fpm.d" \
+             "/opt/filc/${FILC_CHANNEL}/pizfix/var/php${PHP_VERSION}/run" \
+             "/opt/filc/${FILC_CHANNEL}/pizfix/var/php${PHP_VERSION}/log" && \
+    mv /tmp/filc-php-fpm.conf "/opt/filc/${FILC_CHANNEL}/pizfix/etc/php${PHP_VERSION}/php-fpm.conf" && \
+    mv /tmp/filc-php-www.conf "/opt/filc/${FILC_CHANNEL}/pizfix/etc/php${PHP_VERSION}/php-fpm.d/www.conf"
+
+WORKDIR /var/www/html
+STOPSIGNAL SIGQUIT
+EXPOSE 9000
+
+ENTRYPOINT ["docker-php-entrypoint"]
+CMD ["php-fpm"]

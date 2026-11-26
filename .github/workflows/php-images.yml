@@ -1,0 +1,191 @@
+name: Build and Push filc-php Docker Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      filc_channel:
+        description: "Fil-C ports channel version"
+        required: false
+        default: "0.1.5"
+        type: string
+      push:
+        description: "Push verified images to Docker Hub"
+        required: false
+        default: true
+        type: boolean
+  push:
+    branches:
+      - main
+    paths:
+      - "docker/php/**"
+      - ".github/workflows/php-images.yml"
+
+concurrency:
+  group: php-images-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: php-${{ matrix.php_series }}-${{ matrix.variant }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - php_series: "8.5"
+            php_full: "8.5.13"
+            variant: "cli"
+            is_latest: true
+            support: "active"
+          - php_series: "8.5"
+            php_full: "8.5.13"
+            variant: "fpm"
+            is_latest: false
+            support: "active"
+          - php_series: "8.4"
+            php_full: "8.4.28"
+            variant: "cli"
+            is_latest: false
+            support: "active"
+          - php_series: "8.4"
+            php_full: "8.4.28"
+            variant: "fpm"
+            is_latest: false
+            support: "active"
+          - php_series: "8.3"
+            php_full: "8.3.37"
+            variant: "cli"
+            is_latest: false
+            support: "active"
+          - php_series: "8.3"
+            php_full: "8.3.37"
+            variant: "fpm"
+            is_latest: false
+            support: "active"
+          - php_series: "8.2"
+            php_full: "8.2.36"
+            variant: "cli"
+            is_latest: false
+            support: "active"
+          - php_series: "8.2"
+            php_full: "8.2.36"
+            variant: "fpm"
+            is_latest: false
+            support: "active"
+
+    env:
+      IMAGE_NAME: jonasborchelt/filc-php
+      FILC_CHANNEL: ${{ inputs.filc_channel || '0.1.5' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compute image tags and OCI labels
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          series="${{ matrix.php_series }}"
+          full="${{ matrix.php_full }}"
+          variant="${{ matrix.variant }}"
+          is_latest="${{ matrix.is_latest }}"
+          support="${{ matrix.support }}"
+          channel="${FILC_CHANNEL}"
+
+          tags=(
+            "${IMAGE_NAME}:${series}-${variant}"
+            "${IMAGE_NAME}:${full}-${variant}"
+          )
+          if [ "$variant" = "cli" ]; then
+            tags+=(
+              "${IMAGE_NAME}:${series}"
+              "${IMAGE_NAME}:${full}"
+            )
+            if [ "$is_latest" = "true" ]; then
+              tags+=("${IMAGE_NAME}:latest")
+            fi
+          fi
+
+          local_tag="filc-php-smoke:${series}-${variant}"
+          echo "local_tag=${local_tag}" >> "$GITHUB_OUTPUT"
+          {
+            echo "tags<<EOF"
+            printf '%s\n' "${tags[@]}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          created="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          {
+            echo "labels<<EOF"
+            echo "org.opencontainers.image.created=${created}"
+            echo "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}"
+            echo "org.opencontainers.image.revision=${GITHUB_SHA}"
+            echo "org.opencontainers.image.version=${full}"
+            echo "org.opencontainers.image.licenses=PHP-3.01 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND MIT"
+            echo "dev.filc.channel=${channel}"
+            echo "dev.filc.php.series=${series}"
+            echo "support=${support}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build image locally for smoke test
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/php/Dockerfile
+          target: ${{ matrix.variant }}
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: ${{ steps.meta.outputs.local_tag }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            PHP_VERSION=${{ matrix.php_series }}
+            PHP_FULL_VERSION=${{ matrix.php_full }}
+            FILC_CHANNEL=${{ env.FILC_CHANNEL }}
+            FILC_GITHUB_RELEASE_URL=https://github.com/${{ github.repository }}/releases/download/v${{ env.FILC_CHANNEL }}
+            FILC_USER_AGENT=filc-image-ci/${{ matrix.php_series }}
+            SUPPORT_TIER=${{ matrix.support }}
+
+      - name: Smoke-test image before push
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash docker/php/smoke.sh "${{ steps.meta.outputs.local_tag }}" "${{ matrix.php_series }}" "${{ matrix.variant }}"
+
+      - name: Log in to Docker Hub
+        if: >-
+          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'workflow_dispatch' && inputs.push)
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Push verified image to Docker Hub
+        if: >-
+          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'workflow_dispatch' && inputs.push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/php/Dockerfile
+          target: ${{ matrix.variant }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            PHP_VERSION=${{ matrix.php_series }}
+            PHP_FULL_VERSION=${{ matrix.php_full }}
+            FILC_CHANNEL=${{ env.FILC_CHANNEL }}
+            FILC_GITHUB_RELEASE_URL=https://github.com/${{ github.repository }}/releases/download/v${{ env.FILC_CHANNEL }}
+            FILC_USER_AGENT=filc-image-ci/${{ matrix.php_series }}
+            SUPPORT_TIER=${{ matrix.support }}

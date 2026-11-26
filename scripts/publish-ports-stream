@@ -243,7 +243,12 @@ module PublishPortsStream
   def verify_channel_toolchain_match!(toolchain_root:, repo_root:, channel:, arch:,
                                       release_provenance_path: nil,
                                       require_release_provenance: false,
+                                      warn_release_mismatch: false,
                                       verify_built_toolchain: true)
+    if require_release_provenance && warn_release_mismatch
+      raise ArgumentError, "--warn-release-mismatch cannot be combined with --require-release-provenance"
+    end
+
     upstream_path = File.join(repo_root, "UPSTREAM")
     raise "CHANNEL_TOOLCHAIN_VERIFY: FAIL missing UPSTREAM file: #{upstream_path}" unless File.file?(upstream_path)
 
@@ -279,48 +284,65 @@ module PublishPortsStream
     end
 
     release_archive_sha = nil
+    release_mismatch_warning = nil
+    handle_release_mismatch = lambda do |detail|
+      if warn_release_mismatch && !require_release_provenance
+        release_mismatch_warning = detail
+        release_archive_sha = nil
+        true
+      else
+        raise "CHANNEL_TOOLCHAIN_VERIFY: FAIL #{detail}"
+      end
+    end
+
     if release_provenance_path && !release_provenance_path.empty?
       if File.file?(release_provenance_path)
         prov = parse_kv_file(release_provenance_path)
+        mismatch_detail = nil
         if prov["VERSION"] != channel
-          raise "CHANNEL_TOOLCHAIN_VERIFY: FAIL release PROVENANCE VERSION=#{prov['VERSION']} != channel #{channel} (#{release_provenance_path})"
-        end
-        if prov["ARCH"] != expected_short_arch
-          raise "CHANNEL_TOOLCHAIN_VERIFY: FAIL release PROVENANCE ARCH=#{prov['ARCH']} != expected #{expected_short_arch} (#{release_provenance_path})"
-        end
-        %w[LLVM_COMMIT FILC_COMMIT MUSL_COMMIT].each do |key|
-          if prov[key] != upstream[key]
-            raise "CHANNEL_TOOLCHAIN_VERIFY: FAIL channel #{channel} release #{key}=#{prov[key]} != repo UPSTREAM #{upstream[key]} (#{release_provenance_path})"
-          end
-        end
-        if prov["PATCH_SERIES_SHA256"] != repo_patch_sha
-          raise "CHANNEL_TOOLCHAIN_VERIFY: FAIL channel #{channel} release PATCH_SERIES_SHA256=#{prov['PATCH_SERIES_SHA256']} != repo #{repo_patch_sha} (#{release_provenance_path})"
-        end
+          mismatch_detail = "release PROVENANCE VERSION=#{prov['VERSION']} != channel #{channel} (#{release_provenance_path})"
+        elsif prov["ARCH"] != expected_short_arch
+          mismatch_detail = "release PROVENANCE ARCH=#{prov['ARCH']} != expected #{expected_short_arch} (#{release_provenance_path})"
+        else
+          %w[LLVM_COMMIT FILC_COMMIT MUSL_COMMIT].each do |key|
+            next if prov[key] == upstream[key]
 
-        rel_dir = File.dirname(release_provenance_path)
-        archive_name = prov["ARCHIVE"].to_s
-        sums_path = File.join(rel_dir, "SHA256SUMS")
-        if File.file?(sums_path) && !archive_name.empty?
-          File.foreach(sums_path, encoding: "UTF-8") do |line|
-            parts = line.strip.split(/\s+/, 2)
-            next unless parts.length == 2 && parts[1] == archive_name
-
-            release_archive_sha = parts[0]
+            mismatch_detail = "channel #{channel} release #{key}=#{prov[key]} != repo UPSTREAM #{upstream[key]} (#{release_provenance_path})"
             break
           end
-          unless HEX64_RE.match?(release_archive_sha.to_s)
-            raise "CHANNEL_TOOLCHAIN_VERIFY: FAIL archive #{archive_name} missing or invalid in #{sums_path}"
+          if mismatch_detail.nil? && prov["PATCH_SERIES_SHA256"] != repo_patch_sha
+            mismatch_detail = "channel #{channel} release PATCH_SERIES_SHA256=#{prov['PATCH_SERIES_SHA256']} != repo #{repo_patch_sha} (#{release_provenance_path})"
           end
+        end
 
-          archive_path = File.join(rel_dir, archive_name)
-          if File.file?(archive_path)
-            actual_sha = sha256_file(archive_path)
-            if actual_sha != release_archive_sha
-              raise "CHANNEL_TOOLCHAIN_VERIFY: FAIL release tarball SHA-256 mismatch for #{archive_path}: actual=#{actual_sha} expected=#{release_archive_sha}"
+        if mismatch_detail
+          handle_release_mismatch.call(mismatch_detail)
+        else
+          rel_dir = File.dirname(release_provenance_path)
+          archive_name = prov["ARCHIVE"].to_s
+          sums_path = File.join(rel_dir, "SHA256SUMS")
+          if File.file?(sums_path) && !archive_name.empty?
+            File.foreach(sums_path, encoding: "UTF-8") do |line|
+              parts = line.strip.split(/\s+/, 2)
+              next unless parts.length == 2 && parts[1] == archive_name
+
+              release_archive_sha = parts[0]
+              break
             end
+            if !HEX64_RE.match?(release_archive_sha.to_s)
+              handle_release_mismatch.call("archive #{archive_name} missing or invalid in #{sums_path}")
+            else
+              archive_path = File.join(rel_dir, archive_name)
+              if File.file?(archive_path)
+                actual_sha = sha256_file(archive_path)
+                if actual_sha != release_archive_sha
+                  handle_release_mismatch.call("release tarball SHA-256 mismatch for #{archive_path}: actual=#{actual_sha} expected=#{release_archive_sha}")
+                end
+              end
+            end
+          elsif require_release_provenance
+            raise "CHANNEL_TOOLCHAIN_VERIFY: FAIL missing SHA256SUMS or ARCHIVE entry beside #{release_provenance_path}"
           end
-        elsif require_release_provenance
-          raise "CHANNEL_TOOLCHAIN_VERIFY: FAIL missing SHA256SUMS or ARCHIVE entry beside #{release_provenance_path}"
         end
       elsif require_release_provenance
         raise "CHANNEL_TOOLCHAIN_VERIFY: FAIL missing release PROVENANCE for channel #{channel}: #{release_provenance_path} (run release.yaml for #{channel} first)"
@@ -337,13 +359,22 @@ module PublishPortsStream
       "musl_commit" => upstream["MUSL_COMMIT"],
       "patch_series_sha256" => repo_patch_sha,
       "release_provenance" => (release_provenance_path && File.file?(release_provenance_path)) ? release_provenance_path : nil,
-      "release_archive_sha256" => release_archive_sha
+      "release_archive_sha256" => release_archive_sha,
+      "release_mismatch_warning" => release_mismatch_warning
     }
-    $stdout.puts(
-      "CHANNEL_TOOLCHAIN_VERIFY: PASS channel=#{channel} arch=#{arch} " \
-      "filc_commit=#{upstream['FILC_COMMIT'][0, 12]} patch_series_sha256=#{repo_patch_sha[0, 12]}" \
-      "#{release_archive_sha ? " release_archive_sha256=#{release_archive_sha[0, 12]}" : ' release_provenance=unverified_dry_run'}"
-    )
+    if release_mismatch_warning
+      $stdout.puts(
+        "CHANNEL_TOOLCHAIN_VERIFY: WARN (dry-run) channel=#{channel} arch=#{arch} " \
+        "filc_commit=#{upstream['FILC_COMMIT'][0, 12]} patch_series_sha256=#{repo_patch_sha[0, 12]} " \
+        "reason=#{release_mismatch_warning}"
+      )
+    else
+      $stdout.puts(
+        "CHANNEL_TOOLCHAIN_VERIFY: PASS channel=#{channel} arch=#{arch} " \
+        "filc_commit=#{upstream['FILC_COMMIT'][0, 12]} patch_series_sha256=#{repo_patch_sha[0, 12]}" \
+        "#{release_archive_sha ? " release_archive_sha256=#{release_archive_sha[0, 12]}" : ' release_provenance=unverified_dry_run'}"
+      )
+    end
     $stdout.flush
     info
   end
@@ -1158,6 +1189,7 @@ module PublishPortsStream
       source_date_epoch: ENV["SOURCE_DATE_EPOCH"],
       release_provenance: nil,
       require_release_provenance: false,
+      warn_release_mismatch: false,
       verify_channel_only: false,
       lock_file: nil
     }
@@ -1196,6 +1228,7 @@ module PublishPortsStream
       o.on("--skip-package-smoke", "Skip alternate-prefix PACKAGE_SMOKE during verify") { opts[:verify_smoke] = false }
       o.on("--release-provenance PATH", "Published release PROVENANCE file to pin channel toolchain match") { |v| opts[:release_provenance] = v.empty? ? nil : File.expand_path(v) }
       o.on("--require-release-provenance", "Abort unless --release-provenance exists and matches UPSTREAM + patch series") { opts[:require_release_provenance] = true }
+      o.on("--warn-release-mismatch", "Warn and continue on --release-provenance mismatch during dry-run (forbidden with --upload or --require-release-provenance)") { opts[:warn_release_mismatch] = true }
       o.on("--verify-channel-only", "Run channel/toolchain provenance verification only and exit") { opts[:verify_channel_only] = true }
       o.on("--lock-file PATH", "Exclusive lock file path to serialize concurrent runs on the same channel") { |v| opts[:lock_file] = v.empty? ? nil : File.expand_path(v) }
       o.on("--build-port-bin PATH", "Override build-port executable (tests)") { |v| opts[:build_port_bin] = File.expand_path(v) }
@@ -1207,6 +1240,9 @@ module PublishPortsStream
 
     raise ArgumentError, "--channel invalid" unless CHANNEL_RE.match?(opts[:channel].to_s)
     raise ArgumentError, "--arch invalid" unless ARCH_RE.match?(opts[:arch].to_s)
+    if opts[:warn_release_mismatch] && (opts[:require_release_provenance] || opts[:upload])
+      raise ArgumentError, "--warn-release-mismatch is forbidden with --upload or --require-release-provenance"
+    end
 
     if opts[:verify_channel_only]
       return with_exclusive_lock(opts[:lock_file]) do
@@ -1218,6 +1254,7 @@ module PublishPortsStream
             arch: opts[:arch],
             release_provenance_path: opts[:release_provenance],
             require_release_provenance: opts[:require_release_provenance],
+            warn_release_mismatch: opts[:warn_release_mismatch],
             verify_built_toolchain: !opts[:toolchain_root].to_s.empty?
           )
           0
@@ -1247,6 +1284,7 @@ module PublishPortsStream
         arch: opts[:arch],
         release_provenance_path: opts[:release_provenance],
         require_release_provenance: opts[:require_release_provenance],
+        warn_release_mismatch: opts[:warn_release_mismatch],
         verify_built_toolchain: true
       )
     rescue StandardError => e

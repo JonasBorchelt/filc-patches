@@ -819,7 +819,118 @@ Dir.mktmpdir("filc-stream-test-") do |tmp|
   )
   assert(!st_mis.success? && err_mis.include?("missing release PROVENANCE"),
          "missing required release PROVENANCE must abort: #{err_mis}")
-  puts "CHANNEL_TOOLCHAIN_GUARD: PASS (exact match OK; channel mismatch, stale toolchain, and missing provenance all aborted with 0 builds/0 uploads)"
+
+  # 10e: Dry-run (--warn-release-mismatch) with PATCH_SERIES_SHA256 mismatch warns and continues
+  rel_dir_mismatch = File.join(tmp, "release-0.1.5-mismatch")
+  FileUtils.mkdir_p(rel_dir_mismatch)
+  File.write(File.join(rel_dir_mismatch, "PROVENANCE"), <<~PROV, encoding: "UTF-8")
+    ARCHIVE=filc-0.1.5-x86_64-linux.tar.xz
+    VERSION=0.1.5
+    ARCH=x86_64
+    LLVM_COMMIT=1111111111111111111111111111111111111111
+    FILC_COMMIT=4444444444444444444444444444444444444444
+    MUSL_COMMIT=3333333333333333333333333333333333333333
+    PATCH_SERIES_SHA256=#{'0' * 64}
+  PROV
+  out_warn, err_warn, st_warn = Open3.capture3(
+    "ruby", STREAM_BIN,
+    "--verify-channel-only",
+    "--repo-root", repo_a,
+    "--channel", "0.1.5",
+    "--arch", "x86_64-linux",
+    "--release-provenance", File.join(rel_dir_mismatch, "PROVENANCE"),
+    "--warn-release-mismatch"
+  )
+  assert(st_warn.success?, "dry-run --warn-release-mismatch must exit 0 on release mismatch: #{out_warn}\n#{err_warn}")
+  assert(out_warn.include?("CHANNEL_TOOLCHAIN_VERIFY: WARN (dry-run)") && out_warn.include?("PATCH_SERIES_SHA256"),
+         "expected dry-run WARN with PATCH_SERIES_SHA256 detail, got: #{out_warn}")
+
+  # Full dry-run stream execution with release PATCH_SERIES_SHA256 mismatch builds and exits 0
+  rel_dir_dry_stream = File.join(tmp, "release-0.1.4-dry-mismatch")
+  FileUtils.mkdir_p(rel_dir_dry_stream)
+  repo_upstream = PublishPortsStream.parse_kv_file(File.join(REPO_ROOT, "UPSTREAM"))
+  File.write(File.join(rel_dir_dry_stream, "PROVENANCE"), <<~PROV, encoding: "UTF-8")
+    ARCHIVE=filc-0.1.4-x86_64-linux.tar.xz
+    VERSION=0.1.4
+    ARCH=x86_64
+    LLVM_COMMIT=#{repo_upstream['LLVM_COMMIT']}
+    FILC_COMMIT=#{repo_upstream['FILC_COMMIT']}
+    MUSL_COMMIT=#{repo_upstream['MUSL_COMMIT']}
+    PATCH_SERIES_SHA256=#{'f' * 64}
+  PROV
+  dry_warn_work = File.join(tmp, "dry-warn-work")
+  dry_warn_out = File.join(tmp, "dry-warn-out")
+  out_dw, err_dw, st_dw = Open3.capture3(
+    common_env,
+    "ruby", STREAM_BIN,
+    "--repo-root", REPO_ROOT,
+    "--ports-dir", fix[:ports_dir],
+    "--toolchain-root", fix[:tc_root],
+    "--work-dir", dry_warn_work,
+    "--out-dir", dry_warn_out,
+    "--ports-cache-dir", fix[:cache_dir],
+    "--channel", "0.1.4",
+    "--arch", "x86_64-linux",
+    "--parallel", "1",
+    "--total-jobs", "4",
+    "--no-pin-cpus",
+    "--isolated-prefix",
+    "--ports", "liba",
+    "--no-bootstrap-timings",
+    "--release-provenance", File.join(rel_dir_dry_stream, "PROVENANCE"),
+    "--warn-release-mismatch",
+    "--build-port-bin", fix[:mock_bp],
+    "--source-date-epoch", "1700000000"
+  )
+  assert(st_dw.success?, "dry-run stream with --warn-release-mismatch must continue and pass:\nOUT:\n#{out_dw}\nERR:\n#{err_dw}")
+  assert(out_dw.include?("CHANNEL_TOOLCHAIN_VERIFY: WARN (dry-run)") && out_dw.include?("PATCH_SERIES_SHA256"),
+         "expected dry-run stream WARN marker:\n#{out_dw}")
+  dw_summary = JSON.parse(File.read(File.join(dry_warn_work, "publish-summary.json"), encoding: "UTF-8"))
+  assert(dw_summary["commit_allowed"] == true && dw_summary["summary"]["tested"] == 1,
+         "expected liba to build and verify in dry-run warn mode: #{dw_summary['summary']}")
+
+  # 10f: Guardrails: --warn-release-mismatch is forbidden with --require-release-provenance or --upload
+  _o_cf1, e_cf1, st_cf1 = Open3.capture3(
+    "ruby", STREAM_BIN,
+    "--verify-channel-only",
+    "--repo-root", repo_a,
+    "--channel", "0.1.5",
+    "--arch", "x86_64-linux",
+    "--release-provenance", File.join(rel_dir_mismatch, "PROVENANCE"),
+    "--require-release-provenance",
+    "--warn-release-mismatch"
+  )
+  assert(!st_cf1.success? && e_cf1.include?("forbidden"),
+         "combining --warn-release-mismatch and --require-release-provenance must fail: #{e_cf1}")
+
+  _o_cf2, e_cf2, st_cf2 = Open3.capture3(
+    "ruby", STREAM_BIN,
+    "--verify-channel-only",
+    "--repo-root", repo_a,
+    "--channel", "0.1.5",
+    "--arch", "x86_64-linux",
+    "--release-provenance", File.join(rel_dir_mismatch, "PROVENANCE"),
+    "--upload",
+    "--warn-release-mismatch"
+  )
+  assert(!st_cf2.success? && e_cf2.include?("forbidden"),
+         "combining --warn-release-mismatch and --upload must fail: #{e_cf2}")
+
+  # 10g: Even in dry-run (--warn-release-mismatch), stale built TOOLCHAIN_PROVENANCE still hard-fails
+  _o_tcw, e_tcw, st_tcw = Open3.capture3(
+    "ruby", STREAM_BIN,
+    "--verify-channel-only",
+    "--repo-root", repo_a,
+    "--toolchain-root", tc_guard,
+    "--channel", "0.1.5",
+    "--arch", "x86_64-linux",
+    "--release-provenance", File.join(rel_dir_mismatch, "PROVENANCE"),
+    "--warn-release-mismatch"
+  )
+  assert(!st_tcw.success? && e_tcw.include?("built toolchain FILC_COMMIT"),
+         "stale built TOOLCHAIN_PROVENANCE must still hard-fail in dry-run warn mode: #{e_tcw}")
+
+  puts "CHANNEL_TOOLCHAIN_GUARD: PASS (exact match OK; live mismatch/stale/missing aborted; dry-run mismatch warns and continues; guardrails enforced)"
 
   puts "=== [11/11] Guard 2: Exclusive channel lock serializes concurrent runs without clobbering ==="
   lock_path = File.join(tmp, "locks", "publish-ports-0.1.5-x86_64-linux.lock")

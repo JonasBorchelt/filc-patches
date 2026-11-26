@@ -1228,8 +1228,20 @@ if [[ "$RC_PTRTOADDR_SPRINTF" -ne 0 ]] || ! grep -Fxq "PTRTOADDR_SPRINTF_OK alph
   PTRTOADDR_OK=0
 fi
 
-"$CLANG" -O2 -S -emit-llvm -Xclang -disable-llvm-passes "$TEST_DIR/ptrtoaddr_sprintf_test.c" -o "$TEST_DIR/ptrtoaddr_hdr.ll"
-grep -E '^target (datalayout|triple) =' "$TEST_DIR/ptrtoaddr_hdr.ll" > "$TEST_DIR/ptrtoaddr_ir.ll"
+"$CLANG" -O2 -S -emit-llvm "$TEST_DIR/ptrtoaddr_sprintf_test.c" -o "$TEST_DIR/ptrtoaddr_post.ll"
+PTRTOADDR_AFTER_DL="$(sed -n '/^target datalayout_after_filc = "/{s/^target datalayout_after_filc = "\(.*\)"$/\1/;p;q;}' "$TEST_DIR/ptrtoaddr_post.ll")"
+PTRTOADDR_TRIPLE="$(sed -n '/^target triple = "/{s/^target triple = "\(.*\)"$/\1/;p;q;}' "$TEST_DIR/ptrtoaddr_post.ll")"
+if [[ -z "$PTRTOADDR_AFTER_DL" || -z "$PTRTOADDR_TRIPLE" ]]; then
+  echo "error: failed to extract target datalayout_after_filc / triple from ptrtoaddr_post.ll" >&2
+  PTRTOADDR_OK=0
+fi
+if [[ "$PTRTOADDR_AFTER_DL" == e-m:e-* ]]; then
+  PTRTOADDR_BEFORE_DL="e-m:e-ni:0-${PTRTOADDR_AFTER_DL#e-m:e-}"
+else
+  PTRTOADDR_BEFORE_DL="${PTRTOADDR_AFTER_DL}-ni:0"
+fi
+printf 'target datalayout = "%s"\ntarget datalayout_after_filc = "%s"\ntarget triple = "%s"\n' \
+  "$PTRTOADDR_BEFORE_DL" "$PTRTOADDR_AFTER_DL" "$PTRTOADDR_TRIPLE" > "$TEST_DIR/ptrtoaddr_ir.ll"
 cat >> "$TEST_DIR/ptrtoaddr_ir.ll" <<'EOF'
 
 define dso_local i64 @filc_test_ptrtoaddr_diff(ptr noundef %a, ptr noundef %b) {

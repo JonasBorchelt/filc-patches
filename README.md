@@ -107,7 +107,7 @@ its own license, verified against the pinned source files:
   (`## License`), `llvm/LICENSE.TXT`, `clang/LICENSE.TXT`, `libcxx/LICENSE.TXT`,
   `libcxxabi/LICENSE.TXT`, and SPDX headers in the Fil-C compiler files (e.g.,
   `llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp`).
-- **Fil-C runtime** (`pizlonator/fil-c` @ `8553fcd026b9`, fetched sparsely into
+- **Fil-C runtime** (`pizlonator/fil-c` @ `e7b7f1e8969e`, fetched sparsely into
   `libpas/`, `filc/{include,src,main}`, `yolounwind/`, and
   `projects/zegarmistrz/include`): **BSD-2-Clause** (`Copyright (c) 2018-2022
   Apple Inc.`, `Copyright (c) 2023-2026 Epic Games, Inc.`, `Copyright (c) 2026

@@ -200,7 +200,30 @@ EOF
 
 cat > "$TEST_DIR/fenv_test.c" <<'EOF'
 #include <fenv.h>
+#include <stdfil.h>
 #include <stdio.h>
+#include <stdlib.h>
+
+static volatile void *sink_ptr;
+
+__attribute__((noinline))
+static void exercise_runtime_alloc_and_gc(void) {
+    size_t sizes[] = {
+        17, 33, 65, 113, 193, 337, 521, 769, 1041, 1553, 2081, 3109,
+        4129, 8209, 16411, 32771, 65537, 131073, 262145
+    };
+    size_t count = sizeof(sizes) / sizeof(sizes[0]);
+    for (size_t i = 0; i < count; ++i) {
+        char *p = (char *)malloc(sizes[i]);
+        if (!p)
+            abort();
+        p[0] = (char)i;
+        p[sizes[i] - 1] = (char)(i ^ 0x5a);
+        sink_ptr = p;
+        free(p);
+    }
+    zgc_request_and_wait();
+}
 
 __attribute__((noinline))
 static double div_volatile_d(volatile double a, volatile double b) {
@@ -269,9 +292,93 @@ int main(void) {
     if (div_volatile_d(1.0, 3.0) != d_up || div_volatile_ld(1.0L, 3.0L) != ld_up)
         return 28;
 
+    /* Verify runtime allocator heuristics and GC preserve user rounding mode
+       and exact exception flags (without leaking FE_INEXACT from runtime math). */
+    if (fesetround(FE_UPWARD) != 0)
+        return 30;
+    if (feclearexcept(FE_ALL_EXCEPT) != 0 || feraiseexcept(FE_OVERFLOW) != 0)
+        return 31;
+    if (fetestexcept(FE_ALL_EXCEPT) != FE_OVERFLOW)
+        return 32;
+    exercise_runtime_alloc_and_gc();
+    if (fegetround() != FE_UPWARD || fetestexcept(FE_ALL_EXCEPT) != FE_OVERFLOW)
+        return 33;
+    if (div_volatile_d(1.0, 3.0) != d_up || div_volatile_ld(1.0L, 3.0L) != ld_up)
+        return 34;
+
+    if (fesetround(FE_DOWNWARD) != 0 || feclearexcept(FE_ALL_EXCEPT) != 0)
+        return 35;
+    exercise_runtime_alloc_and_gc();
+    if (fegetround() != FE_DOWNWARD || fetestexcept(FE_ALL_EXCEPT) != 0)
+        return 36;
+    if (div_volatile_d(1.0, 3.0) != d_down || div_volatile_ld(1.0L, 3.0L) != ld_down)
+        return 37;
+
     if (fesetenv(FE_DFL_ENV) != 0)
         return 29;
     printf("FENV_OK: sse+x87 down<up round=%d\n", fegetround());
+    return 0;
+}
+EOF
+
+cat > "$TEST_DIR/pas_float_env_test.c" <<'EOF'
+#include "pas_utils.h"
+#include <fenv.h>
+#include <stdio.h>
+
+__attribute__((noinline))
+static double div_volatile_d(volatile double a, volatile double b) {
+    return a / b;
+}
+
+__attribute__((noinline))
+static long double div_volatile_ld(volatile long double a, volatile long double b) {
+    return a / b;
+}
+
+int main(void) {
+    /* 1/7 rounds downward under FE_TONEAREST in binary64, x87 80-bit, and binary128. */
+    if (fesetenv(FE_DFL_ENV) != 0)
+        return 10;
+    double d_near = div_volatile_d(1.0, 7.0);
+    long double ld_near = div_volatile_ld(1.0L, 7.0L);
+
+    if (fesetround(FE_UPWARD) != 0)
+        return 11;
+    double d_up = div_volatile_d(1.0, 7.0);
+    long double ld_up = div_volatile_ld(1.0L, 7.0L);
+    if (!(d_near < d_up) || !(ld_near < ld_up))
+        return 12;
+
+    if (feclearexcept(FE_ALL_EXCEPT) != 0 || feraiseexcept(FE_OVERFLOW) != 0)
+        return 13;
+    if (fegetround() != FE_UPWARD || fetestexcept(FE_ALL_EXCEPT) != FE_OVERFLOW)
+        return 14;
+
+    pas_saved_float_environment saved;
+    pas_save_float_environment(&saved);
+    if (fegetround() != FE_UPWARD || fetestexcept(FE_ALL_EXCEPT) != FE_OVERFLOW)
+        return 15;
+
+    pas_set_float_environment_to_libpas_default();
+    if (fegetround() != FE_TONEAREST || fetestexcept(FE_ALL_EXCEPT) != 0)
+        return 16;
+    if (div_volatile_d(1.0, 7.0) != d_near || div_volatile_ld(1.0L, 7.0L) != ld_near)
+        return 17;
+    if (feraiseexcept(FE_INVALID | FE_DIVBYZERO) != 0)
+        return 18;
+    if (fetestexcept(FE_INEXACT | FE_INVALID | FE_DIVBYZERO) != (FE_INEXACT | FE_INVALID | FE_DIVBYZERO))
+        return 19;
+
+    pas_restore_float_environment(&saved);
+    if (fegetround() != FE_UPWARD || fetestexcept(FE_ALL_EXCEPT) != FE_OVERFLOW)
+        return 20;
+    if (div_volatile_d(1.0, 7.0) != d_up || div_volatile_ld(1.0L, 7.0L) != ld_up)
+        return 21;
+
+    if (fesetenv(FE_DFL_ENV) != 0)
+        return 22;
+    printf("PAS_FLOAT_ENV_OK\n");
     return 0;
 }
 EOF
@@ -589,7 +696,31 @@ fi
 echo "=== Running (h) Floating-Point Environment (<fenv.h>) ==="
 run_and_capture fenv_test "$TEST_DIR/fenv_test"
 RC_FENV="$(cat "$TEST_DIR/fenv_test.rc")"
-if [[ "$RC_FENV" -eq 0 ]] && grep -Fq "FENV_OK: sse+x87 down<up round=0" "$TEST_DIR/fenv_test.stdout"; then
+FENV_OK=1
+if [[ "$RC_FENV" -ne 0 ]] || ! grep -Fq "FENV_OK: sse+x87 down<up round=0" "$TEST_DIR/fenv_test.stdout"; then
+  FENV_OK=0
+fi
+if [[ -f "$WORK_ROOT/runtime/libpas/src/libpas/pas_utils.h" ]]; then
+  HOST_CC_FENV="${HOST_CC:-$(command -v clang || command -v cc || true)}"
+  if [[ -n "$HOST_CC_FENV" ]]; then
+    if "$HOST_CC_FENV" -O2 -Wall \
+      -DPAS_BMALLOC=0 \
+      -I"$WORK_ROOT/runtime/libpas/src/libpas" \
+      "$TEST_DIR/pas_float_env_test.c" -lm -o "$TEST_DIR/pas_float_env_test"; then
+      run_and_capture pas_float_env_test "$TEST_DIR/pas_float_env_test"
+      RC_PAS_FENV="$(cat "$TEST_DIR/pas_float_env_test.rc")"
+      if [[ "$RC_PAS_FENV" -ne 0 ]] || ! grep -Fq "PAS_FLOAT_ENV_OK" "$TEST_DIR/pas_float_env_test.stdout"; then
+        echo "error: pas_float_env_test failed (rc=$RC_PAS_FENV)" >&2
+        cat "$TEST_DIR/pas_float_env_test.stdout" "$TEST_DIR/pas_float_env_test.stderr" >&2 || true
+        FENV_OK=0
+      fi
+    else
+      echo "error: failed to compile pas_float_env_test.c" >&2
+      FENV_OK=0
+    fi
+  fi
+fi
+if [[ "$FENV_OK" -eq 1 ]]; then
   STATUS_FENV="PASS"
 else
   STATUS_FENV="FAIL"

@@ -1,10 +1,10 @@
 Subject: Fil-C yolomusl adaptations on top of upstream musl 1.2.4
 Upstream-Base: musl f314e133929b6379eccc632bef32eaebb66a7335 (v1.2.4+)
-Fil-C-Head: cede3de02b42b58a14acc9ce39c9894ab952a915 (branch deluge)
+Fil-C-Head: e7b7f1e8969e24411b3d588bb9a043e5676f854d (branch deluge)
 
 Mechanically extracted diff between upstream musl commit
 f314e133929b6379eccc632bef32eaebb66a7335 and projects/yolomusl at Fil-C
-cede3de02b42b58a14acc9ce39c9894ab952a915. Builds the un-pizlonated
+e7b7f1e8969e24411b3d588bb9a043e5676f854d. Builds the un-pizlonated
 underlying libc (libyoloc.so, libyoloc.a, ld-fil1-<arch>.so, CRT objects)
 used beneath libpizlo.
 
@@ -18,7 +18,7 @@ Fil-C-Origin-Commits (6):
 
 ---
 diff --git a/Makefile b/Makefile
-index e8cc4436..24f481ae 100644
+index e8cc443..24f481a 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -48,7 +48,7 @@ CFLAGS_C99FSE = -std=c99 -ffreestanding -nostdinc
@@ -85,7 +85,7 @@ index e8cc4436..24f481ae 100644
  install-libs: $(ALL_LIBS:lib/%=$(DESTDIR)$(libdir)/%) $(if $(SHARED_LIBS),$(DESTDIR)$(LDSO_PATHNAME),)
  
 diff --git a/arch/aarch64/atomic_arch.h b/arch/aarch64/atomic_arch.h
-index 40fefc25..b47f35f8 100644
+index 40fefc2..b47f35f 100644
 --- a/arch/aarch64/atomic_arch.h
 +++ b/arch/aarch64/atomic_arch.h
 @@ -20,19 +20,6 @@ static inline void a_barrier()
@@ -130,7 +130,7 @@ index 40fefc25..b47f35f8 100644
  static inline int a_ctz_64(uint64_t x)
  {
 diff --git a/arch/aarch64/bits/syscall.h.in b/arch/aarch64/bits/syscall.h.in
-index 5f420e61..ad9aa96e 100644
+index 5f420e6..ad9aa96 100644
 --- a/arch/aarch64/bits/syscall.h.in
 +++ b/arch/aarch64/bits/syscall.h.in
 @@ -299,4 +299,6 @@
@@ -141,7 +141,7 @@ index 5f420e61..ad9aa96e 100644
 +#define __NR_listmount		458
  
 diff --git a/arch/x86_64/bits/syscall.h.in b/arch/x86_64/bits/syscall.h.in
-index c3882de7..e104733f 100644
+index c3882de..e104733 100644
 --- a/arch/x86_64/bits/syscall.h.in
 +++ b/arch/x86_64/bits/syscall.h.in
 @@ -355,4 +355,6 @@
@@ -151,9 +151,9 @@ index c3882de7..e104733f 100644
 +#define __NR_statmount		457
 +#define __NR_listmount		458
  
-diff --git a/dist/config.mak b/dist/config.mak
+diff --git a/dist/config.mak a/dist/config.mak
 deleted file mode 100644
-index 1fc43695..00000000
+index 1fc4369..0000000
 --- a/dist/config.mak
 +++ /dev/null
 @@ -1,36 +0,0 @@
@@ -194,7 +194,7 @@ index 1fc43695..00000000
 -# Uncomment if you want to disable building the shared library.
 -#SHARED_LIBS = 
 diff --git a/include/elf.h b/include/elf.h
-index 72d17c3a..07127b4f 100644
+index 72d17c3..07127b4 100644
 --- a/include/elf.h
 +++ b/include/elf.h
 @@ -1058,6 +1058,8 @@ typedef struct {
@@ -206,9 +206,9 @@ index 72d17c3a..07127b4f 100644
  
  typedef struct {
    Elf32_Word n_namesz;
-diff --git a/include/futex_calls.h b/include/futex_calls.h
+diff --git b/include/futex_calls.h b/include/futex_calls.h
 new file mode 100644
-index 00000000..217f8e72
+index 0000000..217f8e7
 --- /dev/null
 +++ b/include/futex_calls.h
 @@ -0,0 +1,26 @@
@@ -239,7 +239,7 @@ index 00000000..217f8e72
 +#endif /* _FUTEX_CALLS_H_ */
 +
 diff --git a/include/signal.h b/include/signal.h
-index c347f861..f741bd05 100644
+index c347f86..f741bd0 100644
 --- a/include/signal.h
 +++ b/include/signal.h
 @@ -212,9 +212,13 @@ int __libc_current_sigrtmax(void);
@@ -257,7 +257,7 @@ index c347f861..f741bd05 100644
  int sigismember(const sigset_t *, int);
  
 diff --git a/ldso/dynlink.c b/ldso/dynlink.c
-index 324aa859..d06cfd66 100644
+index 324aa85..d06cfd6 100644
 --- a/ldso/dynlink.c
 +++ b/ldso/dynlink.c
 @@ -1072,7 +1072,7 @@ static struct dso *load_library(const char *name, struct dso *needed_by)
@@ -270,7 +270,7 @@ index 324aa859..d06cfd66 100644
  		for (rp=reserved; *rp; rp=next) {
  			next = strchr(rp, '.') + 1;
 diff --git a/src/internal/atomic.h b/src/internal/atomic.h
-index 96c1552d..e8b6c8fb 100644
+index 96c1552..e8b6c8f 100644
 --- a/src/internal/atomic.h
 +++ b/src/internal/atomic.h
 @@ -19,12 +19,13 @@
@@ -386,7 +386,7 @@ index 96c1552d..e8b6c8fb 100644
  #endif
  
 diff --git a/src/internal/pthread_impl.h b/src/internal/pthread_impl.h
-index de2b9d8b..0ad05271 100644
+index de2b9d8..0ad0527 100644
 --- a/src/internal/pthread_impl.h
 +++ b/src/internal/pthread_impl.h
 @@ -194,7 +194,7 @@ extern hidden volatile int __abort_lock[1];
@@ -399,7 +399,7 @@ index de2b9d8b..0ad05271 100644
  
  #define DEFAULT_STACK_MAX (8<<20)
 diff --git a/src/legacy/utmpx.c b/src/legacy/utmpx.c
-index 7aa65da3..81b93353 100644
+index 7aa65da..81b9335 100644
 --- a/src/legacy/utmpx.c
 +++ b/src/legacy/utmpx.c
 @@ -13,21 +13,25 @@ void setutxent(void)
@@ -428,9 +428,9 @@ index 7aa65da3..81b93353 100644
  	return NULL;
  }
  
-diff --git a/src/signal/libc_internal_signals.c b/src/signal/libc_internal_signals.c
+diff --git b/src/signal/libc_internal_signals.c b/src/signal/libc_internal_signals.c
 new file mode 100644
-index 00000000..36140e70
+index 0000000..36140e7
 --- /dev/null
 +++ b/src/signal/libc_internal_signals.c
 @@ -0,0 +1,9 @@
@@ -444,7 +444,7 @@ index 00000000..36140e70
 +
 +unsigned num_libc_internal_signals = 3;
 diff --git a/src/signal/sigdelset.c b/src/signal/sigdelset.c
-index ce69280e..1a86aa60 100644
+index ce69280..1a86aa6 100644
 --- a/src/signal/sigdelset.c
 +++ b/src/signal/sigdelset.c
 @@ -1,13 +1,23 @@
@@ -473,9 +473,9 @@ index ce69280e..1a86aa60 100644
 +	}
 +	return sigdelsetyolo(set, sig);
 +}
-diff --git a/src/thread/futex_calls.c b/src/thread/futex_calls.c
+diff --git b/src/thread/futex_calls.c b/src/thread/futex_calls.c
 new file mode 100644
-index 00000000..255dc027
+index 0000000..255dc02
 --- /dev/null
 +++ b/src/thread/futex_calls.c
 @@ -0,0 +1,55 @@
@@ -535,7 +535,7 @@ index 00000000..255dc027
 +
 +
 diff --git a/src/thread/pthread_cond_timedwait.c b/src/thread/pthread_cond_timedwait.c
-index 6b761455..4aa84d3a 100644
+index 6b76145..4aa84d3 100644
 --- a/src/thread/pthread_cond_timedwait.c
 +++ b/src/thread/pthread_cond_timedwait.c
 @@ -1,4 +1,5 @@
@@ -555,7 +555,7 @@ index 6b761455..4aa84d3a 100644
  
  enum {
 diff --git a/src/thread/pthread_mutex_timedlock.c b/src/thread/pthread_mutex_timedlock.c
-index 9279fc54..cf34dc84 100644
+index 9279fc5..cf34dc8 100644
 --- a/src/thread/pthread_mutex_timedlock.c
 +++ b/src/thread/pthread_mutex_timedlock.c
 @@ -1,22 +1,5 @@
@@ -591,3 +591,290 @@ index 9279fc54..cf34dc84 100644
  	while (e==EINTR);
  	if (e) self->robust_list.pending = 0;
  
+diff --git b/src/ucontext/x86_64/makecontext.c b/src/ucontext/x86_64/makecontext.c
+new file mode 100644
+index 0000000..1feeb4f
+--- /dev/null
++++ b/src/ucontext/x86_64/makecontext.c
+@@ -0,0 +1,84 @@
++#define _GNU_SOURCE
++#include <signal.h>
++#include <stdarg.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <ucontext.h>
++
++/* Compile-time verification of every offset used in ucontext.s (pure C99). */
++#define UCONTEXT_ASSERT(name, cond) typedef char ucontext_assert_##name[(cond) ? 1 : -1]
++
++UCONTEXT_ASSERT(off_r8,      offsetof(ucontext_t, uc_mcontext.gregs[REG_R8])  == 40);
++UCONTEXT_ASSERT(off_r9,      offsetof(ucontext_t, uc_mcontext.gregs[REG_R9])  == 48);
++UCONTEXT_ASSERT(off_r12,     offsetof(ucontext_t, uc_mcontext.gregs[REG_R12]) == 72);
++UCONTEXT_ASSERT(off_r13,     offsetof(ucontext_t, uc_mcontext.gregs[REG_R13]) == 80);
++UCONTEXT_ASSERT(off_r14,     offsetof(ucontext_t, uc_mcontext.gregs[REG_R14]) == 88);
++UCONTEXT_ASSERT(off_r15,     offsetof(ucontext_t, uc_mcontext.gregs[REG_R15]) == 96);
++UCONTEXT_ASSERT(off_rdi,     offsetof(ucontext_t, uc_mcontext.gregs[REG_RDI]) == 104);
++UCONTEXT_ASSERT(off_rsi,     offsetof(ucontext_t, uc_mcontext.gregs[REG_RSI]) == 112);
++UCONTEXT_ASSERT(off_rbp,     offsetof(ucontext_t, uc_mcontext.gregs[REG_RBP]) == 120);
++UCONTEXT_ASSERT(off_rbx,     offsetof(ucontext_t, uc_mcontext.gregs[REG_RBX]) == 128);
++UCONTEXT_ASSERT(off_rdx,     offsetof(ucontext_t, uc_mcontext.gregs[REG_RDX]) == 136);
++UCONTEXT_ASSERT(off_rcx,     offsetof(ucontext_t, uc_mcontext.gregs[REG_RCX]) == 152);
++UCONTEXT_ASSERT(off_rsp,     offsetof(ucontext_t, uc_mcontext.gregs[REG_RSP]) == 160);
++UCONTEXT_ASSERT(off_rip,     offsetof(ucontext_t, uc_mcontext.gregs[REG_RIP]) == 168);
++UCONTEXT_ASSERT(off_fpregs,  offsetof(ucontext_t, uc_mcontext.fpregs)         == 224);
++UCONTEXT_ASSERT(off_sigmask, offsetof(ucontext_t, uc_sigmask)                 == 296);
++UCONTEXT_ASSERT(off_fpmem,   offsetof(ucontext_t, __fpregs_mem)               == 424);
++UCONTEXT_ASSERT(off_mxcsr,   offsetof(ucontext_t, __fpregs_mem) + offsetof(struct _fpstate, mxcsr) == 448);
++UCONTEXT_ASSERT(sig_block,   SIG_BLOCK == 0);
++UCONTEXT_ASSERT(sig_setmask, SIG_SETMASK == 2);
++
++extern void __yolomusl_start_context(void);
++
++void makecontext(ucontext_t *ucp, void (*func)(), int argc, ...)
++{
++	uintptr_t *sp;
++	va_list ap;
++	int i;
++	int extra = argc > 6 ? argc - 6 : 0;
++	int slots = 1 + extra + 1;
++
++	/* Ensure %rsp % 16 == 8 on entry to func per System V AMD64 ABI. */
++	if ((slots & 1) == 0)
++		slots += 1;
++
++	sp = (uintptr_t *)(((uintptr_t)ucp->uc_stack.ss_sp + ucp->uc_stack.ss_size) & ~(uintptr_t)15);
++	sp -= slots;
++
++	sp[0] = (uintptr_t)&__yolomusl_start_context;
++	sp[1 + extra] = (uintptr_t)ucp->uc_link;
++
++	ucp->uc_mcontext.gregs[REG_RIP] = (greg_t)(uintptr_t)func;
++	ucp->uc_mcontext.gregs[REG_RSP] = (greg_t)(uintptr_t)sp;
++	ucp->uc_mcontext.gregs[REG_RBX] = (greg_t)(uintptr_t)&sp[1 + extra];
++
++	va_start(ap, argc);
++	for (i = 0; i < argc; i++) {
++		greg_t val = va_arg(ap, greg_t);
++		switch (i) {
++		case 0:
++			ucp->uc_mcontext.gregs[REG_RDI] = val;
++			break;
++		case 1:
++			ucp->uc_mcontext.gregs[REG_RSI] = val;
++			break;
++		case 2:
++			ucp->uc_mcontext.gregs[REG_RDX] = val;
++			break;
++		case 3:
++			ucp->uc_mcontext.gregs[REG_RCX] = val;
++			break;
++		case 4:
++			ucp->uc_mcontext.gregs[REG_R8] = val;
++			break;
++		case 5:
++			ucp->uc_mcontext.gregs[REG_R9] = val;
++			break;
++		default:
++			sp[1 + (i - 6)] = (uintptr_t)val;
++			break;
++		}
++	}
++	va_end(ap);
++}
+diff --git b/src/ucontext/x86_64/ucontext.s b/src/ucontext/x86_64/ucontext.s
+new file mode 100644
+index 0000000..3fac270
+--- /dev/null
++++ b/src/ucontext/x86_64/ucontext.s
+@@ -0,0 +1,191 @@
++/* x86_64 Linux ucontext implementation for yolomusl.
++ *
++ * Field offsets match arch/x86_64/bits/signal.h (verified at compile time
++ * in src/ucontext/x86_64/makecontext.c):
++ *   gregs[REG_R8..REG_RIP]: 40..168
++ *   uc_mcontext.fpregs:     224
++ *   uc_sigmask:             296
++ *   __fpregs_mem:           424
++ *   __fpregs_mem.mxcsr:     448
++ */
++
++.text
++
++.global getcontext
++.type getcontext,@function
++getcontext:
++	movq %rbx, 128(%rdi)
++	movq %rbp, 120(%rdi)
++	movq %r12, 72(%rdi)
++	movq %r13, 80(%rdi)
++	movq %r14, 88(%rdi)
++	movq %r15, 96(%rdi)
++	movq %rdi, 104(%rdi)
++	movq %rsi, 112(%rdi)
++	movq %rdx, 136(%rdi)
++	movq %rcx, 152(%rdi)
++	movq %r8,  40(%rdi)
++	movq %r9,  48(%rdi)
++
++	movq (%rsp), %rcx
++	movq %rcx, 168(%rdi)
++	leaq 8(%rsp), %rcx
++	movq %rcx, 160(%rdi)
++
++	leaq 424(%rdi), %rcx
++	movq %rcx, 224(%rdi)
++	fnstenv (%rcx)
++	fldenv (%rcx)
++	stmxcsr 448(%rdi)
++
++	/* rt_sigprocmask(SIG_BLOCK=0, NULL, &ucp->uc_sigmask, 8) */
++	leaq 296(%rdi), %rdx
++	xorl %esi, %esi
++	xorl %edi, %edi
++	movl $8, %r10d
++	movl $14, %eax
++	syscall
++	cmpq $-4095, %rax
++	jae 1f
++	xorl %eax, %eax
++	ret
++1:
++	movq $-1, %rax
++	ret
++.size getcontext,.-getcontext
++
++.global setcontext
++.type setcontext,@function
++setcontext:
++	pushq %rdi
++
++	/* rt_sigprocmask(SIG_SETMASK=2, &ucp->uc_sigmask, NULL, 8) */
++	leaq 296(%rdi), %rsi
++	xorl %edx, %edx
++	movl $2, %edi
++	movl $8, %r10d
++	movl $14, %eax
++	syscall
++	popq %rdx
++	cmpq $-4095, %rax
++	jae 1f
++
++	movq 224(%rdx), %rcx
++	fldenv (%rcx)
++	ldmxcsr 448(%rdx)
++
++	movq 160(%rdx), %rsp
++	movq 128(%rdx), %rbx
++	movq 120(%rdx), %rbp
++	movq 72(%rdx),  %r12
++	movq 80(%rdx),  %r13
++	movq 88(%rdx),  %r14
++	movq 96(%rdx),  %r15
++
++	movq 168(%rdx), %rcx
++	pushq %rcx
++
++	movq 112(%rdx), %rsi
++	movq 104(%rdx), %rdi
++	movq 152(%rdx), %rcx
++	movq 40(%rdx),  %r8
++	movq 48(%rdx),  %r9
++	movq 136(%rdx), %rdx
++
++	xorl %eax, %eax
++	ret
++1:
++	movq $-1, %rax
++	ret
++.size setcontext,.-setcontext
++
++.global swapcontext
++.type swapcontext,@function
++swapcontext:
++	movq %rbx, 128(%rdi)
++	movq %rbp, 120(%rdi)
++	movq %r12, 72(%rdi)
++	movq %r13, 80(%rdi)
++	movq %r14, 88(%rdi)
++	movq %r15, 96(%rdi)
++	movq %rdi, 104(%rdi)
++	movq %rsi, 112(%rdi)
++	movq %rdx, 136(%rdi)
++	movq %rcx, 152(%rdi)
++	movq %r8,  40(%rdi)
++	movq %r9,  48(%rdi)
++
++	movq (%rsp), %rcx
++	movq %rcx, 168(%rdi)
++	leaq 8(%rsp), %rcx
++	movq %rcx, 160(%rdi)
++
++	leaq 424(%rdi), %rcx
++	movq %rcx, 224(%rdi)
++	fnstenv (%rcx)
++	stmxcsr 448(%rdi)
++
++	movq %rsi, %r12
++	movq %rdi, %r13
++
++	/* rt_sigprocmask(SIG_SETMASK=2, &ucp->uc_sigmask, &oucp->uc_sigmask, 8) */
++	leaq 296(%rdi), %rdx
++	leaq 296(%rsi), %rsi
++	movl $2, %edi
++	movl $8, %r10d
++	movl $14, %eax
++	syscall
++	cmpq $-4095, %rax
++	jae 1f
++
++	movq %r12, %rdx
++
++	movq 224(%rdx), %rcx
++	fldenv (%rcx)
++	ldmxcsr 448(%rdx)
++
++	movq 160(%rdx), %rsp
++	movq 128(%rdx), %rbx
++	movq 120(%rdx), %rbp
++	movq 72(%rdx),  %r12
++	movq 80(%rdx),  %r13
++	movq 88(%rdx),  %r14
++	movq 96(%rdx),  %r15
++
++	movq 168(%rdx), %rcx
++	pushq %rcx
++
++	movq 112(%rdx), %rsi
++	movq 104(%rdx), %rdi
++	movq 152(%rdx), %rcx
++	movq 40(%rdx),  %r8
++	movq 48(%rdx),  %r9
++	movq 136(%rdx), %rdx
++
++	xorl %eax, %eax
++	ret
++1:
++	movq 72(%r13), %r12
++	movq 80(%r13), %r13
++	movq $-1, %rax
++	ret
++.size swapcontext,.-swapcontext
++
++.hidden __yolomusl_start_context
++.global __yolomusl_start_context
++.type __yolomusl_start_context,@function
++__yolomusl_start_context:
++	movq (%rbx), %rdi
++	movq %rbx, %rsp
++	andq $-16, %rsp
++	testq %rdi, %rdi
++	je 1f
++	call setcontext
++1:
++	xorl %edi, %edi
++	movl $231, %eax
++	syscall
++	hlt
++.size __yolomusl_start_context,.-__yolomusl_start_context
++
++.section .note.GNU-stack,"",@progbits

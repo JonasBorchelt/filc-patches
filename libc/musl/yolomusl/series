@@ -1,3 +1,2 @@
 # Fil-C yolomusl patch series (applied to upstream musl f314e133929b6379eccc632bef32eaebb66a7335)
 01-yolomusl-filc.patch
-02-yolomusl-x86_64-ucontext.patch

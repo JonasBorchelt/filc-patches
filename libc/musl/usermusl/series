@@ -1,5 +1,3 @@
 # Fil-C usermusl patch series (applied to upstream musl f314e133929b6379eccc632bef32eaebb66a7335)
 01-usermusl-filc.patch
-02-usermusl-stdout-write-preserve-errno.patch
 03-usermusl-fenv-runtime.patch
-04-usermusl-ucontext-fiber.patch

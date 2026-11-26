@@ -1,5 +1,2 @@
 # Fil-C runtime compatibility patch series (applied on top of FILC_COMMIT)
 01-filc-runtime-fenv.patch
-02-filc-runtime-semctl-getall-setall.patch
-03-filc-runtime-prctl-tgid-comm.patch
-04-filc-runtime-fiber-context-musl.patch

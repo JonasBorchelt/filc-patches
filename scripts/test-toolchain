@@ -220,6 +220,8 @@ static void exercise_runtime_alloc_and_gc(void) {
         p[0] = (char)i;
         p[sizes[i] - 1] = (char)(i ^ 0x5a);
         sink_ptr = p;
+        if (sink_ptr != p)
+            abort();
         free(p);
     }
     zgc_request_and_wait();

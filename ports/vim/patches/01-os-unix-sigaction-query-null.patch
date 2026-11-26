@@ -1,0 +1,17 @@
+Subject: Pass NULL act to sigaction() when querying handler with func == SIG_ERR
+Policy-Class: P2-Package
+Rationale: In mch_signal(), querying the current handler with func == SIG_ERR filled sa.sa_handler = SIG_ERR and passed &sa to sigaction(), which fails capability validation under Fil-C. Passing NULL for the new sigaction when func == SIG_ERR is portable POSIX; the upstream configure sigaltstack hunk is replaced via ac_cv_func_sigaltstack=no ac_cv_func_sigstack=no.
+Upstream-Status: Pending
+Fil-C-Origin-Commits: 8553fcd026b9
+
+--- a/src/os_unix.c
++++ b/src/os_unix.c
+@@ -513,7 +513,7 @@
+ # else
+     sa.sa_flags = 0;
+ # endif
+-    if (sigaction(sig, &sa, &old) == -1)
++    if (sigaction(sig, func == SIG_ERR ? NULL : &sa, &old) == -1)
+ 	return SIG_ERR;
+     return blocked ? SIG_HOLD: old.sa_handler;
+ #elif defined(HAVE_SIGSET)

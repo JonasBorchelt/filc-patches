@@ -1,0 +1,58 @@
+NAME="make"
+VERSION="4.4.1"
+LICENSE="GPL-3.0-or-later"
+UPSTREAM_URL="https://ftp.gnu.org/gnu/make/make-4.4.1.tar.gz"
+UPSTREAM_SHA256="dd16fb1d67bfab79a72f5e8390735c49e3e8e70b4945a15ab1f81ddb78658fb3"
+UPSTREAM_SHA256_SOURCE="pgp:https://ftp.gnu.org/gnu/make/make-4.4.1.tar.gz.sig key:ports/pgp-keys/gnu-smith-release-key.asc fpr:6D4EEB02AD834703510B117680CB727A20C79BB2"
+UPSTREAM_SIG_URL="https://ftp.gnu.org/gnu/make/make-4.4.1.tar.gz.sig"
+UPSTREAM_PGP_KEY="ports/pgp-keys/gnu-smith-release-key.asc"
+UPSTREAM_PGP_FPR="6D4EEB02AD834703510B117680CB727A20C79BB2"
+EXTRACT_DIR="make-4.4.1"
+TIER=4
+DEPS=""
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--without-guile --disable-nls"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P2-Package"
+POLICY_RATIONALE="Applies a 1-line portable C fix (+1/-1 in src/expand.c) swapping strncmp() before (*ep)[nl] == '=' to eliminate an upstream out-of-bounds read on short environment entries (simplified from Fil-C make-4.4.1 zinbounds() check so no <stdfil.h> dependency is needed)."
+FILC_ORIGIN_REF="8553fcd026b9:projects/make-4.4.1"
+
+port_configure() {
+  ./configure --prefix="$PIZFIX" --without-guile --disable-nls
+}
+
+port_test() {
+  "$PIZFIX/bin/make" --version | grep -q 'GNU Make 4\.4\.1'
+
+  local td
+  td="$(mktemp -d)"
+  cat > "$td/Makefile" <<'EOF'
+GREETING := hello
+TARGET ?= filc
+
+all: out.txt
+	@cat out.txt
+
+out.txt:
+	@printf '%s-%s\n' "$(GREETING)" "$(TARGET)" > $@
+EOF
+  "$PIZFIX/bin/make" -C "$td" TARGET=make441 | grep -Fxq 'hello-make441'
+  test -f "$td/out.txt"
+  rm -rf "$td"
+}
+
+port_package_smoke() {
+  "$PKG_PREFIX/bin/make" --version | grep -q 'GNU Make 4\.4\.1'
+
+  local td
+  td="$(mktemp -d)"
+  cat > "$td/Makefile" <<'EOF'
+ITEMS := a b c
+all:
+	@printf '%s\n' "$(words $(ITEMS)):$(strip $(ITEMS))"
+EOF
+  "$PKG_PREFIX/bin/make" -C "$td" | grep -Fxq '3:a b c'
+  rm -rf "$td"
+}

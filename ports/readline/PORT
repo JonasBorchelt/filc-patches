@@ -1,0 +1,77 @@
+NAME="readline"
+VERSION="8.3"
+LICENSE="GPL-3.0-or-later"
+UPSTREAM_URL="https://ftp.gnu.org/gnu/readline/readline-8.3.tar.gz"
+UPSTREAM_SHA256="fe5383204467828cd495ee8d1d3c037a7eba1389c22bc6a041f627976f9061cc"
+UPSTREAM_SHA256_SOURCE="pgp:https://ftp.gnu.org/gnu/readline/readline-8.3.tar.gz.sig key:ports/pgp-keys/gnu-ramey-release-key.asc fpr:7C0135FB088AAF6C66C650B9BB5869F064EA74AB"
+UPSTREAM_SIG_URL="https://ftp.gnu.org/gnu/readline/readline-8.3.tar.gz.sig"
+UPSTREAM_PGP_KEY="ports/pgp-keys/gnu-ramey-release-key.asc"
+UPSTREAM_PGP_FPR="7C0135FB088AAF6C66C650B9BB5869F064EA74AB"
+EXTRACT_DIR="readline-8.3"
+TIER=2
+DEPS="ncurses"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--disable-static --with-curses"
+MAKE_ARGS="SHLIB_LIBS=-lncursesw"
+INSTALL_ARGS="SHLIB_LIBS=-lncursesw"
+TEST_CMD=""
+POLICY_CLASS="P3-BuildOpt"
+POLICY_RATIONALE="Builds unmodified upstream GNU readline 8.3 against staged Fil-C ncurses with zero source patches. Applies the standard LFS/Fil-C build-script adjustments from optfil/build_opt.sh (skip .old library renames, strip hardcoded -Wl,-rpath from support/shobj-conf, and link shared libraries with SHLIB_LIBS=-lncursesw)."
+FILC_ORIGIN_REF="optfil/build_opt.sh:readline-8.3"
+
+port_configure() {
+  sed -i '/MV.*old/d' Makefile.in
+  sed -i '/{OLDSUFF}/c:' support/shlib-install
+  sed -i 's/-Wl,-rpath,[^ ]*//' support/shobj-conf
+  CPPFLAGS="-I$PIZFIX/include -I$PIZFIX/include/ncursesw" \
+    LDFLAGS="-L$PIZFIX/lib" \
+    ./configure --prefix="$PIZFIX" --disable-static --with-curses
+}
+
+port_build() {
+  make -j"$JOBS" SHLIB_LIBS="-lncursesw"
+}
+
+port_install() {
+  make SHLIB_LIBS="-lncursesw" install
+}
+
+port_test() {
+  test -f "$PIZFIX/include/readline/readline.h"
+  test -f "$PIZFIX/include/readline/history.h"
+  test -f "$PIZFIX/lib/libreadline.so"
+  test -f "$PIZFIX/lib/libhistory.so"
+  test -f "$PIZFIX/lib/pkgconfig/readline.pc"
+
+  cat > "$SRC_DIR/_filc_test_readline.c" <<'EOF'
+#include <stdio.h>
+#include <string.h>
+#include <readline/readline.h>
+#include <readline/history.h>
+
+int main(void) {
+  if (!rl_library_version || strncmp(rl_library_version, "8.3", 3) != 0)
+    return 1;
+  using_history();
+  add_history("filc-readline-ok");
+  HIST_ENTRY *e = history_get(1);
+  if (!e || !e->line || strcmp(e->line, "filc-readline-ok") != 0)
+    return 2;
+  printf("READLINE_OK %s\n", rl_library_version);
+  return 0;
+}
+EOF
+  "$CC" -O2 -I"$PIZFIX/include" "$SRC_DIR/_filc_test_readline.c" \
+    -L"$PIZFIX/lib" -lreadline -lhistory -lncursesw \
+    -o "$SRC_DIR/_filc_test_readline"
+  "$SRC_DIR/_filc_test_readline" | grep -q '^READLINE_OK 8\.3'
+}
+
+port_package_smoke() {
+  test -f "$PKG_PREFIX/include/readline/readline.h"
+  test -f "$PKG_PREFIX/include/readline/history.h"
+  test -f "$PKG_PREFIX/lib/libreadline.so"
+  test -f "$PKG_PREFIX/lib/libhistory.so"
+  test -f "$PKG_PREFIX/lib/pkgconfig/readline.pc"
+  grep -Fq 'Version: 8.3' "$PKG_PREFIX/lib/pkgconfig/readline.pc"
+}

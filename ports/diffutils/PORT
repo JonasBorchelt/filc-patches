@@ -1,0 +1,62 @@
+NAME="diffutils"
+VERSION="3.12"
+LICENSE="GPL-3.0-or-later"
+UPSTREAM_URL="https://ftp.gnu.org/gnu/diffutils/diffutils-3.12.tar.xz"
+UPSTREAM_SHA256="7c8b7f9fc8609141fdea9cece85249d308624391ff61dedaf528fcb337727dfd"
+UPSTREAM_SHA256_SOURCE="pgp:https://ftp.gnu.org/gnu/diffutils/diffutils-3.12.tar.xz.sig key:ports/pgp-keys/gnu-meyering-release-key.asc fpr:155D3FC500C834486D1EEA677FD9FCCB000BEEEE"
+UPSTREAM_SIG_URL="https://ftp.gnu.org/gnu/diffutils/diffutils-3.12.tar.xz.sig"
+UPSTREAM_PGP_KEY="ports/pgp-keys/gnu-meyering-release-key.asc"
+UPSTREAM_PGP_FPR="155D3FC500C834486D1EEA677FD9FCCB000BEEEE"
+EXTRACT_DIR="diffutils-3.12"
+TIER=4
+DEPS=""
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--disable-nls --disable-rpath"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P2-Package"
+POLICY_RATIONALE="Applies a 1-line Fil-C guard (+1/-1 in lib/sigsegv.c) disabling raw sigsegv stack-overflow recovery under __FILC__, matching ports/grep and upstream Fil-C diffutils-3.12."
+FILC_ORIGIN_REF="8553fcd026b9:projects/diffutils-3.12"
+
+port_configure() {
+  ./configure --prefix="$PIZFIX" --disable-nls --disable-rpath
+}
+
+port_test() {
+  "$PIZFIX/bin/diff" --version | grep -q 'diff (GNU diffutils) 3\.12'
+  "$PIZFIX/bin/cmp" --version | grep -q 'cmp (GNU diffutils) 3\.12'
+
+  local td
+  td="$(mktemp -d)"
+  printf 'line1\nold\nline3\n' > "$td/a.txt"
+  printf 'line1\nnew\nline3\n' > "$td/b.txt"
+
+  "$PIZFIX/bin/cmp" -s "$td/a.txt" "$td/a.txt"
+  if "$PIZFIX/bin/cmp" -s "$td/a.txt" "$td/b.txt"; then
+    rm -rf "$td"
+    return 1
+  fi
+  "$PIZFIX/bin/diff" -u "$td/a.txt" "$td/b.txt" | grep -Fxq '+new' || test $? -eq 0
+  local out
+  out="$("$PIZFIX/bin/diff" -u "$td/a.txt" "$td/b.txt" || true)"
+  printf '%s\n' "$out" | grep -Fxq -- '-old'
+  printf '%s\n' "$out" | grep -Fxq -- '+new'
+  rm -rf "$td"
+}
+
+port_package_smoke() {
+  "$PKG_PREFIX/bin/diff" --version | grep -q 'diff (GNU diffutils) 3\.12'
+  "$PKG_PREFIX/bin/cmp" --version | grep -q 'cmp (GNU diffutils) 3\.12'
+
+  local td out
+  td="$(mktemp -d)"
+  printf 'alpha\nbeta\n' > "$td/1.txt"
+  printf 'alpha\ngamma\n' > "$td/2.txt"
+
+  "$PKG_PREFIX/bin/cmp" -s "$td/1.txt" "$td/1.txt"
+  out="$("$PKG_PREFIX/bin/diff" -u "$td/1.txt" "$td/2.txt" || true)"
+  printf '%s\n' "$out" | grep -Fxq -- '-beta'
+  printf '%s\n' "$out" | grep -Fxq -- '+gamma'
+  rm -rf "$td"
+}

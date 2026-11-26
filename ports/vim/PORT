@@ -1,0 +1,65 @@
+NAME="vim"
+VERSION="9.2"
+LICENSE="Vim"
+UPSTREAM_URL="https://www.vim.org/downloads/vim-9.2.tar.bz2"
+UPSTREAM_SHA256="3481983a2b36e71b7f887bf8590e9a4b50c820826c7bedb95155d0ca71fe385d"
+UPSTREAM_SHA256_SOURCE="unverified-upstream-no-checksum:https://www.vim.org/download.php"
+EXTRACT_DIR="vim92"
+TIER=4
+DEPS="ncurses"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--with-features=normal --enable-gui=no --without-x --disable-gpm --disable-canberra --disable-selinux --disable-acl --disable-nls --disable-libsodium --with-tlib=ncursesw --with-compiledby=Fil-C"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P2-Package"
+POLICY_RATIONALE="Audited down from Fil-C vim-9.1.0660 (2 files) and refreshed to official Vim 9.2: carries only a 1-line portable POSIX fix (+1/-1 in src/os_unix.c) passing NULL to sigaction() when querying with func == SIG_ERR. Replaces the upstream configure patch via P3-BuildOpt (ac_cv_func_sigaltstack=no ac_cv_func_sigstack=no) and neutralizes build host metadata with --with-compiledby=Fil-C."
+FILC_ORIGIN_REF="8553fcd026b9:projects/vim-9.1.0660 (refreshed to vim 9.2)"
+
+port_configure() {
+  CPPFLAGS="-I$PIZFIX/include -I$PIZFIX/include/ncursesw" \
+    LDFLAGS="-L$PIZFIX/lib" \
+    ac_cv_func_sigaltstack=no \
+    ac_cv_func_sigstack=no \
+    ./configure --prefix="$PIZFIX" \
+      --with-features=normal \
+      --enable-gui=no \
+      --without-x \
+      --disable-gpm \
+      --disable-canberra \
+      --disable-selinux \
+      --disable-acl \
+      --disable-nls \
+      --disable-libsodium \
+      --with-tlib=ncursesw \
+      --with-compiledby="Fil-C"
+}
+
+port_test() {
+  "$PIZFIX/bin/vim" --version | grep -q 'VIM - Vi IMproved 9\.2'
+
+  local td
+  td="$(mktemp -d)"
+  printf 'hello filc\nsecond line\n' > "$td/test.txt"
+  "$PIZFIX/bin/vim" -Nu NONE -n -es \
+    -c '%s/filc/FILC/g' \
+    -c 'wq' \
+    "$td/test.txt"
+  grep -Fxq 'hello FILC' "$td/test.txt"
+  grep -Fxq 'second line' "$td/test.txt"
+  rm -rf "$td"
+}
+
+port_package_smoke() {
+  "$PKG_PREFIX/bin/vim" --version | grep -q 'VIM - Vi IMproved 9\.2'
+
+  local td
+  td="$(mktemp -d)"
+  printf 'alpha 1\nbeta 2\n' > "$td/smoke.txt"
+  "$PKG_PREFIX/bin/vim" -Nu NONE -n -es \
+    -c 'g/^beta/s/2/42/' \
+    -c 'wq' \
+    "$td/smoke.txt"
+  grep -Fxq 'beta 42' "$td/smoke.txt"
+  rm -rf "$td"
+}

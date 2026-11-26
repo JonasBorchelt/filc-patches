@@ -1,0 +1,23 @@
+Subject: Guard variadic va_arg(vl, int*) in procps_pids_select with PROC_PID|PROC_UID
+Policy-Class: P2-Package
+Rationale: procps_pids_select() unconditionally called va_arg(vl, int*) even when neither PROC_PID nor PROC_UID was set in flags, reading past the end of the variadic argument list (UB trapped by Fil-C). Upstream Makefile.in --version-script hunk was dropped because our Fil-C toolchain supports -Wl,--version-script= natively.
+Upstream-Status: Pending
+Fil-C-Origin-Commits: 8553fcd026b9
+
+--- a/library/pids.c
++++ b/library/pids.c
+@@ -1097,12 +1097,12 @@
+         ...)
+ {
+     va_list vl;
+-    int *ids;
++    int *ids = NULL;
+     int num = 0;
+ 
+     if (*this == NULL) {
+         va_start(vl, flags);
+-        ids = va_arg(vl, int*);
++        if (flags & (PROC_PID | PROC_UID)) ids = va_arg(vl, int*);
+         if (flags & PROC_UID) num = va_arg(vl, int);
+         va_end(vl);
+         if (NULL == (*this = openproc(flags, ids, num)))

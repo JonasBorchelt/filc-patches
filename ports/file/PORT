@@ -1,0 +1,73 @@
+NAME="file"
+VERSION="5.48"
+LICENSE="BSD-2-Clause"
+UPSTREAM_URL="https://astron.com/pub/file/file-5.48.tar.gz"
+UPSTREAM_SHA256="ed14656883b23a364b4057c05595d93252da9bc473d30106519519d0da141283"
+UPSTREAM_SHA256_SOURCE="pgp:https://astron.com/pub/file/file-5.48.tar.gz.asc key:ports/pgp-keys/file-zoulas-release-key.asc fpr:BE04995BA8F90ED0C0C176C471112AB16CB33B3A"
+UPSTREAM_SIG_URL="https://astron.com/pub/file/file-5.48.tar.gz.asc"
+UPSTREAM_PGP_KEY="ports/pgp-keys/file-zoulas-release-key.asc"
+UPSTREAM_PGP_FPR="BE04995BA8F90ED0C0C176C471112AB16CB33B3A"
+EXTRACT_DIR="file-5.48"
+TIER=4
+DEPS="zlib bzip2 xz zstd"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--enable-zlib --enable-bzlib --enable-xzlib --enable-zstdlib --disable-lzlib --disable-lrziplib --disable-libseccomp --disable-landlock"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P3-BuildOpt"
+POLICY_RATIONALE="Builds unmodified upstream file 5.48 (file CLI and libmagic) with zero source patches against staged Fil-C zlib, bzip2, xz, and zstd. Explicitly disables seccomp and Landlock sandboxing (--disable-libseccomp --disable-landlock) so Fil-C runtime syscalls are not blocked."
+FILC_ORIGIN_REF="pizlix/build_postlc_sub2_chroot_part1.sh:file-5.45 (refreshed to 5.48)"
+
+port_configure() {
+  CPPFLAGS="-I$PIZFIX/include" \
+    LDFLAGS="-L$PIZFIX/lib" \
+    ./configure --prefix="$PIZFIX" \
+      --enable-zlib --enable-bzlib --enable-xzlib --enable-zstdlib \
+      --disable-lzlib --disable-lrziplib \
+      --disable-libseccomp --disable-landlock
+}
+
+port_test() {
+  "$PIZFIX/bin/file" --version | grep -q 'file-5\.48'
+  test -f "$PIZFIX/include/magic.h"
+  test -f "$PIZFIX/lib/libmagic.so"
+  test -f "$PIZFIX/lib/pkgconfig/libmagic.pc"
+  test -f "$PIZFIX/share/misc/magic.mgc"
+
+  local td
+  td="$(mktemp -d)"
+  printf 'hello filc world\n' > "$td/hello.txt"
+  printf '#!/bin/sh\necho ok\n' > "$td/run.sh"
+
+  "$PIZFIX/bin/file" -b "$td/hello.txt" | grep -qi 'ASCII text'
+  "$PIZFIX/bin/file" -b "$td/run.sh" | grep -qi 'POSIX shell script'
+  "$PIZFIX/bin/file" -b "$PIZFIX/bin/file" | grep -q 'ELF'
+  if command -v gzip >/dev/null 2>&1; then
+    gzip -c "$td/hello.txt" > "$td/hello.txt.gz"
+    "$PIZFIX/bin/file" -b -z "$td/hello.txt.gz" | grep -qi 'ASCII text'
+  fi
+  rm -rf "$td"
+}
+
+port_package_smoke() {
+  "$PKG_PREFIX/bin/file" --version | grep -q 'file-5\.48'
+  test -f "$PKG_PREFIX/include/magic.h"
+  test -f "$PKG_PREFIX/lib/libmagic.so"
+  test -f "$PKG_PREFIX/lib/pkgconfig/libmagic.pc"
+  test -f "$PKG_PREFIX/share/misc/magic.mgc"
+
+  local td
+  td="$(mktemp -d)"
+  printf 'packaged filc test\n' > "$td/sample.txt"
+  printf '#!/bin/sh\ntrue\n' > "$td/sample.sh"
+
+  "$PKG_PREFIX/bin/file" -m "$PKG_PREFIX/share/misc/magic.mgc" -b "$td/sample.txt" | grep -qi 'ASCII text'
+  "$PKG_PREFIX/bin/file" -m "$PKG_PREFIX/share/misc/magic.mgc" -b "$td/sample.sh" | grep -qi 'POSIX shell script'
+  "$PKG_PREFIX/bin/file" -m "$PKG_PREFIX/share/misc/magic.mgc" -b "$PKG_PREFIX/bin/file" | grep -q 'ELF'
+  if command -v gzip >/dev/null 2>&1; then
+    gzip -c "$td/sample.txt" > "$td/sample.txt.gz"
+    "$PKG_PREFIX/bin/file" -m "$PKG_PREFIX/share/misc/magic.mgc" -b -z "$td/sample.txt.gz" | grep -qi 'ASCII text'
+  fi
+  rm -rf "$td"
+}

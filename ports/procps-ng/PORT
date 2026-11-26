@@ -1,0 +1,51 @@
+NAME="procps-ng"
+VERSION="4.0.7"
+LICENSE="GPL-2.0-or-later AND LGPL-2.1-or-later"
+UPSTREAM_URL="https://sourceforge.net/projects/procps-ng/files/Production/procps-ng-4.0.7.tar.xz/download"
+UPSTREAM_SHA256="9d2021f47a4501c667862c9942a92d1953694b21d11bcd1702e83eb594e3d67d"
+UPSTREAM_SHA256_SOURCE="pgp:https://sourceforge.net/projects/procps-ng/files/Production/procps-ng-4.0.7.tar.xz.asc/download key:ports/pgp-keys/procps-small-release-key.asc fpr:5D2FB320B825D93904D205193938F96BDF50FEA5"
+UPSTREAM_SIG_URL="https://sourceforge.net/projects/procps-ng/files/Production/procps-ng-4.0.7.tar.xz.asc/download"
+UPSTREAM_PGP_KEY="ports/pgp-keys/procps-small-release-key.asc"
+UPSTREAM_PGP_FPR="5D2FB320B825D93904D205193938F96BDF50FEA5"
+EXTRACT_DIR="procps-ng-4.0.7"
+TIER=4
+DEPS="ncurses pkgconf"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--disable-static --disable-nls --disable-rpath --without-systemd --without-elogind"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P2-Package"
+POLICY_RATIONALE="Audited down from Fil-C procps-ng-4.0.7 (2 files) to 1 portable 2-line fix (+2/-2 in library/pids.c) guarding va_arg(vl, int*) behind (flags & (PROC_PID | PROC_UID)). Dropped the upstream Makefile.in --version-script patch because the Fil-C toolchain supports -Wl,--version-script= natively."
+FILC_ORIGIN_REF="8553fcd026b9:projects/procps-ng-4.0.7"
+
+port_configure() {
+  CPPFLAGS="-I$PIZFIX/include -I$PIZFIX/include/ncursesw" \
+    LDFLAGS="-L$PIZFIX/lib" \
+    PKG_CONFIG="$PIZFIX/bin/pkg-config --define-prefix" \
+    PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" \
+    ./configure --prefix="$PIZFIX" \
+      --disable-static \
+      --disable-nls \
+      --disable-rpath \
+      --without-systemd \
+      --without-elogind
+}
+
+port_test() {
+  "$PIZFIX/bin/ps" --version | grep -q 'procps-ng 4\.0\.7'
+  "$PIZFIX/bin/free" --version | grep -q 'procps-ng 4\.0\.7'
+  "$PIZFIX/bin/ps" -p "$$" -o pid=,comm= | grep -q "$$"
+  "$PIZFIX/bin/free" -b | grep -qi 'mem:'
+  "$PIZFIX/bin/pgrep" -x -f ".*" >/dev/null || "$PIZFIX/bin/pgrep" -P 0 >/dev/null || true
+  "$PIZFIX/bin/uptime" -p | grep -qi 'up'
+}
+
+port_package_smoke() {
+  "$PKG_PREFIX/bin/ps" --version | grep -q 'procps-ng 4\.0\.7'
+  "$PKG_PREFIX/bin/free" --version | grep -q 'procps-ng 4\.0\.7'
+  "$PKG_PREFIX/bin/ps" -p "$$" -o pid= | tr -d ' ' | grep -Fxq "$$"
+  "$PKG_PREFIX/bin/free" -b | grep -qi 'mem:'
+  test -f "$PKG_PREFIX/lib/libproc2.so"
+  test -f "$PKG_PREFIX/lib/pkgconfig/libproc2.pc"
+}

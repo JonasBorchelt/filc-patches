@@ -1,0 +1,68 @@
+NAME="tar"
+VERSION="1.35"
+LICENSE="GPL-3.0-or-later"
+UPSTREAM_URL="https://ftp.gnu.org/gnu/tar/tar-1.35.tar.xz"
+UPSTREAM_SHA256="4d62ff37342ec7aed748535323930c7cf94acf71c3591882b26a7ea50f3edc16"
+UPSTREAM_SHA256_SOURCE="pgp:https://ftp.gnu.org/gnu/tar/tar-1.35.tar.xz.sig key:ports/pgp-keys/gnu-poznyakoff-release-key.asc fpr:325F650C4C2B6AD58807327A3602B07F55D0C732"
+UPSTREAM_SIG_URL="https://ftp.gnu.org/gnu/tar/tar-1.35.tar.xz.sig"
+UPSTREAM_PGP_KEY="ports/pgp-keys/gnu-poznyakoff-release-key.asc"
+UPSTREAM_PGP_FPR="325F650C4C2B6AD58807327A3602B07F55D0C732"
+EXTRACT_DIR="tar-1.35"
+TIER=4
+DEPS="gzip bzip2 xz zstd"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--without-posix-acls --without-selinux --disable-nls --disable-rpath"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P2-Package"
+POLICY_RATIONALE="Audited down from Fil-C tar-1.35 (3 files) to 2 core gnulib files (gnu/obstack.c, gnu/obstack.h) matching ports/sed and ports/grep: preserves capability provenance via zmkptr() and allocates one object per obstack chunk. Dropped src/xattrs.c libacl rename hunk by configuring --without-posix-acls --without-selinux."
+FILC_ORIGIN_REF="8553fcd026b9:projects/tar-1.35"
+
+port_configure() {
+  FORCE_UNSAFE_CONFIGURE=1 \
+    ./configure --prefix="$PIZFIX" \
+      --without-posix-acls \
+      --without-selinux \
+      --disable-nls \
+      --disable-rpath
+}
+
+port_test() {
+  "$PIZFIX/bin/tar" --version | grep -q 'tar (GNU tar) 1\.35'
+
+  local td
+  td="$(mktemp -d)"
+  mkdir -p "$td/src/sub" "$td/out-xz" "$td/out-zstd"
+  printf 'tar-filc-payload-1\n' > "$td/src/a.txt"
+  printf 'tar-filc-payload-2\n' > "$td/src/sub/b.txt"
+
+  PATH="$PIZFIX/bin:$PATH" "$PIZFIX/bin/tar" -C "$td/src" --xz -cf "$td/archive.tar.xz" a.txt sub/b.txt
+  PATH="$PIZFIX/bin:$PATH" "$PIZFIX/bin/tar" -C "$td/out-xz" --xz -xf "$td/archive.tar.xz"
+  cmp "$td/src/a.txt" "$td/out-xz/a.txt"
+  cmp "$td/src/sub/b.txt" "$td/out-xz/sub/b.txt"
+
+  PATH="$PIZFIX/bin:$PATH" "$PIZFIX/bin/tar" -C "$td/src" --zstd -cf "$td/archive.tar.zst" a.txt sub/b.txt
+  PATH="$PIZFIX/bin:$PATH" "$PIZFIX/bin/tar" -C "$td/out-zstd" --zstd -xf "$td/archive.tar.zst"
+  cmp "$td/src/a.txt" "$td/out-zstd/a.txt"
+  cmp "$td/src/sub/b.txt" "$td/out-zstd/sub/b.txt"
+  rm -rf "$td"
+}
+
+port_package_smoke() {
+  "$PKG_PREFIX/bin/tar" --version | grep -q 'tar (GNU tar) 1\.35'
+
+  local td
+  td="$(mktemp -d)"
+  mkdir -p "$td/in" "$td/out-xz" "$td/out-zstd"
+  printf 'pkg-tar-roundtrip\n' > "$td/in/hello.txt"
+
+  "$PKG_PREFIX/bin/tar" -C "$td/in" --xz -cf "$td/test.tar.xz" hello.txt
+  "$PKG_PREFIX/bin/tar" -C "$td/out-xz" --xz -xf "$td/test.tar.xz"
+  grep -Fxq 'pkg-tar-roundtrip' "$td/out-xz/hello.txt"
+
+  "$PKG_PREFIX/bin/tar" -C "$td/in" --zstd -cf "$td/test.tar.zst" hello.txt
+  "$PKG_PREFIX/bin/tar" -C "$td/out-zstd" --zstd -xf "$td/test.tar.zst"
+  grep -Fxq 'pkg-tar-roundtrip' "$td/out-zstd/hello.txt"
+  rm -rf "$td"
+}

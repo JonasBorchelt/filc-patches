@@ -1,0 +1,47 @@
+NAME="gawk"
+VERSION="5.4.2"
+LICENSE="GPL-3.0-or-later"
+UPSTREAM_URL="https://ftp.gnu.org/gnu/gawk/gawk-5.4.2.tar.xz"
+UPSTREAM_SHA256="b95e4909533b5f988c6b5e5539b3b3ddf76e7d7df02ca2e5b5b7d6f62db78e6a"
+UPSTREAM_SHA256_SOURCE="pgp:https://ftp.gnu.org/gnu/gawk/gawk-5.4.2.tar.xz.sig key:ports/pgp-keys/gnu-robbins-release-key.asc fpr:D1967C63788713177D861ED7DF597815937EC0D2"
+UPSTREAM_SIG_URL="https://ftp.gnu.org/gnu/gawk/gawk-5.4.2.tar.xz.sig"
+UPSTREAM_PGP_KEY="ports/pgp-keys/gnu-robbins-release-key.asc"
+UPSTREAM_PGP_FPR="D1967C63788713177D861ED7DF597815937EC0D2"
+EXTRACT_DIR="gawk-5.4.2"
+TIER=4
+DEPS=""
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--disable-pma --disable-mpfr --without-readline"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P3-BuildOpt"
+POLICY_RATIONALE="Builds unmodified upstream GNU gawk 5.4.2 with zero source patches. Passes --disable-pma to avoid gawk's fixed-address persistent memory allocator under Fil-C, and --disable-mpfr --without-readline to keep the recipe self-contained with zero external dependencies."
+FILC_ORIGIN_REF="optfil/build_opt.sh:gawk-5.4.1 (refreshed to 5.4.2)"
+
+port_configure() {
+  ./configure --prefix="$PIZFIX" --disable-pma --disable-mpfr --without-readline
+}
+
+port_test() {
+  "$PIZFIX/bin/gawk" --version | grep -q 'GNU Awk 5\.4\.2'
+  test -x "$PIZFIX/bin/awk"
+
+  printf 'alpha 10\nbeta 20\nalpha 12\n' | "$PIZFIX/bin/gawk" '
+    { sum[$1] += $2 }
+    END {
+      out = gensub(/^a/, "A", 1, "alpha")
+      printf "%s=%d beta=%d\n", out, sum["alpha"], sum["beta"]
+    }
+  ' | grep -Fxq 'Alpha=22 beta=20'
+}
+
+port_package_smoke() {
+  "$PKG_PREFIX/bin/gawk" --version | grep -q 'GNU Awk 5\.4\.2'
+  test -x "$PKG_PREFIX/bin/awk"
+
+  printf 'x:3\ny:4\nx:5\n' | "$PKG_PREFIX/bin/awk" -F: '
+    { acc[$1] += $2 }
+    END { printf "x=%d,y=%d\n", acc["x"], acc["y"] }
+  ' | grep -Fxq 'x=8,y=4'
+}

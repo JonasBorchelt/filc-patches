@@ -1,0 +1,17 @@
+Subject: Disable raw sigsegv stack-overflow recovery under __FILC__
+Policy-Class: P2-Package
+Rationale: Gnulib's raw sigsegv stack-overflow recovery inspects low-level signal frames unsupported under Fil-C's memory-safe runtime; disabling it under __FILC__ matches ports/grep and ports/m4.
+Upstream-Status: Fil-C-Specific
+Fil-C-Origin-Commits: 8553fcd026b9
+
+--- a/lib/sigsegv.c
++++ b/lib/sigsegv.c
+@@ -1417,7 +1417,7 @@
+ stackoverflow_install_handler (stackoverflow_handler_t handler,
+                                void *extra_stack, size_t extra_stack_size)
+ {
+-#if HAVE_STACK_OVERFLOW_RECOVERY
++#if HAVE_STACK_OVERFLOW_RECOVERY && !defined(__FILC__)
+ # if HAVE_STACKVMA
+   if (!stack_top)
+     {

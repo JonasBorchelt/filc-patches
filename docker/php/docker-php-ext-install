@@ -1,0 +1,100 @@
+#!/bin/sh
+# Drop-in replacement for docker-php-ext-install in Unofficial Fil-C PHP images.
+# Activates prebuilt Fil-C shared extensions or confirms statically built-in
+# extensions; reports a clear Fil-C guidance error for unavailable extensions.
+set -eu
+
+ini_name=""
+exts=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -j*|--jobs=*)
+      # Accepted for compatibility with official php Dockerfiles (e.g. -j$(nproc)).
+      ;;
+    -j|--jobs)
+      shift
+      [ "$#" -gt 0 ] || { echo "error: -j requires an argument" >&2; exit 1; }
+      ;;
+    --ini-name)
+      shift
+      [ "$#" -gt 0 ] || { echo "error: --ini-name requires an argument" >&2; exit 1; }
+      ini_name="$1"
+      ;;
+    --ini-name=*)
+      ini_name="${1#--ini-name=}"
+      ;;
+    --help|-h)
+      echo "usage: $0 [-jN] [--ini-name FILE] ext-name [ext-name ...]"
+      exit 0
+      ;;
+    --)
+      shift
+      while [ "$#" -gt 0 ]; do
+        exts="${exts} $1"
+        shift
+      done
+      break
+      ;;
+    -*)
+      echo "error: unknown option: $1" >&2
+      exit 1
+      ;;
+    *)
+      exts="${exts} $1"
+      ;;
+  esac
+  shift
+done
+
+if [ -z "$exts" ]; then
+  echo "usage: $0 [-jN] [--ini-name FILE] ext-name [ext-name ...]" >&2
+  exit 1
+fi
+
+ext_dir="$(php -r 'echo ini_get("extension_dir");')"
+
+is_loaded() {
+  target="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  case "$target" in
+    opcache)
+      php -m 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -Fxq "zend opcache" && return 0
+      ;;
+  esac
+  php -m 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -Fxq "$target"
+}
+
+to_enable=""
+for ext in $exts; do
+  # Normalize common official Dockerfile extension aliases
+  mod="$ext"
+  if [ -f "${ext_dir}/${mod}.so" ]; then
+    to_enable="${to_enable} ${mod}"
+  elif is_loaded "$mod"; then
+    echo "filc-php: extension '${mod}' is already built into PHP ${PHP_VERSION:-} (no compilation needed)"
+  else
+    echo "error: extension '${ext}' is not available in this Unofficial Fil-C PHP runtime image." >&2
+    echo "Fil-C compiles PHP with a memory-safe capability ABI, so extensions must be compiled with the Fil-C toolchain rather than standard gcc/clang." >&2
+    echo "Built-in extensions: $(php -m 2>/dev/null | awk 'NF && !/^\[/ { printf "%s ", tolower($0) }')" >&2
+    if [ -d "$ext_dir" ]; then
+      shared_list=""
+      for f in "$ext_dir"/*.so; do
+        [ -f "$f" ] || continue
+        shared_list="${shared_list}$(basename "$f" .so) "
+      done
+      echo "Prebuilt shared extensions: ${shared_list:-none}" >&2
+    fi
+    echo "See https://filc.connected.link for available Fil-C ports and upcoming -dev toolchain images." >&2
+    exit 1
+  fi
+done
+
+if [ -n "$to_enable" ]; then
+  if [ -n "$ini_name" ]; then
+    # shellcheck disable=SC2086
+    exec docker-php-ext-enable --ini-name "$ini_name" $to_enable
+  else
+    # shellcheck disable=SC2086
+    exec docker-php-ext-enable $to_enable
+  fi
+fi

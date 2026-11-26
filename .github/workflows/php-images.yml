@@ -1,4 +1,4 @@
-name: Build and Push filc-php Docker Images
+name: Build and Push Unofficial filc-php Docker Images
 
 on:
   workflow_dispatch:
@@ -125,6 +125,10 @@ jobs:
           {
             echo "labels<<EOF"
             echo "org.opencontainers.image.created=${created}"
+            echo "org.opencontainers.image.title=Unofficial PHP ${series} (${variant}) built with Fil-C"
+            echo "org.opencontainers.image.description=Unofficial PHP built with Fil-C (memory-safe). Toolchain and ports: https://filc.connected.link"
+            echo "org.opencontainers.image.url=https://filc.connected.link"
+            echo "org.opencontainers.image.documentation=https://filc.connected.link"
             echo "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}"
             echo "org.opencontainers.image.revision=${GITHUB_SHA}"
             echo "org.opencontainers.image.version=${full}"
@@ -154,7 +158,7 @@ jobs:
             FILC_USER_AGENT=filc-image-ci/${{ matrix.php_series }}
             SUPPORT_TIER=${{ matrix.support }}
 
-      - name: Smoke-test image before push
+      - name: Smoke-test and drop-in acceptance test before push
         shell: bash
         run: |
           set -euo pipefail
@@ -189,3 +193,52 @@ jobs:
             FILC_GITHUB_RELEASE_URL=https://github.com/${{ github.repository }}/releases/download/v${{ env.FILC_CHANNEL }}
             FILC_USER_AGENT=filc-image-ci/${{ matrix.php_series }}
             SUPPORT_TIER=${{ matrix.support }}
+
+  sync-dockerhub-overview:
+    name: Update Docker Hub repository overview
+    needs: build
+    runs-on: ubuntu-latest
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.push)
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Update Docker Hub description and README (best-effort if token permits)
+        continue-on-error: true
+        shell: bash
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DOCKERHUB_REPO: jonasborchelt/filc-php
+        run: |
+          set -euo pipefail
+          if [ -z "${DOCKERHUB_USERNAME:-}" ] || [ -z "${DOCKERHUB_TOKEN:-}" ]; then
+            echo "Skipping Docker Hub overview sync (credentials unavailable)."
+            exit 0
+          fi
+          login_payload="$(python3 -c 'import json, os; print(json.dumps({"username": os.environ["DOCKERHUB_USERNAME"], "password": os.environ["DOCKERHUB_TOKEN"]}))')"
+          jwt="$(curl -fsSL -X POST -H "Content-Type: application/json" -d "$login_payload" "https://hub.docker.com/v2/users/login/" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("token", ""))')"
+          if [ -z "$jwt" ]; then
+            echo "Warning: Docker Hub login did not return a JWT (scoped PAT may not allow repository metadata updates)." >&2
+            exit 0
+          fi
+          patch_payload="$(python3 -c '
+          import json
+          with open("docker/php/README.md", "r", encoding="utf-8") as f:
+              readme = f.read()
+          print(json.dumps({
+              "description": "Unofficial PHP built with Fil-C (memory-safe). Toolchain and ports: https://filc.connected.link",
+              "full_description": readme,
+          }))
+          ')"
+          http_code="$(curl -sSL -o /tmp/hub-patch.json -w "%{http_code}" -X PATCH \
+            -H "Authorization: JWT ${jwt}" \
+            -H "Content-Type: application/json" \
+            -d "$patch_payload" \
+            "https://hub.docker.com/v2/repositories/${DOCKERHUB_REPO}/")"
+          echo "Docker Hub overview PATCH status: HTTP ${http_code}"
+          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+            echo "Warning: Docker Hub overview update returned HTTP ${http_code} (token scope may be push-only)." >&2
+          fi

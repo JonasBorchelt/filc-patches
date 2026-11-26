@@ -1,0 +1,30 @@
+#!/bin/sh
+# Drop-in compatibility helper for docker-php-ext-configure in Unofficial Fil-C PHP images.
+set -eu
+
+if [ "$#" -lt 1 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+  echo "usage: $0 ext-name [configure-args ...]" >&2
+  [ "$#" -ge 1 ] && exit 0
+  exit 1
+fi
+
+ext="$1"
+shift
+ext_dir="$(php -r 'echo ini_get("extension_dir");')"
+lower="$(printf '%s' "$ext" | tr '[:upper:]' '[:lower:]')"
+
+loaded=0
+if [ "$lower" = "opcache" ] && php -m 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -Fxq "zend opcache"; then
+  loaded=1
+elif php -m 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -Fxq "$lower"; then
+  loaded=1
+fi
+
+if [ "$loaded" -eq 1 ] || [ -f "${ext_dir}/${ext}.so" ]; then
+  echo "filc-php: '${ext}' is already prebuilt with Fil-C memory-safe defaults (ignoring configure flags: $*)"
+  exit 0
+fi
+
+echo "error: extension '${ext}' is not prebuilt in this Unofficial Fil-C PHP runtime image." >&2
+echo "Runtime compilation requires the Fil-C capability toolchain (https://filc.connected.link)." >&2
+exit 1

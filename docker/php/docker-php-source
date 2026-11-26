@@ -1,0 +1,19 @@
+#!/bin/sh
+# Drop-in compatibility helper for docker-php-source in Unofficial Fil-C PHP images.
+set -eu
+
+cmd="${1:-}"
+case "$cmd" in
+  extract|delete)
+    echo "filc-php: docker-php-source '${cmd}' is a no-op in runtime images (extensions are prebuilt with Fil-C; see https://filc.connected.link)"
+    exit 0
+    ;;
+  -h|--help)
+    echo "usage: $0 [extract|delete]"
+    exit 0
+    ;;
+  *)
+    echo "error: usage: $0 [extract|delete]" >&2
+    exit 1
+    ;;
+esac

@@ -1,0 +1,117 @@
+#!/bin/sh
+# Drop-in replacement for docker-php-ext-enable in Unofficial Fil-C PHP images.
+set -eu
+
+ini_name=""
+exts=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --ini-name)
+      shift
+      [ "$#" -gt 0 ] || { echo "error: --ini-name requires an argument" >&2; exit 1; }
+      ini_name="$1"
+      ;;
+    --ini-name=*)
+      ini_name="${1#--ini-name=}"
+      ;;
+    --help|-h)
+      echo "usage: $0 [--ini-name FILE] module-name [module-name ...]"
+      exit 0
+      ;;
+    --)
+      shift
+      while [ "$#" -gt 0 ]; do
+        exts="${exts} $1"
+        shift
+      done
+      break
+      ;;
+    -*)
+      echo "error: unknown option: $1" >&2
+      exit 1
+      ;;
+    *)
+      exts="${exts} $1"
+      ;;
+  esac
+  shift
+done
+
+if [ -z "$exts" ]; then
+  echo "usage: $0 [--ini-name FILE] module-name [module-name ...]" >&2
+  exit 1
+fi
+
+ext_dir="$(php -r 'echo ini_get("extension_dir");')"
+conf_dir="${PHP_INI_DIR:-/usr/local/etc/php}/conf.d"
+mkdir -p "$conf_dir"
+
+list_available() {
+  builtins="$(php -m 2>/dev/null | awk 'NF && !/^\[/ { printf "%s ", tolower($0) }')"
+  shared=""
+  if [ -d "$ext_dir" ]; then
+    for f in "$ext_dir"/*.so; do
+      [ -f "$f" ] || continue
+      base="$(basename "$f" .so)"
+      shared="${shared}${base} "
+    done
+  fi
+  printf '  built-in: %s\n' "${builtins:-none}" >&2
+  printf '  shared:   %s\n' "${shared:-none}" >&2
+}
+
+is_loaded() {
+  target="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  case "$target" in
+    opcache)
+      php -m 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -Fxq "zend opcache" && return 0
+      ;;
+  esac
+  php -m 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -Fxq "$target"
+}
+
+for raw in $exts; do
+  mod="$(basename "$raw" .so)"
+  so_path=""
+  if [ -f "$raw" ]; then
+    so_path="$raw"
+  elif [ -f "${ext_dir}/${mod}.so" ]; then
+    so_path="${ext_dir}/${mod}.so"
+  fi
+
+  if [ -z "$so_path" ]; then
+    if is_loaded "$mod"; then
+      echo "filc-php: extension '${mod}' is already built in and enabled"
+      continue
+    fi
+    echo "error: Fil-C PHP extension '${raw}' is not prebuilt in this image." >&2
+    echo "Fil-C uses a memory-safe capability ABI; standard C compilers cannot build PHP extensions for it." >&2
+    echo "Available extensions in this image:" >&2
+    list_available
+    echo "Prebuilt Fil-C toolchain & ports: https://filc.connected.link" >&2
+    exit 1
+  fi
+
+  if [ -n "$ini_name" ]; then
+    target_ini="${conf_dir}/${ini_name}"
+  else
+    target_ini="${conf_dir}/docker-php-ext-${mod}.ini"
+  fi
+
+  case "$mod" in
+    opcache|xdebug)
+      line="zend_extension=${mod}"
+      ;;
+    *)
+      line="extension=${mod}"
+      ;;
+  esac
+
+  if [ -f "$target_ini" ] && grep -Fxq "$line" "$target_ini"; then
+    echo "filc-php: '${mod}' already enabled in ${target_ini}"
+  else
+    printf '%s\n' "$line" >> "$target_ini"
+    echo "filc-php: enabled '${mod}' via ${target_ini}"
+  fi
+done

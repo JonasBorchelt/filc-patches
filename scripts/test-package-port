@@ -678,7 +678,13 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
   # Verify bash loadable builtins inside the packaged tarball were relocated to $ORIGIN/..
   bash_ext = File.join(td, "bash-ext")
   FileUtils.mkdir_p(bash_ext)
-  bash_tar = File.join(p201_out, "0.1.4", "x86_64-linux", "bin", "bash-1.0-r1-x86_64-linux.tar.xz")
+  p201_idx = JSON.parse(File.read(File.join(p201_out, "0.1.4", "x86_64-linux", "index.json")))
+  bash_entry = p201_idx.dig("packages", "bash")
+  bash_rel = bash_entry.dig("binary", "path")
+  bash_sha = bash_entry.dig("binary", "sha256")
+  assert(bash_rel == "bin/bash-1.0-r1-x86_64-linux-#{bash_sha[0, 12]}.tar.xz",
+         "bash binary must use content-addressed filename, got: #{bash_rel.inspect}")
+  bash_tar = File.join(p201_out, "0.1.4", "x86_64-linux", bash_rel)
   _bto, bterr, btst = Open3.capture3("tar", "-xf", bash_tar, "-C", bash_ext)
   assert(btst.success?, "extract bash tarball failed: #{bterr}")
   accept_raw = File.binread(File.join(bash_ext, "prefix", "lib", "bash", "accept"))
@@ -1108,7 +1114,13 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
   )
   assert(hl_st.success?, "hardlink dedup package-port failed: #{hl_out_s}\n#{hl_err_s}")
 
-  biggit_tar = File.join(hl_out, "0.1.4", "x86_64-linux", "bin", "biggit-2.56.0-r1-x86_64-linux.tar.xz")
+  hl_idx = JSON.parse(File.read(File.join(hl_out, "0.1.4", "x86_64-linux", "index.json")))
+  biggit_entry = hl_idx.dig("packages", "biggit")
+  biggit_rel = biggit_entry.dig("binary", "path")
+  biggit_sha = biggit_entry.dig("binary", "sha256")
+  assert(biggit_rel == "bin/biggit-2.56.0-r1-x86_64-linux-#{biggit_sha[0, 12]}.tar.xz",
+         "biggit binary must use content-addressed filename, got: #{biggit_rel.inspect}")
+  biggit_tar = File.join(hl_out, "0.1.4", "x86_64-linux", biggit_rel)
   assert(File.file?(biggit_tar), "missing biggit binary archive")
   # 56 copies of 1 MiB incompressible bytes would be ~56 MiB without dedup;
   # with hardlink dedup across 2 RPATH depths (bin/ + libexec/git-core/), archive must be < 3 MiB.
@@ -1661,4 +1673,94 @@ Dir.mktmpdir("filc-upload-leak-test-") do |td|
   assert(ns_e.include?("LEAK_GATE CONFIG ERROR"), "expected LEAK_GATE CONFIG ERROR, got: #{ns_e}")
 end
 
-puts "TEST_PACKAGE_PORT: PASS (17/17)"
+# Test 18: Content-addressed filenames for bin/ and recipes/ prevent same-version overwrites
+puts "[18/18] Content-addressed bin/ and recipes/ filenames preserve previous build archives"
+Dir.mktmpdir("filc-pkg-ca-") do |td|
+  ca_repo = File.join(td, "repo")
+  ca_work = File.join(td, "work")
+  ca_pizfix = File.join(ca_work, "pizfix")
+  ca_state = File.join(ca_work, "ports-state")
+  ca_cache = File.join(td, "cache")
+  ca_out = File.join(td, "out")
+  FileUtils.mkdir_p([
+    File.join(ca_repo, "ports", "rebuilt"),
+    File.join(ca_pizfix, "bin"),
+    ca_state, ca_cache, ca_out
+  ])
+  FileUtils.cp(File.join(REPO_ROOT, "UPSTREAM"), File.join(ca_repo, "UPSTREAM"))
+  src_tar = File.join(td, "rebuilt-1.0.tar.gz")
+  src_sha = make_tar_gz(src_tar, { "rebuilt-1.0/README" => "hello upstream\n" })
+  FileUtils.cp(src_tar, File.join(ca_cache, "rebuilt-1.0-#{src_sha[0, 12]}-rebuilt-1.0.tar.gz"))
+  File.write(File.join(ca_repo, "ports", "rebuilt", "PORT"), <<~PORT)
+    NAME=rebuilt
+    VERSION=1.0
+    LICENSE=MIT
+    UPSTREAM_URL=https://example.invalid/rebuilt-1.0.tar.gz
+    UPSTREAM_SHA256=#{src_sha}
+    EXTRACT_DIR=rebuilt-1.0
+    TIER=0
+    DEPS=""
+    BUILD_SYSTEM=autotools
+    POLICY_CLASS=P0-Clean
+  PORT
+  File.write(File.join(ca_pizfix, "bin", "rebuilt-tool"), "#!/bin/sh\necho build-one\n")
+  File.chmod(0o755, File.join(ca_pizfix, "bin", "rebuilt-tool"))
+  File.write(File.join(ca_state, "rebuilt.manifest.json"), JSON.pretty_generate(
+    "port" => "rebuilt",
+    "files" => ["bin/rebuilt-tool"]
+  ) + "\n")
+
+  run_pkg = lambda do
+    o, e, st = Open3.capture3(
+      BASE_ENV,
+      "ruby", PACKAGE_SCRIPT,
+      "--repo-root", ca_repo,
+      "--work-dir", ca_work,
+      "--pizfix", ca_pizfix,
+      "--neutral-prefix", ca_pizfix,
+      "--ports-cache-dir", ca_cache,
+      "--out-dir", ca_out,
+      "--channel", "0.1.4",
+      "--arch", "x86_64-linux",
+      "--skip-package-smoke"
+    )
+    assert(st.success?, "content-addressed package-port failed: #{o}\n#{e}")
+    JSON.parse(File.read(File.join(ca_out, "0.1.4", "x86_64-linux", "index.json")))
+  end
+
+  idx1 = run_pkg.call
+  e1 = idx1.dig("packages", "rebuilt")
+  bin1_rel = e1.dig("binary", "path")
+  bin1_sha = e1.dig("binary", "sha256")
+  rec1_rel = e1.dig("recipe", "path")
+  rec1_sha = e1.dig("recipe", "sha256")
+  src1_rel = e1.dig("source", "path")
+  assert(bin1_rel == "bin/rebuilt-1.0-r1-x86_64-linux-#{bin1_sha[0, 12]}.tar.xz",
+         "unexpected bin1 path: #{bin1_rel}")
+  assert(rec1_rel == "recipes/rebuilt-1.0-r1-recipe-#{rec1_sha[0, 12]}.tar.xz",
+         "unexpected rec1 path: #{rec1_rel}")
+  assert(src1_rel == "src/rebuilt-1.0.tar.gz", "src path must keep upstream basename, got: #{src1_rel}")
+
+  # Rebuild same version-r1 with different binary output into the same out-dir
+  File.write(File.join(ca_pizfix, "bin", "rebuilt-tool"), "#!/bin/sh\necho build-two-rebuilt\n")
+  idx2 = run_pkg.call
+  e2 = idx2.dig("packages", "rebuilt")
+  bin2_rel = e2.dig("binary", "path")
+  bin2_sha = e2.dig("binary", "sha256")
+  assert(bin2_sha != bin1_sha, "rebuilt binary must have different SHA-256")
+  assert(bin2_rel == "bin/rebuilt-1.0-r1-x86_64-linux-#{bin2_sha[0, 12]}.tar.xz",
+         "unexpected bin2 path: #{bin2_rel}")
+  assert(bin2_rel != bin1_rel, "rebuilt binary must have distinct content-addressed filename")
+
+  ch_dir = File.join(ca_out, "0.1.4", "x86_64-linux")
+  assert(File.file?(File.join(ch_dir, bin1_rel)), "previous build archive must still exist untouched")
+  assert(Digest::SHA256.file(File.join(ch_dir, bin1_rel)).hexdigest == bin1_sha,
+         "previous build archive SHA-256 must remain unchanged")
+  assert(File.file?(File.join(ch_dir, bin2_rel)), "new build archive must exist")
+  assert(Digest::SHA256.file(File.join(ch_dir, bin2_rel)).hexdigest == bin2_sha,
+         "new build archive SHA-256 must match index")
+  assert(Dir.glob(File.join(ch_dir, "bin", ".tmp-*")).empty?, "no leftover .tmp-* files in bin/")
+  assert(Dir.glob(File.join(ch_dir, "recipes", ".tmp-*")).empty?, "no leftover .tmp-* files in recipes/")
+end
+
+puts "TEST_PACKAGE_PORT: PASS (18/18)"

@@ -1604,99 +1604,112 @@ module PortPackager
       # can prove upstream provenance for generic patterns without trusting unverified files.
       cached_src, src_fname, src_sha = find_cached_source_tarball(cache_dir, meta)
 
-      bin_fname = "#{name}-#{meta['version']}-r#{opts[:revision]}-#{opts[:arch]}.tar.xz"
-      bin_rel = "bin/#{bin_fname}"
-      bin_out = File.join(channel_dir, bin_rel)
+      bin_fname = nil
+      bin_rel = nil
+      bin_out = nil
+      bin_sha = nil
 
       # 1. Stage binary package, strip .la files, relocate, deduplicate hardlinks, leak-gate, and pack
+      #    into a content-addressed filename: bin/<name>-<version>-r<rev>-<arch>-<sha12>.tar.xz
       bin_leaks = []
       bin_allowed = []
       reloc_stats = nil
       dedup_stats = nil
-      Dir.mktmpdir("filc-pkg-bin-") do |td|
-        prefix_stage = File.join(td, "prefix")
-        FileUtils.mkdir_p(prefix_stage)
-        src_inode_map = {}
+      bin_tmp = File.join(channel_dir, "bin", ".tmp-#{name}-#{Process.pid}-#{Thread.current.object_id}.tar.xz")
+      begin
+        Dir.mktmpdir("filc-pkg-bin-") do |td|
+          prefix_stage = File.join(td, "prefix")
+          FileUtils.mkdir_p(prefix_stage)
+          src_inode_map = {}
 
-        files.each do |rel|
-          raise "unsafe manifest relative path: #{rel}" if rel.start_with?("/") || rel.split("/").include?("..")
-          next if rel.end_with?(".la")
+          files.each do |rel|
+            raise "unsafe manifest relative path: #{rel}" if rel.start_with?("/") || rel.split("/").include?("..")
+            next if rel.end_with?(".la")
 
-          src_item = File.join(pizfix, rel)
-          next unless File.exist?(src_item) || File.symlink?(src_item)
+            src_item = File.join(pizfix, rel)
+            next unless File.exist?(src_item) || File.symlink?(src_item)
 
-          dst_item = File.join(prefix_stage, rel)
-          FileUtils.mkdir_p(File.dirname(dst_item))
-          if File.symlink?(src_item)
-            link_target = File.readlink(src_item)
-            if link_target.start_with?("#{pizfix}/")
-              target_rel = link_target.sub("#{pizfix}/", "")
-              from_dir = Pathname.new(File.dirname(rel))
-              link_target = Pathname.new(target_rel).relative_path_from(from_dir).to_s
+            dst_item = File.join(prefix_stage, rel)
+            FileUtils.mkdir_p(File.dirname(dst_item))
+            if File.symlink?(src_item)
+              link_target = File.readlink(src_item)
+              if link_target.start_with?("#{pizfix}/")
+                target_rel = link_target.sub("#{pizfix}/", "")
+                from_dir = Pathname.new(File.dirname(rel))
+                link_target = Pathname.new(target_rel).relative_path_from(from_dir).to_s
+              end
+              File.symlink(link_target, dst_item)
+            elsif File.file?(src_item)
+              src_st = File.stat(src_item)
+              FileUtils.cp(src_item, dst_item, preserve: false)
+              File.chmod(src_st.mode & 0o777, dst_item)
+              src_inode_map[dst_item] = [src_st.dev, src_st.ino]
             end
-            File.symlink(link_target, dst_item)
-          elsif File.file?(src_item)
-            src_st = File.stat(src_item)
-            FileUtils.cp(src_item, dst_item, preserve: false)
-            File.chmod(src_st.mode & 0o777, dst_item)
-            src_inode_map[dst_item] = [src_st.dev, src_st.ino]
+          end
+
+          reloc_stats = relocate_stage!(
+            prefix_stage, pizfix,
+            src_inode_map: src_inode_map,
+            throttle_fn: throttle_fn,
+            neutral_prefix: neutral_prefix,
+            wrapper_dir: opts[:wrapper_dir]
+          )
+          dedup_stats = deduplicate_stage_hardlinks!(prefix_stage)
+
+          pkg_files = {}
+          sha_cache_by_inode = {}
+          Dir.glob(File.join(prefix_stage, "**", "*"), File::FNM_DOTMATCH).sort.each do |p|
+            base = File.basename(p)
+            next if base == "." || base == ".."
+            next if File.directory?(p) && !File.symlink?(p)
+
+            rel = p.sub("#{prefix_stage}/", "")
+            if File.symlink?(p)
+              pkg_files[rel] = { "type" => "symlink", "target" => File.readlink(p) }
+            else
+              st_p = File.stat(p)
+              ino_key = [st_p.dev, st_p.ino]
+              sha_p = (sha_cache_by_inode[ino_key] ||= file_sha256(p))
+              pkg_files[rel] = { "type" => "file", "size_bytes" => st_p.size, "sha256" => sha_p }
+            end
+          end
+
+          pkg_manifest = {
+            "schema_version" => 1,
+            "name" => name,
+            "version" => meta["version"],
+            "revision" => opts[:revision],
+            "channel" => opts[:channel],
+            "arch" => opts[:arch],
+            "license" => meta["license"],
+            "policy_class" => meta["policy_class"],
+            "deps" => meta["deps"],
+            "transitive_deps" => tdeps,
+            "files" => pkg_files
+          }
+          File.write(File.join(td, "filc-pkg.json"), "#{JSON.pretty_generate(sort_json(pkg_manifest))}\n", encoding: "UTF-8")
+
+          bin_leaks, bin_allowed = evaluate_package_leaks(
+            td,
+            literals: literals,
+            exact_rules: exact_rules,
+            upstream_tarball: cached_src,
+            scan_elf_strings: true,
+            throttle_fn: throttle_fn
+          )
+          if bin_leaks.empty?
+            create_deterministic_tar_xz(td, bin_tmp, opts[:source_date_epoch],
+                                        xz_threads: xz_threads_fn.call, throttle_fn: throttle_fn)
+            bin_sha = file_sha256(bin_tmp)
+            bin_fname = "#{name}-#{meta['version']}-r#{opts[:revision]}-#{opts[:arch]}-#{bin_sha[0, 12]}.tar.xz"
+            bin_rel = "bin/#{bin_fname}"
+            bin_out = File.join(channel_dir, bin_rel)
+            File.rename(bin_tmp, bin_out)
+            bin_tmp = nil
           end
         end
-
-        reloc_stats = relocate_stage!(
-          prefix_stage, pizfix,
-          src_inode_map: src_inode_map,
-          throttle_fn: throttle_fn,
-          neutral_prefix: neutral_prefix,
-          wrapper_dir: opts[:wrapper_dir]
-        )
-        dedup_stats = deduplicate_stage_hardlinks!(prefix_stage)
-
-        pkg_files = {}
-        sha_cache_by_inode = {}
-        Dir.glob(File.join(prefix_stage, "**", "*"), File::FNM_DOTMATCH).sort.each do |p|
-          base = File.basename(p)
-          next if base == "." || base == ".."
-          next if File.directory?(p) && !File.symlink?(p)
-
-          rel = p.sub("#{prefix_stage}/", "")
-          if File.symlink?(p)
-            pkg_files[rel] = { "type" => "symlink", "target" => File.readlink(p) }
-          else
-            st_p = File.stat(p)
-            ino_key = [st_p.dev, st_p.ino]
-            sha_p = (sha_cache_by_inode[ino_key] ||= file_sha256(p))
-            pkg_files[rel] = { "type" => "file", "size_bytes" => st_p.size, "sha256" => sha_p }
-          end
-        end
-
-        pkg_manifest = {
-          "schema_version" => 1,
-          "name" => name,
-          "version" => meta["version"],
-          "revision" => opts[:revision],
-          "channel" => opts[:channel],
-          "arch" => opts[:arch],
-          "license" => meta["license"],
-          "policy_class" => meta["policy_class"],
-          "deps" => meta["deps"],
-          "transitive_deps" => tdeps,
-          "files" => pkg_files
-        }
-        File.write(File.join(td, "filc-pkg.json"), "#{JSON.pretty_generate(sort_json(pkg_manifest))}\n", encoding: "UTF-8")
-
-        bin_leaks, bin_allowed = evaluate_package_leaks(
-          td,
-          literals: literals,
-          exact_rules: exact_rules,
-          upstream_tarball: cached_src,
-          scan_elf_strings: true,
-          throttle_fn: throttle_fn
-        )
-        if bin_leaks.empty?
-          create_deterministic_tar_xz(td, bin_out, opts[:source_date_epoch],
-                                      xz_threads: xz_threads_fn.call, throttle_fn: throttle_fn)
-        end
+      ensure
+        File.unlink(bin_tmp) if bin_tmp && File.exist?(bin_tmp)
       end
 
       # 2. Copy SHA-256 verified upstream corresponding source tarball (GPL compliance)
@@ -1709,51 +1722,62 @@ module PortPackager
       end
 
       # 3. Package recipe + patches + provenance + license metadata
-      rec_fname = "#{name}-#{meta['version']}-r#{opts[:revision]}-recipe.tar.xz"
-      rec_rel = "recipes/#{rec_fname}"
-      rec_out = File.join(channel_dir, rec_rel)
+      #    into a content-addressed filename: recipes/<name>-<version>-r<rev>-recipe-<sha12>.tar.xz
+      rec_fname = nil
+      rec_rel = nil
+      rec_out = nil
+      rec_sha = nil
 
       rec_leaks = []
       rec_allowed = []
-      Dir.mktmpdir("filc-pkg-rec-") do |td|
-        FileUtils.cp(File.join(meta["port_dir"], "PORT"), File.join(td, "PORT"))
-        patches_dir = File.join(meta["port_dir"], "patches")
-        FileUtils.cp_r(patches_dir, File.join(td, "patches")) if File.directory?(patches_dir)
-        prov = File.join(repo_root, "PROVENANCE.md")
-        FileUtils.cp(prov, File.join(td, "PROVENANCE.md")) if File.file?(prov)
+      rec_tmp = File.join(channel_dir, "recipes", ".tmp-#{name}-#{Process.pid}-#{Thread.current.object_id}-recipe.tar.xz")
+      begin
+        Dir.mktmpdir("filc-pkg-rec-") do |td|
+          FileUtils.cp(File.join(meta["port_dir"], "PORT"), File.join(td, "PORT"))
+          patches_dir = File.join(meta["port_dir"], "patches")
+          FileUtils.cp_r(patches_dir, File.join(td, "patches")) if File.directory?(patches_dir)
+          prov = File.join(repo_root, "PROVENANCE.md")
+          FileUtils.cp(prov, File.join(td, "PROVENANCE.md")) if File.file?(prov)
 
-        rec_meta = {
-          "name" => name,
-          "version" => meta["version"],
-          "revision" => opts[:revision],
-          "license" => meta["license"],
-          "upstream_url" => meta["upstream_url"],
-          "upstream_sha256" => src_sha,
-          "patch_count" => pcount,
-          "added_lines" => added,
-          "removed_lines" => removed
-        }
-        File.write(File.join(td, "recipe-meta.json"), "#{JSON.pretty_generate(sort_json(rec_meta))}\n", encoding: "UTF-8")
+          rec_meta = {
+            "name" => name,
+            "version" => meta["version"],
+            "revision" => opts[:revision],
+            "license" => meta["license"],
+            "upstream_url" => meta["upstream_url"],
+            "upstream_sha256" => src_sha,
+            "patch_count" => pcount,
+            "added_lines" => added,
+            "removed_lines" => removed
+          }
+          File.write(File.join(td, "recipe-meta.json"), "#{JSON.pretty_generate(sort_json(rec_meta))}\n", encoding: "UTF-8")
 
-        rec_leaks, rec_allowed = evaluate_package_leaks(
-          td,
-          literals: literals,
-          exact_rules: exact_rules,
-          upstream_tarball: cached_src,
-          scan_elf_strings: false,
-          throttle_fn: throttle_fn
-        )
-        if rec_leaks.empty? && bin_leaks.empty?
-          create_deterministic_tar_xz(td, rec_out, opts[:source_date_epoch],
-                                      xz_threads: xz_threads_fn.call, throttle_fn: throttle_fn)
+          rec_leaks, rec_allowed = evaluate_package_leaks(
+            td,
+            literals: literals,
+            exact_rules: exact_rules,
+            upstream_tarball: cached_src,
+            scan_elf_strings: false,
+            throttle_fn: throttle_fn
+          )
+          if rec_leaks.empty? && bin_leaks.empty?
+            create_deterministic_tar_xz(td, rec_tmp, opts[:source_date_epoch],
+                                        xz_threads: xz_threads_fn.call, throttle_fn: throttle_fn)
+            rec_sha = file_sha256(rec_tmp)
+            rec_fname = "#{name}-#{meta['version']}-r#{opts[:revision]}-recipe-#{rec_sha[0, 12]}.tar.xz"
+            rec_rel = "recipes/#{rec_fname}"
+            rec_out = File.join(channel_dir, rec_rel)
+            File.rename(rec_tmp, rec_out)
+            rec_tmp = nil
+          end
         end
+      ensure
+        File.unlink(rec_tmp) if rec_tmp && File.exist?(rec_tmp)
       end
 
-      bin_sha = bin_leaks.empty? ? file_sha256(bin_out) : nil
-      rec_sha = (bin_leaks.empty? && rec_leaks.empty?) ? file_sha256(rec_out) : nil
-      bin_size = (bin_leaks.empty? && File.file?(bin_out)) ? File.size(bin_out) : 0
+      bin_size = (bin_leaks.empty? && bin_out && File.file?(bin_out)) ? File.size(bin_out) : 0
       src_size = (bin_leaks.empty? && File.file?(src_out)) ? File.size(src_out) : 0
-      rec_size = (bin_leaks.empty? && rec_leaks.empty? && File.file?(rec_out)) ? File.size(rec_out) : 0
+      rec_size = (bin_leaks.empty? && rec_leaks.empty? && rec_out && File.file?(rec_out)) ? File.size(rec_out) : 0
 
       size_violations = []
       if bin_leaks.empty? && rec_leaks.empty?
@@ -1770,8 +1794,8 @@ module PortPackager
         all_leaks[name] = bin_leaks unless bin_leaks.empty?
         all_leaks["#{name} (recipe)"] = rec_leaks unless rec_leaks.empty?
         all_size_violations[name] = size_violations unless size_violations.empty?
-        created_archives << bin_out if bin_leaks.empty?
-        created_archives << rec_out if bin_leaks.empty? && rec_leaks.empty?
+        created_archives << bin_out if bin_leaks.empty? && bin_out
+        created_archives << rec_out if bin_leaks.empty? && rec_leaks.empty? && rec_out
 
         if bin_leaks.empty? && rec_leaks.empty?
           package_size_records << {

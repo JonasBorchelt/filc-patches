@@ -1,0 +1,107 @@
+NAME="openssl1.1"
+VERSION="1.1.1w+deb11u8"
+LICENSE="OpenSSL"
+SUPPORT_STATUS="eol"
+EOL_DATE="2023-09-11"
+SECURITY_SOURCE="freexian-elts"
+UPSTREAM_URL="https://deb.freexian.com/extended-lts/pool/main/o/openssl/openssl_1.1.1w.orig.tar.gz"
+UPSTREAM_SHA256="cf3098950cb4d853ad95c0841f1f9c6d3dc102dccfcacd521d93925208b76ac8"
+DEBIAN_TARBALL_URL="https://deb.freexian.com/extended-lts/pool/main/o/openssl/openssl_1.1.1w-0+deb11u8.debian.tar.xz"
+DEBIAN_TARBALL_SHA256="1b9aab73493a39ccab81f22092abce8d4857deeb5a084c2dcf89e60ec108c818"
+DEBIAN_DSC_SHA256="92dfbc227edb3a124276544e5c4d92aa738167fb43b9cc98611362db559e0406"
+UPSTREAM_SHA256_SOURCE="debian-elts:https://deb.freexian.com/extended-lts/dists/bullseye/InRelease pkg:openssl ver:1.1.1w-0+deb11u8 key:ports/pgp-keys/freexian-elts-archive-key.asc fpr:AB597C4F6F3380BD4B2BEBC2A07310D369055D5A"
+EXTRACT_DIR="openssl-1.1.1w"
+TIER=3
+DEPS="zlib pkgconf"
+BUILD_SYSTEM="custom"
+CONFIGURE_ARGS="no-asm no-async zlib -DOPENSSL_NO_SECURE_MEMORY"
+MAKE_ARGS=""
+INSTALL_ARGS="install_sw install_ssldirs"
+TEST_CMD=""
+POLICY_CLASS="P4-Audit"
+POLICY_RATIONALE="EOL legacy OpenSSL 1.1.1w with 40 Freexian ELTS bullseye security/bugfix patches (1.1.1w-0+deb11u8) installed side-by-side with OpenSSL 3.6.5 (runtime .so.1.1 in lib/, dev headers/libs/ssl in opt/openssl1.1/, pkg-config openssl11/libssl11/libcrypto11, CLI bin/openssl11) for legacy PHP 7.x ports. Pure-C no-asm + no-async + -DOPENSSL_NO_SECURE_MEMORY builds with zero Fil-C source patches."
+# Debian ELTS patch selection (40 of 46 patches from debian/patches/series):
+# Skipped 6 Debian packaging/integration patches:
+#   - debian-targets.patch (Debian-specific Configure targets)
+#   - man-section.patch (Debian manpage section suffixing)
+#   - no-symbolic.patch (Debian -Bsymbolic linker override)
+#   - pic.patch (Debian static archive PIC flag)
+#   - c_rehash-compat.patch (Debian c_rehash compat wrapper)
+#   - Set-systemwide-default-settings-for-libssl-users.patch (Debian /etc/ssl/openssl.cnf policy)
+# Applied all 40 CVE/security/bugfix patches in exact Debian series order:
+DEBIAN_SECURITY_PATCHES="CVE-2023-5678.patch CVE-2024-0727-1.patch CVE-2024-0727-2.patch CVE-2024-2511.patch CVE-2024-4741.patch CVE-2024-5535-1.patch CVE-2024-5535-2.patch CVE-2024-5535-3.patch CVE-2024-5535-4.patch CVE-2024-5535-5.patch CVE-2024-5535-6.patch CVE-2024-5535-7.patch CVE-2024-5535-8.patch CVE-2024-9143.patch 0001-Fix-timing-side-channel-in-ECDSA-signature-computati.patch CVE-2025-9230.patch Fix-heap-buffer-overflow-in-BIO_f_linebuffer.patch Fix-OCB-AES-NI-HW-stream-path-unauthenticated-unencrypted.patch Harden-ASN1_mbstring_ncopy.patch Check-return-code-of-UTF8_putc.patch Verify-ASN1-object-s-types-before-attempting-to-access-th.patch Add-NULL-check-to-PKCS12_item_decrypt_d2i_ex.patch Ensure-ASN1-types-are-checked-before-use.patch dane_match_cert-should-X509_free-on-mcert-instead.patch Fix-NULL-Dereference-When-Delta-CRL-Lacks-CRL-Number-Exte.patch Added-test-for-CVE-2026-28388.patch Fix-NULL-deref-in-ec-dh_cms_set_shared_info.patch Test-for-DH-ECDH-CMS-KARI-processing-NULL-pointer-derefer.patch Fix-NULL-deref-in-rsa_cms_decrypt.patch Add-test-smime-certs-smrsa3-cert-key-.pem.patch Add-test-for-CMS-decryption-with-RSA-keys.patch 80-test_cms.t-Accept-success-in-malformed-RSA-decryption.patch Reject-oversized-inputs-in-ASN1_mbstring_ncopy.patch cms-kek_unwrap_key-Fix-out-of-bounds-read-in-check-byte-v.patch cms-kek_unwrap_key-test-for-fix-out-of-bounds-read-in-che.patch Avoid-length-truncation-in-ASN1_STRING_set.patch Fix-potential-NULL-dereference-processing-CMS-PasswordRec.patch Test-for-CVE-2026-42766.patch Fix-possible-use-after-free-in-OpenSSL-PKCS7_verify.patch Test-for-CVE-2026-45447-UAF-in-PKCS7_verify.patch"
+
+port_configure() {
+  local target="linux-x86_64"
+  case "$(uname -m)" in
+    aarch64|arm64) target="linux-aarch64" ;;
+  esac
+  ./Configure "$target" no-asm no-async zlib -DOPENSSL_NO_SECURE_MEMORY \
+    --prefix="$PIZFIX/opt/openssl1.1" \
+    --openssldir="$PIZFIX/opt/openssl1.1/ssl" \
+    --libdir=lib \
+    --with-zlib-include="$PIZFIX/include" --with-zlib-lib="$PIZFIX/lib" \
+    -I"$PIZFIX/include" -L"$PIZFIX/lib"
+}
+
+port_build() {
+  make -j"$JOBS"
+}
+
+port_install() {
+  make -j"$JOBS" install_sw install_ssldirs
+
+  # Place versioned runtime SONAME shared libraries (libssl.so.1.1 / libcrypto.so.1.1)
+  # directly in $PIZFIX/lib so OpenSSL 1.1.1 coexists collision-free with OpenSSL 3.6.5
+  # (.so.3) and downstream binaries (bin/openssl11, bin/php7.*) resolve them via
+  # standard $ORIGIN/../lib RPATH after package-port relocation.
+  mkdir -p "$PIZFIX/lib/pkgconfig" "$PIZFIX/bin"
+  mv "$PIZFIX/opt/openssl1.1/lib/libcrypto.so.1.1" "$PIZFIX/lib/libcrypto.so.1.1"
+  mv "$PIZFIX/opt/openssl1.1/lib/libssl.so.1.1" "$PIZFIX/lib/libssl.so.1.1"
+  ln -sf "../../../lib/libcrypto.so.1.1" "$PIZFIX/opt/openssl1.1/lib/libcrypto.so.1.1"
+  ln -sf "../../../lib/libssl.so.1.1" "$PIZFIX/opt/openssl1.1/lib/libssl.so.1.1"
+  ln -sf "../../../lib/libcrypto.so.1.1" "$PIZFIX/opt/openssl1.1/lib/libcrypto.so"
+  ln -sf "../../../lib/libssl.so.1.1" "$PIZFIX/opt/openssl1.1/lib/libssl.so"
+
+  # Move CLI binary to $PIZFIX/bin/openssl11 (keeps opt/openssl1.1/bin/openssl symlink)
+  mv "$PIZFIX/opt/openssl1.1/bin/openssl" "$PIZFIX/bin/openssl11"
+  ln -sf "../../../bin/openssl11" "$PIZFIX/opt/openssl1.1/bin/openssl"
+
+  # Install versioned pkg-config files pointing into $PIZFIX/opt/openssl1.1
+  sed -e 's|^Name: OpenSSL-libcrypto$|Name: OpenSSL11-libcrypto|' \
+      -e 's|^Requires\.private:.*|Requires.private: zlib|' \
+      "$PIZFIX/opt/openssl1.1/lib/pkgconfig/libcrypto.pc" > "$PIZFIX/lib/pkgconfig/libcrypto11.pc"
+  sed -e 's|^Name: OpenSSL-libssl$|Name: OpenSSL11-libssl|' \
+      -e 's|^Requires\.private: libcrypto$|Requires.private: libcrypto11|' \
+      "$PIZFIX/opt/openssl1.1/lib/pkgconfig/libssl.pc" > "$PIZFIX/lib/pkgconfig/libssl11.pc"
+  sed -e 's|^Name: OpenSSL$|Name: OpenSSL11|' \
+      -e 's|^Requires: libssl libcrypto$|Requires: libssl11 libcrypto11|' \
+      "$PIZFIX/opt/openssl1.1/lib/pkgconfig/openssl.pc" > "$PIZFIX/lib/pkgconfig/openssl11.pc"
+}
+
+port_test() {
+  "$PIZFIX/bin/openssl11" version | grep -q 'OpenSSL 1\.1\.1w'
+  pkg-config --modversion openssl11 | grep -q '^1\.1\.1w$'
+  pkg-config --cflags openssl11 | grep -Fq "opt/openssl1.1/include"
+  HARNESS_JOBS="$JOBS" make test TESTS="test_sha test_evp test_rsa test_ec test_x509 test_ssl_new test_cms"
+  local td
+  td="$(mktemp -d)"
+  printf 'filc-openssl11-check\n' > "$td/in.txt"
+  "$PIZFIX/bin/openssl11" dgst -sha256 "$td/in.txt" | grep -q 'SHA256'
+  "$PIZFIX/bin/openssl11" enc -aes-256-cbc -pbkdf2 -pass pass:filc-test -in "$td/in.txt" -out "$td/out.enc"
+  "$PIZFIX/bin/openssl11" enc -d -aes-256-cbc -pbkdf2 -pass pass:filc-test -in "$td/out.enc" -out "$td/out.txt"
+  cmp -s "$td/in.txt" "$td/out.txt"
+  "$PIZFIX/bin/openssl11" genpkey -algorithm ED25519 -out "$td/ed.key"
+  "$PIZFIX/bin/openssl11" pkeyutl -sign -inkey "$td/ed.key" -rawin -in "$td/in.txt" -out "$td/in.sig"
+  "$PIZFIX/bin/openssl11" pkeyutl -verify -inkey "$td/ed.key" -rawin -in "$td/in.txt" -sigfile "$td/in.sig"
+  rm -rf "$td"
+}
+
+port_package_smoke() {
+  "$PKG_PREFIX/bin/openssl11" version | grep -q 'OpenSSL 1\.1\.1w'
+  printf 'hello\n' | "$PKG_PREFIX/bin/openssl11" dgst -sha256 | grep -q '5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03'
+  test -f "$PKG_PREFIX/lib/libssl.so.1.1"
+  test -f "$PKG_PREFIX/lib/libcrypto.so.1.1"
+  test -f "$PKG_PREFIX/lib/pkgconfig/openssl11.pc"
+  grep -Fq "/opt/openssl1.1" "$PKG_PREFIX/lib/pkgconfig/openssl11.pc"
+}

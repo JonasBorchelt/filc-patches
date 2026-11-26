@@ -1760,10 +1760,35 @@ Dir.mktmpdir("filc-pkg-ca-") do |td|
   assert(Dir.glob(File.join(ch_dir, "bin", ".tmp-*")).empty?, "no leftover .tmp-* files in bin/")
   assert(Dir.glob(File.join(ch_dir, "recipes", ".tmp-*")).empty?, "no leftover .tmp-* files in recipes/")
   assert(!e1.key?("docker_image"), "port without DOCKER_IMAGE_* must not emit docker_image")
+  assert(!e2.key?("support"), "active port must not emit eol support metadata")
+
+  # Test 19: EOL metadata fields (support, eol_date, security_source) emitted in index.json
+  File.write(File.join(ca_repo, "ports", "rebuilt", "PORT"), <<~PORT)
+    NAME=rebuilt
+    VERSION=1.0+deb11u1
+    LICENSE=MIT
+    SUPPORT_STATUS=eol
+    EOL_DATE=2023-09-11
+    SECURITY_SOURCE=freexian-elts
+    UPSTREAM_URL=https://example.invalid/rebuilt-1.0.tar.gz
+    UPSTREAM_SHA256=#{src_sha}
+    EXTRACT_DIR=rebuilt-1.0
+    TIER=0
+    DEPS=""
+    BUILD_SYSTEM=autotools
+    POLICY_CLASS=P4-Audit
+  PORT
+  FileUtils.cp(src_tar, File.join(ca_cache, "rebuilt-1.0+deb11u1-#{src_sha[0, 12]}-rebuilt-1.0.tar.gz"))
+  idx_eol = run_pkg.call
+  e_eol = idx_eol.dig("packages", "rebuilt")
+  assert(e_eol["support"] == "eol", "expected support=eol, got #{e_eol['support'].inspect}")
+  assert(e_eol["eol_date"] == "2023-09-11", "expected eol_date=2023-09-11, got #{e_eol['eol_date'].inspect}")
+  assert(e_eol["security_source"] == "freexian-elts", "expected security_source=freexian-elts, got #{e_eol['security_source'].inspect}")
+  puts "[19/21] EOL metadata (support, eol_date, security_source) emitted in index.json"
 end
 
-# Test 19: Optional DOCKER_IMAGE_* metadata in PORT is forwarded into index.json
-puts "[19/20] Optional DOCKER_IMAGE_* metadata in PORT is forwarded into index.json"
+# Test 20: Optional DOCKER_IMAGE_* metadata in PORT is forwarded into index.json
+puts "[20/21] Optional DOCKER_IMAGE_* metadata in PORT is forwarded into index.json"
 Dir.mktmpdir("filc-test-pkg-docker-") do |td|
   dm_repo = File.join(td, "repo")
   dm_work = File.join(td, "work")
@@ -1828,8 +1853,8 @@ Dir.mktmpdir("filc-test-pkg-docker-") do |td|
          "unexpected docker_image in index.json: #{idx.dig('packages', 'php8.5', 'docker_image').inspect}")
 end
 
-# Test 20: Bounded idempotent retry with backoff for transient upload errors
-puts "[20/20] upload-ports bounded idempotent retry (EOFError/503, HEAD SHA check, hard 4xx/mismatch)"
+# Test 21: Bounded idempotent retry with backoff for transient upload errors
+puts "[21/21] upload-ports bounded idempotent retry (EOFError/503, HEAD SHA check, hard 4xx/mismatch)"
 Dir.mktmpdir("filc-test-upload-retry-") do |td|
   ch_dir = File.join(td, "0.1.6", "x86_64-linux")
   %w[src recipes bin].each { |b| FileUtils.mkdir_p(File.join(ch_dir, b)) }
@@ -1946,4 +1971,4 @@ Dir.mktmpdir("filc-test-upload-retry-") do |td|
   assert(e.include?("post-upload HEAD") && e.include?("SHA-256 mismatch"), "20e must fail in post-upload SHA-256 check: #{e}")
 end
 
-puts "TEST_PACKAGE_PORT: PASS (20/20)"
+puts "TEST_PACKAGE_PORT: PASS (21/21)"

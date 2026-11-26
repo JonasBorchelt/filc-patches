@@ -24,15 +24,19 @@ require "json"
 require "open3"
 require "openssl"
 require "optparse"
+require "stringio"
 require "tmpdir"
+require "zlib"
 
 SHA256_RE = /\A[0-9a-f]{64}\z/
 FPR_RE = /\A[0-9A-F]{40}\z/
-DIRECT_SCHEMES = %w[sha256: sha256-html: pgp:].freeze
+DATE_RE = /\A\d{4}-\d{2}-\d{2}\z/
+DIRECT_SCHEMES = %w[sha256: sha256-html: pgp: debian-elts:].freeze
 VERIFIABLE_SCHEMES = %w[
   sha256:
   sha256-html:
   pgp:
+  debian-elts:
   github-release-digest:
   upstream-sha512-only:
   upstream-sha3-256:
@@ -183,10 +187,45 @@ def parse_pgp_source(source)
   out
 end
 
+def parse_debian_elts_source(source)
+  tokens = source.split
+  out = {}
+  tokens.each do |tok|
+    raise ArgumentError, "malformed debian-elts source token: #{py_repr(tok)}" unless tok.include?(":")
+
+    k, v = tok.split(":", 2)
+    out[k] = v
+  end
+  %w[debian-elts pkg ver key fpr].each do |req|
+    val = out[req]
+    if val.nil? || val.empty?
+      raise ArgumentError, "debian-elts source missing '#{req}:' field: #{py_repr(source)}"
+    end
+  end
+  unless FPR_RE.match?(out["fpr"])
+    raise ArgumentError, "invalid 40-char uppercase hex fingerprint: #{py_repr(out['fpr'])}"
+  end
+
+  out
+end
+
 def validate_metadata(name, meta, repo_root)
   errors = []
   sha = meta.fetch("UPSTREAM_SHA256", "")
   errors << "#{name}: invalid UPSTREAM_SHA256=#{py_repr(sha)}" unless SHA256_RE.match?(sha)
+
+  support = meta.fetch("SUPPORT_STATUS", "").strip
+  unless support.empty?
+    unless %w[active eol].include?(support)
+      errors << "#{name}: invalid SUPPORT_STATUS=#{py_repr(support)} (expected 'active' or 'eol')"
+    end
+    if support == "eol"
+      eol_date = meta.fetch("EOL_DATE", "").strip
+      errors << "#{name}: EOL port missing valid YYYY-MM-DD EOL_DATE" unless DATE_RE.match?(eol_date)
+      sec_src = meta.fetch("SECURITY_SOURCE", "").strip
+      errors << "#{name}: EOL port missing SECURITY_SOURCE" if sec_src.empty?
+    end
+  end
 
   src = meta.fetch("UPSTREAM_SHA256_SOURCE", "")
   if src.empty?
@@ -215,6 +254,33 @@ def validate_metadata(name, meta, repo_root)
     end
     if meta["UPSTREAM_PGP_FPR"] && !meta["UPSTREAM_PGP_FPR"].empty? && meta["UPSTREAM_PGP_FPR"] != spec["fpr"]
       errors << "#{name}: UPSTREAM_PGP_FPR does not match UPSTREAM_SHA256_SOURCE"
+    end
+
+    key_abs = File.expand_path(spec["key"], repo_root)
+    if !File.file?(key_abs)
+      errors << "#{name}: pinned PGP key file not found: #{spec['key']}"
+    else
+      fprs = parse_openpgp_v4_fingerprints(File.binread(key_abs))
+      unless fprs.include?(spec["fpr"])
+        errors << "#{name}: fingerprint #{spec['fpr']} not found in #{spec['key']} " \
+                  "(found: #{py_list_repr(fprs)})"
+      end
+    end
+  elsif src.start_with?("debian-elts:")
+    begin
+      spec = parse_debian_elts_source(src)
+    rescue ArgumentError => e
+      errors << "#{name}: #{e.message}"
+      return errors
+    end
+
+    deb_url = meta.fetch("DEBIAN_TARBALL_URL", "")
+    deb_sha = meta.fetch("DEBIAN_TARBALL_SHA256", "")
+    errors << "#{name}: missing DEBIAN_TARBALL_URL for debian-elts source" if deb_url.empty?
+    errors << "#{name}: invalid DEBIAN_TARBALL_SHA256=#{py_repr(deb_sha)}" unless SHA256_RE.match?(deb_sha)
+    dsc_sha = meta.fetch("DEBIAN_DSC_SHA256", "")
+    if !dsc_sha.empty? && !SHA256_RE.match?(dsc_sha)
+      errors << "#{name}: invalid DEBIAN_DSC_SHA256=#{py_repr(dsc_sha)}"
     end
 
     key_abs = File.expand_path(spec["key"], repo_root)
@@ -510,6 +576,160 @@ def verify_pgp_signature(tarball_path, sig_url, key_abs, expected_fpr, cache_dir
   end
 end
 
+def verify_pgp_clearsign(signed_bytes, key_abs, expected_fpr)
+  gpg_bin = which_bin("gpg")
+  raise RuntimeError, "gpg is required for PGP clearsign verification but is not installed" unless gpg_bin
+
+  Dir.mktmpdir("filc-verify-gpg-") do |td|
+    gnupg_home = File.join(td, "gnupg")
+    Dir.mkdir(gnupg_home, 0o700)
+    signed_path = File.join(td, "InRelease")
+    verified_path = File.join(td, "verified.txt")
+    File.binwrite(signed_path, signed_bytes)
+    env = ENV.to_h.merge("GNUPGHOME" => gnupg_home)
+
+    _imp_out, imp_err, imp_st = Open3.capture3(env, gpg_bin, "--batch", "--quiet", "--import", key_abs)
+    raise RuntimeError, "gpg --import failed: #{decode_utf8(imp_err).strip}" unless imp_st.success?
+
+    fpr_out, fpr_err, fpr_st = Open3.capture3(env, gpg_bin, "--batch", "--with-colons", "--fingerprint")
+    raise RuntimeError, "gpg --fingerprint failed: #{decode_utf8(fpr_err).strip}" unless fpr_st.success?
+
+    imported_fprs = {}
+    decode_utf8(fpr_out).each_line do |line|
+      next unless line.start_with?("fpr:")
+
+      cols = line.split(":")
+      imported_fprs[cols[9].upcase] = true if cols.length > 9 && cols[9]
+    end
+    unless imported_fprs.key?(expected_fpr)
+      raise RuntimeError, "pinned fingerprint #{expected_fpr} missing after gpg --import"
+    end
+
+    ver_out, ver_err, ver_st = Open3.capture3(
+      env, gpg_bin, "--batch", "--status-fd", "1", "--output", verified_path, "--decrypt", signed_path
+    )
+    status_txt = decode_utf8(ver_out)
+    unless ver_st.success?
+      raise RuntimeError, "gpg --decrypt InRelease failed (#{ver_st.exitstatus}): #{decode_utf8(ver_err).strip}"
+    end
+
+    matched = false
+    status_txt.each_line do |line|
+      next unless line.start_with?("[GNUPG:] VALIDSIG ")
+
+      fields = line.split
+      sig_fpr = fields.length > 2 ? fields[2].upcase : ""
+      primary_fpr = fields.length > 11 ? fields[11].upcase : ""
+      if expected_fpr == sig_fpr || expected_fpr == primary_fpr
+        matched = true
+        break
+      end
+    end
+    unless matched
+      raise RuntimeError, "gpg verified InRelease but VALIDSIG did not match pinned fingerprint #{expected_fpr}"
+    end
+
+    decode_utf8(File.binread(verified_path))
+  end
+end
+
+def verify_debian_elts_pin(name, meta, spec, repo_root, cache_dir)
+  inrelease_url = spec["debian-elts"]
+  key_abs = File.expand_path(spec["key"], repo_root)
+  inrelease_bytes, inr_cached = fetch_cached_bytes(inrelease_url, cache_dir)
+  verified_inrelease = begin
+    verify_pgp_clearsign(inrelease_bytes, key_abs, spec["fpr"])
+  rescue StandardError
+    raise unless inr_cached
+
+    inrelease_bytes, = fetch_cached_bytes(inrelease_url, cache_dir, force_refresh: true)
+    inr_cached = false
+    verify_pgp_clearsign(inrelease_bytes, key_abs, spec["fpr"])
+  end
+
+  sources_rel = nil
+  sources_sha = nil
+  in_sha256 = false
+  verified_inrelease.each_line do |raw|
+    if raw.start_with?("SHA256:")
+      in_sha256 = true
+      next
+    elsif in_sha256 && raw.start_with?(" ")
+      parts = raw.strip.split(/\s+/, 3)
+      if parts.length == 3 && parts[2] == "main/source/Sources.gz" && SHA256_RE.match?(parts[0].downcase)
+        sources_sha = parts[0].downcase
+        sources_rel = parts[2]
+        break
+      end
+    elsif in_sha256
+      in_sha256 = false
+    end
+  end
+  raise RuntimeError, "could not find main/source/Sources.gz SHA256 in verified #{inrelease_url}" unless sources_rel
+
+  base_url = inrelease_url.sub(%r{/[^/]+\z}, "")
+  sources_url = "#{base_url}/#{sources_rel}"
+  src_bytes, = fetch_cached_bytes(sources_url, cache_dir)
+  got_src_sha = Digest::SHA256.hexdigest(src_bytes)
+  if got_src_sha != sources_sha
+    src_bytes, = fetch_cached_bytes(sources_url, cache_dir, force_refresh: true)
+    got_src_sha = Digest::SHA256.hexdigest(src_bytes)
+    if got_src_sha != sources_sha
+      raise RuntimeError, "Sources.gz SHA-256 mismatch for #{sources_url}: InRelease=#{sources_sha}, got=#{got_src_sha}"
+    end
+  end
+
+  sources_txt = Zlib::GzipReader.new(StringIO.new(src_bytes)).read.force_encoding(Encoding::UTF_8).scrub
+  checksums = nil
+  sources_txt.split("\n\n").each do |stanza|
+    pkg_m = /^Package:\s*(\S+)/.match(stanza)
+    ver_m = /^Version:\s*(\S+)/.match(stanza)
+    next unless pkg_m && ver_m && pkg_m[1] == spec["pkg"] && ver_m[1] == spec["ver"]
+
+    map = {}
+    in_cs = false
+    stanza.each_line do |ln|
+      if ln.start_with?("Checksums-Sha256:")
+        in_cs = true
+      elsif in_cs && ln.start_with?(" ")
+        parts = ln.strip.split(/\s+/, 3)
+        map[parts[2]] = parts[0].downcase if parts.length == 3
+      elsif in_cs
+        in_cs = false
+      end
+    end
+    checksums = map
+    break
+  end
+  raise RuntimeError, "package #{spec['pkg']} #{spec['ver']} not found in #{sources_url}" unless checksums
+
+  orig_name = File.basename(meta.fetch("UPSTREAM_URL").split("?", 2)[0])
+  deb_name = File.basename(meta.fetch("DEBIAN_TARBALL_URL").split("?", 2)[0])
+  want_orig = meta.fetch("UPSTREAM_SHA256")
+  want_deb = meta.fetch("DEBIAN_TARBALL_SHA256")
+  got_orig = checksums[orig_name]
+  got_deb = checksums[deb_name]
+  if got_orig != want_orig
+    raise RuntimeError, "orig SHA-256 mismatch for #{orig_name}: PORT=#{want_orig}, ELTS=#{py_repr(got_orig)}"
+  end
+  if got_deb != want_deb
+    raise RuntimeError, "debian tarball SHA-256 mismatch for #{deb_name}: PORT=#{want_deb}, ELTS=#{py_repr(got_deb)}"
+  end
+
+  want_dsc = meta.fetch("DEBIAN_DSC_SHA256", "")
+  unless want_dsc.empty?
+    dsc_entry = checksums.find { |fname, _| fname.end_with?(".dsc") }
+    got_dsc = dsc_entry ? dsc_entry[1] : nil
+    if got_dsc != want_dsc
+      raise RuntimeError, "dsc SHA-256 mismatch for #{spec['pkg']} #{spec['ver']}: PORT=#{want_dsc}, ELTS=#{py_repr(got_dsc)}"
+    end
+  end
+
+  src_note = inr_cached ? "cached InRelease, verified" : "fetched InRelease, verified"
+  "OK [debian-elts] #{name} #{meta['VERSION']} " \
+  "(fpr=#{spec['fpr'][0, 12]}..., orig=#{want_orig[0, 12]}..., deb=#{want_deb[0, 12]}..., #{src_note})"
+end
+
 def verify_port_online(name, meta, repo_root, cache_dir, strict)
   src = meta.fetch("UPSTREAM_SHA256_SOURCE")
   expected = meta.fetch("UPSTREAM_SHA256")
@@ -549,6 +769,11 @@ def verify_port_online(name, meta, repo_root, cache_dir, strict)
     sig_note = sig_cached ? "cached .sig, verified" : "fetched .sig, verified"
     return "OK [#{details.join('+')}] #{name} #{meta['VERSION']} " \
            "(fpr=#{spec['fpr'][0, 12]}..., sha256=#{expected[0, 12]}..., #{sig_note})"
+  end
+
+  if src.start_with?("debian-elts:")
+    spec = parse_debian_elts_source(src)
+    return verify_debian_elts_pin(name, meta, spec, repo_root, cache_dir)
   end
 
   if src.start_with?("github-release-digest:")

@@ -184,8 +184,13 @@ module PortPackager
         "tier" => Integer(meta["TIER"], 10),
         "deps" => deps,
         "policy_class" => meta["POLICY_CLASS"],
+        "support" => meta["SUPPORT_STATUS"].to_s.strip,
+        "eol_date" => meta["EOL_DATE"].to_s.strip,
+        "security_source" => meta["SECURITY_SOURCE"].to_s.strip,
         "upstream_url" => meta["UPSTREAM_URL"],
         "upstream_sha256" => meta["UPSTREAM_SHA256"],
+        "debian_tarball_url" => meta["DEBIAN_TARBALL_URL"].to_s.strip,
+        "debian_tarball_sha256" => meta["DEBIAN_TARBALL_SHA256"].to_s.strip,
         "port_dir" => pdir
       }
       port_meta["docker_image"] = docker_img if docker_img
@@ -1868,6 +1873,9 @@ module PortPackager
             },
             "built_at" => Time.now.utc.iso8601
           }
+          pkg_entry["support"] = meta["support"] unless meta["support"].to_s.empty?
+          pkg_entry["eol_date"] = meta["eol_date"] unless meta["eol_date"].to_s.empty?
+          pkg_entry["security_source"] = meta["security_source"] unless meta["security_source"].to_s.empty?
           pkg_entry["ci_run"] = opts[:ci_run] if opts[:ci_run]
           pkg_entry["repo_commit"] = repo_commit if repo_commit
           pkg_entry["docker_image"] = meta["docker_image"] if meta["docker_image"]

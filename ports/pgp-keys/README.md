@@ -4,6 +4,7 @@ Armored OpenPGP release signing keys pinned for `scripts/verify-pins`:
 
 - `curl-release-key.asc`: Daniel Stenberg (`https://daniel.haxx.se/mykey.asc`), fingerprint `27EDEAF22F3ABCEB50DB9A125CC908FDB71E12C2`.
 - `file-zoulas-release-key.asc`: Christos Zoulas (`keys.openpgp.org`, `file` / `libmagic`), fingerprint `BE04995BA8F90ED0C0C176C471112AB16CB33B3A`.
+- `freexian-elts-archive-key.asc`: Freexian Extended LTS Repository (`https://deb.freexian.com/extended-lts/archive-key.gpg`), fingerprint `AB597C4F6F3380BD4B2BEBC2A07310D369055D5A`.
 - `gmp-moeller-release-key.asc`: Niels Moeller (`keys.openpgp.org`), fingerprint `343C2FF0FBEE5EC2EDBEF399F3599FF828C67298`.
 - `gnu-blake-release-key.asc`: Eric Blake (`keyserver.ubuntu.com`, GNU m4), fingerprint `71C2CC22B1C4602927D2F3AAA7A16B4A2527436A`.
 - `gnu-brady-release-key.asc`: Padraig Brady (`keyserver.ubuntu.com`, GNU coreutils), fingerprint `6C37DC12121A5006BC1DB804DF6FD971306037D9`.

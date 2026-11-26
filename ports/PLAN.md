@@ -563,3 +563,20 @@ requirements:
 
 Planned follow-ups in dependency order: `php8.4` -> additional PHP release lines
 (side-by-side versioned prefixes).
+
+---
+
+## 8. Stage 6c: Legacy EOL Ports (Freexian ELTS Security-Patched)
+
+Legacy upstream End-of-Life runtimes and libraries built strictly from
+Freexian Extended LTS (ELTS) source packages verified via the pinned Freexian
+ELTS archive signing key (`AB597C4F6F3380BD4B2BEBC2A07310D369055D5A`). Only
+explicitly allowlisted security/bugfix patches from `debian/patches/series` are
+applied (skipping Debian packaging/integration patches), followed by Fil-C
+compatibility patches. All EOL ports carry explicit `SUPPORT_STATUS="eol"`,
+`EOL_DATE`, and `SECURITY_SOURCE="freexian-elts"` metadata in `index.json` and
+on `filc-live` `/ports`.
+
+| Package | Tier | Deps | Freexian ELTS Version | Upstream EOL | Policy Class | Notes |
+|---|---|---|---|---|---|---|
+| `openssl1.1` | 3 | `zlib`, `pkgconf` | `1.1.1w+deb11u8` (`bullseye` ELTS, 40/46 security patches) | `2023-09-11` | `P4-Audit` | Side-by-side OpenSSL 1.1.1w (`lib/lib{ssl,crypto}.so.1.1`, `opt/openssl1.1/`, `bin/openssl11`, `openssl11.pc`) with zero collision against OpenSSL 3.6.5; pure-C `no-asm no-async -DOPENSSL_NO_SECURE_MEMORY` (0 Fil-C patches). |

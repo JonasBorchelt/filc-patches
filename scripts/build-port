@@ -110,6 +110,13 @@ TEST_CMD=""
 POLICY_CLASS=""
 POLICY_RATIONALE=""
 FILC_ORIGIN_REF=""
+SUPPORT_STATUS=""
+EOL_DATE=""
+SECURITY_SOURCE=""
+DEBIAN_TARBALL_URL=""
+DEBIAN_TARBALL_SHA256=""
+DEBIAN_DSC_SHA256=""
+DEBIAN_SECURITY_PATCHES=""
 
 # shellcheck source=/dev/null
 source "$PORT_FILE"
@@ -541,8 +548,47 @@ if [[ ! -d "$SRC_DIR" ]]; then
   exit 1
 fi
 
-# 4. Apply patches (if any)
+# 4. Apply patches (Debian ELTS security patches if configured, then Fil-C series)
 CURRENT_STAGE="patch"
+if [[ -n "$DEBIAN_TARBALL_URL" ]]; then
+  if [[ -z "$DEBIAN_TARBALL_SHA256" ]]; then
+    echo "error: $PORT_FILE sets DEBIAN_TARBALL_URL without DEBIAN_TARBALL_SHA256" >&2
+    exit 1
+  fi
+  DEB_TARBALL_NAME="$(basename "${DEBIAN_TARBALL_URL%%\?*}")"
+  DEB_TARBALL_PATH="$CACHE_DIR/${NAME}-${VERSION}-${DEBIAN_TARBALL_SHA256:0:12}-${DEB_TARBALL_NAME}"
+  if [[ ! -f "$DEB_TARBALL_PATH" ]]; then
+    TMP_DEB_DL="$DEB_TARBALL_PATH.part.$$"
+    rm -f "$TMP_DEB_DL"
+    curl -fsSL --retry 3 --retry-delay 2 -o "$TMP_DEB_DL" "$DEBIAN_TARBALL_URL"
+    mv "$TMP_DEB_DL" "$DEB_TARBALL_PATH"
+  fi
+  ACTUAL_DEB_SHA="$(compute_sha256 "$DEB_TARBALL_PATH")"
+  if [[ "$ACTUAL_DEB_SHA" != "$DEBIAN_TARBALL_SHA256" ]]; then
+    echo "error: SHA-256 mismatch for $DEB_TARBALL_PATH" >&2
+    echo "  expected: $DEBIAN_TARBALL_SHA256" >&2
+    echo "  actual:   $ACTUAL_DEB_SHA" >&2
+    rm -f "$DEB_TARBALL_PATH"
+    exit 1
+  fi
+  echo "Debian ELTS tarball SHA-256 verified: $ACTUAL_DEB_SHA"
+  DEB_EXTRACT_DIR="$PORT_BUILD_DIR/_debian"
+  rm -rf "$DEB_EXTRACT_DIR"
+  mkdir -p "$DEB_EXTRACT_DIR"
+  tar -xf "$DEB_TARBALL_PATH" -C "$DEB_EXTRACT_DIR"
+  DEB_APPLIED=0
+  for dp in $DEBIAN_SECURITY_PATCHES; do
+    dpfile="$DEB_EXTRACT_DIR/debian/patches/$dp"
+    if [[ ! -f "$dpfile" ]]; then
+      echo "error: Debian ELTS security patch not found in tarball: $dpfile" >&2
+      exit 1
+    fi
+    echo "Applying Debian ELTS security patch: $dp"
+    patch -d "$SRC_DIR" -p1 --batch --forward -F 0 < "$dpfile"
+    DEB_APPLIED=$((DEB_APPLIED + 1))
+  done
+  echo "Applied $DEB_APPLIED Debian ELTS security patch(es)"
+fi
 if [[ -f "$PORT_DIR/patches/series" ]]; then
   while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
     line="${raw_line%%#*}"

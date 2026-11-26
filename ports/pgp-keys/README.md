@@ -20,6 +20,7 @@ Armored OpenPGP release signing keys pinned for `scripts/verify-pins`:
 - `ncurses-release-key.asc`: Thomas E. Dickey (`https://invisible-island.net/public/dickey@invisible-island.net-rsa3072.asc`), fingerprint `19882D92DDA4C400C22C0D56CC2AF4472167BE03`.
 - `nginx-kandaurov-release-key.asc`: Sergey Kandaurov (`https://nginx.org/keys/pluknet.key`), primary fingerprint `D6786CE303D9A9022998DC6CC8464D549AF75C0A`.
 - `openssh-release-key.asc`: Damien Miller (`https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/RELEASE_KEY.asc`), fingerprint `7168B983815A5EEF59A4ADFD2A3F414E736060BA`.
+- `php-8.2-charron-release-key.asc`: Pierrick Charron (`keys.openpgp.org`, PHP 8.2 Release Manager, cross-checked against `https://www.php.net/gpg-keys.php`), fingerprint `1198C0117593497A5EC5C199286AF1F9897469DC`.
 - `php-8.3-zelenka-release-key.asc`: Jakub Zelenka (`keys.openpgp.org`, PHP 8.3 Release Manager), fingerprint `C28D937575603EB4ABB725861C0779DC5C0A9DE4`.
 - `php-8.4-takamachi-release-key.asc`: Saki Takamachi (`keyserver.ubuntu.com`, PHP 8.4 Release Manager, cross-checked against `https://www.php.net/gpg-keys.php`), fingerprint `0616E93D95AF471243E26761770426E17EBBB3DD`.
 - `php-8.5-dusch-release-key.asc`: Volker Dusch (`keyserver.ubuntu.com`, PHP 8.5 Release Manager, cross-checked against `https://www.php.net/gpg-keys.php`), fingerprint `49D9AF6BC72A80D6691719C8AA23F5BE9C7097D4`.

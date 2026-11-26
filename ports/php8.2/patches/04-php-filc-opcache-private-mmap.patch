@@ -1,0 +1,36 @@
+Subject: Map opcache privately and skip MAP_32BIT huge-page remap under Fil-C
+Policy-Class: P4-Audit
+Rationale: Under Fil-C, pointer capabilities are per-process, so a pointer stored in a MAP_SHARED opcache region by one FPM worker has no capability in another worker and traps on dereference. Map opcache regions MAP_PRIVATE under __FILC__ and skip the x86_64 MAP_32BIT huge-page unmap/remap probe.
+Upstream-Status: Fil-C-Specific
+Fil-C-Origin-Commits: fd1f26a649078e4e12cb01026cf43199b6e6d160
+Origin-Kind: filc-upstream
+Origin-Project: pizlonator/fil-c
+Origin-Commit: fd1f26a649078e4e12cb01026cf43199b6e6d160
+Origin-URL: https://github.com/pizlonator/fil-c/commit/fd1f26a649078e4e12cb01026cf43199b6e6d160
+
+--- a/ext/opcache/shared_alloc_mmap.c
++++ b/ext/opcache/shared_alloc_mmap.c
+@@ -41,6 +41,14 @@
+ #if defined(MAP_ANON) && !defined(MAP_ANONYMOUS)
+ # define MAP_ANONYMOUS MAP_ANON
+ #endif
++#ifdef __FILC__
++/* Fil-C keeps pointer capabilities per process, so a pointer one process
++ * stores in a shared mapping has none in another: an FPM worker trapped
++ * reading the hash entry of a script another worker had cached. Map the
++ * cache privately; forked workers still start from what the parent cached. */
++# undef MAP_SHARED
++# define MAP_SHARED MAP_PRIVATE
++#endif
+ #if defined(MAP_ALIGNED_SUPER)
+ # include <sys/types.h>
+ # include <sys/sysctl.h>
+@@ -232,7 +240,7 @@
+ 	 * (boot time config only, but enabled by default on most arches).
+ 	 */
+ 	if (requested_size >= huge_page_size && requested_size % huge_page_size == 0) {
+-# if defined(__x86_64__) && defined(MAP_32BIT)
++# if defined(__x86_64__) && defined(MAP_32BIT) && !defined(__FILC__)
+ 		/* to got HUGE PAGES in low 32-bit address we have to reserve address
+ 		   space and then remap it using MAP_HUGETLB */
+ 

@@ -684,7 +684,38 @@ Dir.mktmpdir("filc-stream-test-") do |tmp|
          "expected omission marker between anchor window and EOF:\n#{anchored_tail.join("\n")}")
   assert(anchored_tail.any? { |l| l.include?("trailing cleanup line 120") },
          "expected EOF trailing line to still be included:\n#{anchored_tail.join("\n")}")
-  puts "FAILURE_ANCHORED_LOG_TAIL: PASS (anchor window + omission banner + EOF tail)"
+
+  tap_log = File.join(tmp, "tap-test-fail.log")
+  tap_lines = (1..120).map { |i| "install /opt/filc/0.1.5/pizfix/opt/openssl1.1/include/hdr#{i}.h" }
+  tap_lines << "FILC_PORT openssl1.1 testing policy=P4-Audit stage=test"
+  tap_lines << "../test/recipes/15-test_ec.t ....... "
+  tap_lines << "    not ok 1 - running ectest"
+  tap_lines << "    filc safety error: cannot read pointer with null aux"
+  tap_lines << "    Dubious, test returned 1 (wstat 256, 0x100)"
+  tap_lines << "    Failed 1/11 subtests"
+  tap_lines.concat((1..110).map { |i| "../test/recipes/99-other-#{i}.t ... ok" })
+  tap_lines << "Test Summary Report"
+  tap_lines << "Result: FAIL"
+  tap_lines << "make: *** [Makefile:205: tests] Error 2"
+  tap_lines << "STAGE_CMD_FAILED port=openssl1.1 stage=test fn=port_test line=86 rc=2 cmd=make"
+  tap_text = tap_lines.join("\n") + "\n"
+  File.write(tap_log, tap_text, encoding: "UTF-8")
+  tap_tail = PublishPortsStream.read_log_tail(tap_log, max_lines: 80, stage: "test")
+  assert(tap_tail.any? { |l| l.include?("not ok 1 - running ectest") },
+         "stage=test tail must include earlier TAP 'not ok' failure:\n#{tap_tail.join("\n")}")
+  assert(tap_tail.any? { |l| l.include?("filc safety error") },
+         "stage=test tail must include earlier Fil-C safety error:\n#{tap_tail.join("\n")}")
+  assert(tap_tail.any? { |l| l.include?("Failed 1/11 subtests") },
+         "stage=test tail must include 'Failed 1/11 subtests':\n#{tap_tail.join("\n")}")
+  assert(tap_tail.any? { |l| l.include?("STAGE_CMD_FAILED port=openssl1.1") },
+         "stage=test tail must still include EOF STAGE_CMD_FAILED:\n#{tap_tail.join("\n")}")
+  tap_details = PublishPortsStream.extract_failure_details(tap_text, max_lines: 80, stage: "test")
+  tap_preview = PublishPortsStream.details_preview(tap_details, limit: 40)
+  assert(tap_preview.any? { |l| l.include?("not ok 1 - running ectest") },
+         "details_preview(limit: 40) must preserve TAP 'not ok' anchor:\n#{tap_preview.join("\n")}")
+  assert(tap_preview.any? { |l| l.include?("STAGE_CMD_FAILED port=openssl1.1") },
+         "details_preview(limit: 40) must preserve EOF STAGE_CMD_FAILED:\n#{tap_preview.join("\n")}")
+  puts "FAILURE_ANCHORED_LOG_TAIL: PASS (anchor window + TAP stage=test anchor + preview preservation + EOF tail)"
 
   puts "=== [9/11] Toolchain identity reacts to UPSTREAM/patch changes, ignores rebuilt binary mtimes and fetch scripts ==="
   repo_a = File.join(tmp, "tc-repo-a")

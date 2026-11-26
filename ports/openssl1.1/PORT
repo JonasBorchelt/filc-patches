@@ -19,7 +19,7 @@ MAKE_ARGS=""
 INSTALL_ARGS="install_sw install_ssldirs"
 TEST_CMD=""
 POLICY_CLASS="P4-Audit"
-POLICY_RATIONALE="EOL legacy OpenSSL 1.1.1w with 40 Freexian ELTS bullseye security/bugfix patches (1.1.1w-0+deb11u8) installed side-by-side with OpenSSL 3.6.5 (runtime .so.1.1 in lib/, dev headers/libs/ssl in opt/openssl1.1/, pkg-config openssl11/libssl11/libcrypto11, CLI bin/openssl11) for legacy PHP 7.x ports. Pure-C no-asm + no-async + -DOPENSSL_NO_SECURE_MEMORY builds with zero Fil-C source patches."
+POLICY_RATIONALE="EOL legacy OpenSSL 1.1.1w with 40 Freexian ELTS bullseye security/bugfix patches (1.1.1w-0+deb11u8) plus 1 Fil-C patch (01-filc-bn-nist-no-ptr-masking.patch: replaces PTR_SIZE_INT data/function pointer bitmasking in crypto/bn/bn_nist.c with capability-safe constant-time word selection and direct function-pointer selection) installed side-by-side with OpenSSL 3.6.5 (runtime .so.1.1 in lib/, dev headers/libs/ssl in opt/openssl1.1/, pkg-config openssl11/libssl11/libcrypto11, CLI bin/openssl11) for legacy PHP 7.x ports. Pure-C no-asm + no-async + -DOPENSSL_NO_SECURE_MEMORY build."
 # Debian ELTS patch selection (40 of 46 patches from debian/patches/series):
 # Skipped 6 Debian packaging/integration patches:
 #   - debian-targets.patch (Debian-specific Configure targets)
@@ -80,14 +80,22 @@ port_install() {
 }
 
 port_test() {
-  "$PIZFIX/bin/openssl11" version | grep -q 'OpenSSL 1\.1\.1w'
-  pkg-config --modversion openssl11 | grep -q '^1\.1\.1w$'
-  pkg-config --cflags openssl11 | grep -Fq "opt/openssl1.1/include"
-  HARNESS_JOBS="$JOBS" make test TESTS="test_sha test_evp test_rsa test_ec test_x509 test_ssl_new test_cms"
+  local ver modver cflags dgst_out
+  ver="$("$PIZFIX/bin/openssl11" version)"
+  grep -q 'OpenSSL 1\.1\.1w' <<<"$ver"
+  modver="$(pkg-config --modversion openssl11)"
+  grep -q '^1\.1\.1w$' <<<"$modver"
+  cflags="$(pkg-config --cflags openssl11)"
+  grep -Fq "opt/openssl1.1/include" <<<"$cflags"
+  local tests="test_dgst test_evp test_rsa test_ec test_x509 test_ssl_new test_cms"
+  if ! HARNESS_JOBS="$JOBS" make test TESTS="$tests"; then
+    make test V=1 TESTS="$tests"
+  fi
   local td
   td="$(mktemp -d)"
   printf 'filc-openssl11-check\n' > "$td/in.txt"
-  "$PIZFIX/bin/openssl11" dgst -sha256 "$td/in.txt" | grep -q 'SHA256'
+  dgst_out="$("$PIZFIX/bin/openssl11" dgst -sha256 "$td/in.txt")"
+  grep -q 'SHA256' <<<"$dgst_out"
   "$PIZFIX/bin/openssl11" enc -aes-256-cbc -pbkdf2 -pass pass:filc-test -in "$td/in.txt" -out "$td/out.enc"
   "$PIZFIX/bin/openssl11" enc -d -aes-256-cbc -pbkdf2 -pass pass:filc-test -in "$td/out.enc" -out "$td/out.txt"
   cmp -s "$td/in.txt" "$td/out.txt"
@@ -98,8 +106,11 @@ port_test() {
 }
 
 port_package_smoke() {
-  "$PKG_PREFIX/bin/openssl11" version | grep -q 'OpenSSL 1\.1\.1w'
-  printf 'hello\n' | "$PKG_PREFIX/bin/openssl11" dgst -sha256 | grep -q '5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03'
+  local ver dgst_out
+  ver="$("$PKG_PREFIX/bin/openssl11" version)"
+  grep -q 'OpenSSL 1\.1\.1w' <<<"$ver"
+  dgst_out="$(printf 'hello\n' | "$PKG_PREFIX/bin/openssl11" dgst -sha256)"
+  grep -q '5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03' <<<"$dgst_out"
   test -f "$PKG_PREFIX/lib/libssl.so.1.1"
   test -f "$PKG_PREFIX/lib/libcrypto.so.1.1"
   test -f "$PKG_PREFIX/lib/pkgconfig/openssl11.pc"

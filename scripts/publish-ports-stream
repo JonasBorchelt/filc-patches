@@ -938,6 +938,11 @@ module PublishPortsStream
         l.include?("SIZE_LIMIT FAILED") ||
         l.include?("PACKAGE_SMOKE FAILED") ||
         l.include?("SHA-256 mismatch") ||
+        l.include?("filc safety error") ||
+        l.include?("filc panic:") ||
+        l.match?(/\Anot ok\b/) ||
+        l.match?(/\bFailed\s+\d+\/\d+\b/) ||
+        l.match?(/\AResult:\s*FAIL\b/) ||
         l.include?("error:") ||
         l.include?("ERROR:") ||
         l.include?("FAIL:") ||
@@ -947,7 +952,51 @@ module PublishPortsStream
     reason.length > 180 ? "#{reason[0, 177]}..." : reason
   end
 
-  def extract_failure_details(output, max_lines: 80)
+  TEST_HARNESS_FAIL_RE = /(?:^\s*not ok\b|\bFailed\s+\d+\/\d+\b|^\s*Result:\s*FAIL\b|^\s*Test Summary Report\b|Dubious,\s+test returned|^\s*(?:FAIL|XPASS):\s|^The following tests FAILED:|filc safety error|filc panic:)/
+  FAILURE_ANCHOR_RE = /(?:STAGE_CMD_FAILED|SMOKE_CMD_FAILED|PACKAGE_SMOKE FAILED|LEAK_GATE FAILED|SIZE_LIMIT FAILED|filc safety error|filc panic:|LoadError|make(?:\[\d+\])?: \*\*\*|error:|ERROR:|FATAL:|^\s*not ok\b|\bFailed\s+\d+\/\d+\b|^\s*Result:\s*FAIL\b)/
+
+  def select_failure_lines(lines, max_lines: 80, stage: nil)
+    total = lines.length
+    return lines if total <= max_lines
+
+    tail_start = total - max_lines
+    first_test_anchor = lines.index { |ln| TEST_HARNESS_FAIL_RE.match?(ln) }
+    if first_test_anchor && (stage == "test" || first_test_anchor < tail_start) && first_test_anchor < tail_start
+      end_keep = [25, max_lines / 3].min
+      end_start = total - end_keep
+      top_budget = [max_lines - end_keep - 1, 10].max
+      win_start = [first_test_anchor - 5, 0].max
+      win_end = [win_start + top_budget - 1, end_start - 1].min
+      if win_end + 1 >= end_start
+        return lines[win_start..]
+      end
+
+      omitted = end_start - (win_end + 1)
+      return lines[win_start..win_end] +
+             ["--- ... (#{omitted} lines omitted between test failure and EOF) ... ---"] +
+             lines[end_start..]
+    end
+
+    anchor = lines.rindex { |ln| FAILURE_ANCHOR_RE.match?(ln) }
+    if anchor.nil? || anchor >= tail_start
+      lines[tail_start..]
+    else
+      win_end = [anchor + 10, total - 1].min
+      win_start = [win_end - 49, 0].max
+      end_keep = 25
+      end_start = total - end_keep
+      if win_end + 1 >= end_start
+        lines[win_start..]
+      else
+        omitted = end_start - (win_end + 1)
+        lines[win_start..win_end] +
+          ["--- ... (#{omitted} lines omitted between last failure marker and EOF) ... ---"] +
+          lines[end_start..]
+      end
+    end
+  end
+
+  def extract_failure_details(output, max_lines: 80, stage: nil)
     raw_lines = decode_utf8(output).lines.map { |l| l.chomp("\n").chomp("\r") }
     gate_idx = raw_lines.rindex do |l|
       l.include?("LEAK_GATE FAILED") ||
@@ -966,7 +1015,7 @@ module PublishPortsStream
       return block
     end
     non_empty = raw_lines.reject { |l| l.strip.empty? }
-    non_empty.last(max_lines).map { |l| l[0, 320] }
+    select_failure_lines(non_empty, max_lines: max_lines, stage: stage).map { |l| l[0, 320] }
   end
 
   def secret_tokens_for_redaction(exact_tokens_env)
@@ -1001,40 +1050,35 @@ module PublishPortsStream
     if first.include?("LEAK_GATE FAILED") || first.include?("SIZE_LIMIT FAILED") || first.include?("PACKAGE_SMOKE FAILED")
       arr.first(limit)
     else
-      arr.last(limit)
+      anchor_idx = arr.index { |l| TEST_HARNESS_FAIL_RE.match?(l.to_s) }
+      has_omission = arr.any? { |l| l.to_s.start_with?("--- ... (") }
+      if has_omission || (anchor_idx && anchor_idx < arr.length - limit)
+        top_start = anchor_idx ? [anchor_idx - 3, 0].max : 0
+        top_keep = [limit / 2, 6].max
+        bot_keep = [limit - top_keep - 1, 6].max
+        top_end = [top_start + top_keep - 1, arr.length - bot_keep - 1].min
+        if top_end + 1 >= arr.length - bot_keep
+          arr[top_start..].first(limit)
+        else
+          skipped = (arr.length - bot_keep) - (top_end + 1)
+          arr[top_start..top_end] +
+            ["--- ... (#{skipped} lines omitted in preview) ... ---"] +
+            arr.last(bot_keep)
+        end
+      else
+        arr.last(limit)
+      end
     end
   end
 
-  FAILURE_ANCHOR_RE = /(?:STAGE_CMD_FAILED|SMOKE_CMD_FAILED|PACKAGE_SMOKE FAILED|LEAK_GATE FAILED|SIZE_LIMIT FAILED|filc safety error|LoadError|make(?:\[\d+\])?: \*\*\*|error:|ERROR:|FATAL:)/
-
-  def read_log_tail(log_file, max_lines: 80, redact_tokens: [])
+  def read_log_tail(log_file, max_lines: 80, redact_tokens: [], stage: nil)
     return [] unless log_file && File.file?(log_file)
 
     lines = File.binread(log_file)
                 .force_encoding("UTF-8")
                 .encode("UTF-8", invalid: :replace, undef: :replace)
                 .lines
-    total = lines.length
-    return lines.map { |ln| sanitize_log_line(ln, redact_tokens) } if total <= max_lines
-
-    anchor = lines.rindex { |ln| FAILURE_ANCHOR_RE.match?(ln) }
-    tail_start = total - max_lines
-    if anchor.nil? || anchor >= tail_start
-      selected = lines[tail_start..]
-    else
-      win_end = [anchor + 10, total - 1].min
-      win_start = [win_end - 49, 0].max
-      end_keep = 25
-      end_start = total - end_keep
-      if win_end + 1 >= end_start
-        selected = lines[win_start..]
-      else
-        omitted = end_start - (win_end + 1)
-        selected = lines[win_start..win_end] +
-                   ["--- ... (#{omitted} lines omitted between last failure marker and EOF) ... ---"] +
-                   lines[end_start..]
-      end
-    end
+    selected = select_failure_lines(lines, max_lines: max_lines, stage: stage)
     selected.map { |ln| sanitize_log_line(ln, redact_tokens) }
   rescue StandardError
     []
@@ -1818,7 +1862,7 @@ module PublishPortsStream
               fail_stage = (state_rec && state_rec["failed_stage"]) || "build"
               fail_kind = (state_rec && state_rec["failed_kind"]) || "package"
               fail_reason = extract_short_reason(out_b, "build-port exited with code #{rc_b}")
-              fail_details = extract_failure_details(out_b)
+              fail_details = extract_failure_details(out_b, stage: fail_stage)
             end
 
             # Stage 2: Verify (package + relocate + leak-gate + 512-MiB limit + alt-prefix smoke)
@@ -2249,7 +2293,7 @@ module PublishPortsStream
         end
       end
       failures.sort_by { |f| f["name"] }.each do |f|
-        tail = read_log_tail(f["log_file"], max_lines: 80, redact_tokens: redact_tokens)
+        tail = read_log_tail(f["log_file"], max_lines: 80, redact_tokens: redact_tokens, stage: f["stage"])
         tail = Array(f["details"]).map { |dl| sanitize_log_line(dl, redact_tokens) } if tail.empty?
         next if tail.empty?
 

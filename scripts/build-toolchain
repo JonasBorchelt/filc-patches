@@ -21,6 +21,26 @@ WORK_ROOT="${1:-$REPO_ROOT/.work/toolchain}"
 mkdir -p "$WORK_ROOT"
 WORK_ROOT="$(cd "$WORK_ROOT" && pwd)"
 
+# Exclusive per-WORK_ROOT lock: wait instead of overwriting if another process
+# targets the same toolchain directory concurrently.
+TOOLCHAIN_LOCK_FILE="$WORK_ROOT/.build-toolchain.lock"
+exec 9>"$TOOLCHAIN_LOCK_FILE"
+if command -v flock >/dev/null 2>&1; then
+  if ! flock -n 9; then
+    echo "TOOLCHAIN_LOCK: waiting for exclusive lock on $TOOLCHAIN_LOCK_FILE ..."
+    flock 9
+  fi
+else
+  python3 - "$TOOLCHAIN_LOCK_FILE" <<'PY'
+import fcntl, sys
+try:
+    fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    print(f"TOOLCHAIN_LOCK: waiting for exclusive lock on {sys.argv[1]} ...", flush=True)
+    fcntl.flock(9, fcntl.LOCK_EX)
+PY
+fi
+
 LLVM_SRC="$WORK_ROOT/llvm-project"
 RUNTIME_SRC="$WORK_ROOT/filc-runtime"
 YOLOMUSL_SRC="$WORK_ROOT/yolomusl"
@@ -557,6 +577,38 @@ for f in \
     exit 1
   fi
 done
+
+# Write deterministic toolchain provenance for downstream channel verification
+PATCH_SERIES_SHA256="$(python3 - "$REPO_ROOT" <<'PY'
+import hashlib, sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+h = hashlib.sha256()
+candidates = [root / "UPSTREAM"]
+for sub in ("llvm", "runtime", "libc"):
+    base = root / sub
+    if base.is_dir():
+        for p in sorted(base.rglob("*")):
+            if p.is_file() and not p.is_symlink():
+                candidates.append(p)
+for p in sorted(set(candidates), key=lambda x: x.relative_to(root).as_posix()):
+    rel = p.relative_to(root).as_posix().encode("utf-8")
+    h.update(rel + b"\0")
+    h.update(p.read_bytes())
+    h.update(b"\0")
+print(h.hexdigest())
+PY
+)"
+PROV_TMP="$WORK_ROOT/TOOLCHAIN_PROVENANCE.tmp.$$"
+cat > "$PROV_TMP" <<EOF
+ARCH=${ARCH}
+LLVM_COMMIT=${LLVM_COMMIT}
+FILC_COMMIT=${FILC_COMMIT}
+MUSL_COMMIT=${MUSL_COMMIT}
+PATCH_SERIES_SHA256=${PATCH_SERIES_SHA256}
+EOF
+mv -f "$PROV_TMP" "$WORK_ROOT/TOOLCHAIN_PROVENANCE"
 
 if command -v ccache >/dev/null 2>&1; then
   echo "=== ccache stats ==="

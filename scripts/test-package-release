@@ -270,7 +270,13 @@ if grep -Fq "54/54" "$OUT_015/RELEASE_NOTES.md"; then
   echo "FAIL: 0.1.5 RELEASE_NOTES.md still contains stale 54/54 port count" >&2
   exit 1
 fi
-echo "VERSIONED RELEASE NOTES 0.1.5 LOOKUP OK"
+PKG_PATCH_SHA="$(awk -F= '$1=="PATCH_SERIES_SHA256"{print $2}' "$OUT_015/PROVENANCE")"
+STREAM_PATCH_SHA="$(ruby -I"$REPO_ROOT/scripts" -e 'load File.join(ARGV[0], "scripts", "publish-ports-stream"); puts PublishPortsStream.compute_patch_series_sha256(ARGV[0])' "$REPO_ROOT")"
+if [[ "$PKG_PATCH_SHA" != "$STREAM_PATCH_SHA" ]]; then
+  echo "FAIL: PATCH_SERIES_SHA256 mismatch between package-release ($PKG_PATCH_SHA) and publish-ports-stream ($STREAM_PATCH_SHA)" >&2
+  exit 1
+fi
+echo "VERSIONED RELEASE NOTES 0.1.5 & PATCH_SERIES_SHA256 PARITY OK ($PKG_PATCH_SHA)"
 
 echo "=== [3/4] Leak-Gate negative test ==="
 LEAK_WORK="$TMP_DIR/leak-tc"

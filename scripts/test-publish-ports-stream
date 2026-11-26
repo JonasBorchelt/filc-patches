@@ -685,19 +685,169 @@ Dir.mktmpdir("filc-stream-test-") do |tmp|
          "expected EOF trailing line to still be included:\n#{anchored_tail.join("\n")}")
   puts "FAILURE_ANCHORED_LOG_TAIL: PASS (anchor window + omission banner + EOF tail)"
 
-  puts "=== [9/9] Toolchain identity reacts to UPSTREAM/patch changes, ignores rebuilt binary mtimes ==="
+  puts "=== [9/11] Toolchain identity reacts to UPSTREAM/patch changes, ignores rebuilt binary mtimes and fetch scripts ==="
   repo_a = File.join(tmp, "tc-repo-a")
   FileUtils.mkdir_p(File.join(repo_a, "llvm"))
-  File.write(File.join(repo_a, "UPSTREAM"), "FILC_COMMIT=aaaa\n", encoding: "UTF-8")
+  FileUtils.mkdir_p(File.join(repo_a, "scripts"))
+  File.write(File.join(repo_a, "UPSTREAM"), <<~UP, encoding: "UTF-8")
+    LLVM_COMMIT=1111111111111111111111111111111111111111
+    FILC_COMMIT=2222222222222222222222222222222222222222
+    MUSL_COMMIT=3333333333333333333333333333333333333333
+  UP
   File.write(File.join(repo_a, "llvm", "01.patch"), "diff a\n", encoding: "UTF-8")
-  id1 = PublishPortsStream.compute_toolchain_identity(toolchain_root: fix[:tc_root], repo_root: repo_a, channel: "0.1.4", arch: "x86_64-linux")
+  File.write(File.join(repo_a, "scripts", "fetch"), "#!/bin/sh\necho v1\n", encoding: "UTF-8")
+  id1 = PublishPortsStream.compute_toolchain_identity(toolchain_root: fix[:tc_root], repo_root: repo_a, channel: "0.1.5", arch: "x86_64-linux")
   File.binwrite(File.join(fix[:tc_root], "pizfix", "lib", "libc++.a"), "!<arch>\nrebuilt-mtime-3\n".b)
-  id2 = PublishPortsStream.compute_toolchain_identity(toolchain_root: fix[:tc_root], repo_root: repo_a, channel: "0.1.4", arch: "x86_64-linux")
-  assert(id1 == id2, "toolchain_id must ignore freshly rebuilt binary/archive mtimes: #{id1} vs #{id2}")
-  File.write(File.join(repo_a, "UPSTREAM"), "FILC_COMMIT=bbbb\n", encoding: "UTF-8")
-  id3 = PublishPortsStream.compute_toolchain_identity(toolchain_root: fix[:tc_root], repo_root: repo_a, channel: "0.1.4", arch: "x86_64-linux")
+  File.write(File.join(repo_a, "scripts", "fetch"), "#!/bin/sh\necho v2-shallow-fix\n", encoding: "UTF-8")
+  id2 = PublishPortsStream.compute_toolchain_identity(toolchain_root: fix[:tc_root], repo_root: repo_a, channel: "0.1.5", arch: "x86_64-linux")
+  assert(id1 == id2, "toolchain_id must ignore rebuilt binary mtimes and fetch scripts: #{id1} vs #{id2}")
+  File.write(File.join(repo_a, "UPSTREAM"), <<~UP, encoding: "UTF-8")
+    LLVM_COMMIT=1111111111111111111111111111111111111111
+    FILC_COMMIT=4444444444444444444444444444444444444444
+    MUSL_COMMIT=3333333333333333333333333333333333333333
+  UP
+  id3 = PublishPortsStream.compute_toolchain_identity(toolchain_root: fix[:tc_root], repo_root: repo_a, channel: "0.1.5", arch: "x86_64-linux")
   assert(id3 != id1, "toolchain_id MUST change when UPSTREAM changes: #{id1} vs #{id3}")
-  puts "TOOLCHAIN_IDENTITY_DETERMINISM: PASS (stable across binary rebuilds, invalidates on UPSTREAM bump)"
+  puts "TOOLCHAIN_IDENTITY_DETERMINISM: PASS (stable across binary rebuilds + fetch scripts, invalidates on UPSTREAM bump)"
+
+  puts "=== [10/11] Guard 1: Channel <-> release PROVENANCE & built TOOLCHAIN_PROVENANCE verification ==="
+  rel_dir = File.join(tmp, "release-0.1.5")
+  FileUtils.mkdir_p(rel_dir)
+  patch_sha_a = PublishPortsStream.compute_patch_series_sha256(repo_a)
+  fake_archive = File.join(rel_dir, "filc-0.1.5-x86_64-linux.tar.xz")
+  File.binwrite(fake_archive, "mock-release-archive-bytes-0.1.5\n".b)
+  fake_archive_sha = sha256_file(fake_archive)
+  File.write(File.join(rel_dir, "SHA256SUMS"), "#{fake_archive_sha}  filc-0.1.5-x86_64-linux.tar.xz\n", encoding: "UTF-8")
+  File.write(File.join(rel_dir, "PROVENANCE"), <<~PROV, encoding: "UTF-8")
+    ARCHIVE=filc-0.1.5-x86_64-linux.tar.xz
+    VERSION=0.1.5
+    ARCH=x86_64
+    LLVM_COMMIT=1111111111111111111111111111111111111111
+    FILC_COMMIT=4444444444444444444444444444444444444444
+    MUSL_COMMIT=3333333333333333333333333333333333333333
+    PATCH_SERIES_SHA256=#{patch_sha_a}
+  PROV
+  tc_guard = File.join(tmp, "tc-guard")
+  FileUtils.mkdir_p(File.join(tc_guard, "pizfix"))
+  File.write(File.join(tc_guard, "TOOLCHAIN_PROVENANCE"), <<~TPROV, encoding: "UTF-8")
+    ARCH=x86_64
+    LLVM_COMMIT=1111111111111111111111111111111111111111
+    FILC_COMMIT=4444444444444444444444444444444444444444
+    MUSL_COMMIT=3333333333333333333333333333333333333333
+    PATCH_SERIES_SHA256=#{patch_sha_a}
+  TPROV
+
+  # 10a: Exact match passes
+  out_ok, err_ok, st_ok = Open3.capture3(
+    "ruby", STREAM_BIN,
+    "--verify-channel-only",
+    "--repo-root", repo_a,
+    "--toolchain-root", tc_guard,
+    "--channel", "0.1.5",
+    "--arch", "x86_64-linux",
+    "--release-provenance", File.join(rel_dir, "PROVENANCE"),
+    "--require-release-provenance"
+  )
+  assert(st_ok.success?, "matching channel provenance must pass: #{out_ok}\n#{err_ok}")
+  assert(out_ok.include?("CHANNEL_TOOLCHAIN_VERIFY: PASS"), "missing PASS marker: #{out_ok}")
+
+  # 10b: Wrong channel / wrong FILC_COMMIT aborts BEFORE any port build or upload
+  rel_dir_014 = File.join(tmp, "release-0.1.4")
+  FileUtils.mkdir_p(rel_dir_014)
+  File.write(File.join(rel_dir_014, "SHA256SUMS"), "#{fake_archive_sha}  filc-0.1.4-x86_64-linux.tar.xz\n", encoding: "UTF-8")
+  File.write(File.join(rel_dir_014, "PROVENANCE"), <<~PROV, encoding: "UTF-8")
+    ARCHIVE=filc-0.1.4-x86_64-linux.tar.xz
+    VERSION=0.1.4
+    ARCH=x86_64
+    LLVM_COMMIT=1111111111111111111111111111111111111111
+    FILC_COMMIT=9999999999999999999999999999999999999999
+    MUSL_COMMIT=3333333333333333333333333333333333333333
+    PATCH_SERIES_SHA256=#{patch_sha_a}
+  PROV
+  guard_work = File.join(tmp, "guard-mismatch-work")
+  guard_out = File.join(tmp, "guard-mismatch-out")
+  out_bad, err_bad, st_bad = Open3.capture3(
+    "ruby", STREAM_BIN,
+    "--repo-root", repo_a,
+    "--ports-dir", fix[:ports_dir],
+    "--toolchain-root", tc_guard,
+    "--work-dir", guard_work,
+    "--out-dir", guard_out,
+    "--ports-cache-dir", fix[:cache_dir],
+    "--channel", "0.1.4",
+    "--arch", "x86_64-linux",
+    "--release-provenance", File.join(rel_dir_014, "PROVENANCE"),
+    "--require-release-provenance",
+    "--build-port-bin", fix[:mock_bp]
+  )
+  assert(!st_bad.success?, "mismatched channel FILC_COMMIT must abort before builds: #{out_bad}")
+  assert(err_bad.include?("CHANNEL_TOOLCHAIN_VERIFY: FAIL") && err_bad.include?("FILC_COMMIT"),
+         "expected FILC_COMMIT mismatch error, got: #{err_bad}")
+  assert(!Dir.exist?(File.join(guard_work, "observed-jobs")), "no port build may start after channel mismatch")
+  assert(!Dir.exist?(guard_out), "no output or upload may be created after channel mismatch")
+
+  # 10c: Overwritten / stale TOOLCHAIN_PROVENANCE aborts BEFORE any port build
+  File.write(File.join(tc_guard, "TOOLCHAIN_PROVENANCE"), <<~TPROV, encoding: "UTF-8")
+    ARCH=x86_64
+    LLVM_COMMIT=1111111111111111111111111111111111111111
+    FILC_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    MUSL_COMMIT=3333333333333333333333333333333333333333
+    PATCH_SERIES_SHA256=#{patch_sha_a}
+  TPROV
+  _out_tc, err_tc, st_tc = Open3.capture3(
+    "ruby", STREAM_BIN,
+    "--verify-channel-only",
+    "--repo-root", repo_a,
+    "--toolchain-root", tc_guard,
+    "--channel", "0.1.5",
+    "--arch", "x86_64-linux",
+    "--release-provenance", File.join(rel_dir, "PROVENANCE"),
+    "--require-release-provenance"
+  )
+  assert(!st_tc.success? && err_tc.include?("built toolchain FILC_COMMIT"),
+         "overwritten built toolchain provenance must abort: #{err_tc}")
+
+  # 10d: Missing PROVENANCE with --require-release-provenance aborts
+  _out_mis, err_mis, st_mis = Open3.capture3(
+    "ruby", STREAM_BIN,
+    "--verify-channel-only",
+    "--repo-root", repo_a,
+    "--channel", "0.1.5",
+    "--arch", "x86_64-linux",
+    "--release-provenance", File.join(tmp, "nonexistent", "PROVENANCE"),
+    "--require-release-provenance"
+  )
+  assert(!st_mis.success? && err_mis.include?("missing release PROVENANCE"),
+         "missing required release PROVENANCE must abort: #{err_mis}")
+  puts "CHANNEL_TOOLCHAIN_GUARD: PASS (exact match OK; channel mismatch, stale toolchain, and missing provenance all aborted with 0 builds/0 uploads)"
+
+  puts "=== [11/11] Guard 2: Exclusive channel lock serializes concurrent runs without clobbering ==="
+  lock_path = File.join(tmp, "locks", "publish-ports-0.1.5-x86_64-linux.lock")
+  FileUtils.mkdir_p(File.dirname(lock_path))
+  holder = File.open(lock_path, File::CREAT | File::RDWR, 0o666)
+  holder.flock(File::LOCK_EX)
+  t_lock_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  releaser = Thread.new do
+    sleep 0.5
+    holder.flock(File::LOCK_UN)
+    holder.close
+  end
+  out_lk, err_lk, st_lk = Open3.capture3(
+    "ruby", STREAM_BIN,
+    "--verify-channel-only",
+    "--repo-root", repo_a,
+    "--channel", "0.1.5",
+    "--arch", "x86_64-linux",
+    "--release-provenance", File.join(rel_dir, "PROVENANCE"),
+    "--require-release-provenance",
+    "--lock-file", lock_path
+  )
+  releaser.join
+  lock_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - t_lock_start
+  assert(st_lk.success?, "locked run must succeed after lock release: #{out_lk}\n#{err_lk}")
+  assert(out_lk.include?("PUBLISH_PORTS_LOCK: waiting for exclusive lock"), "expected waiting log line: #{out_lk}")
+  assert(lock_elapsed >= 0.4, "locked run did not wait for holder (elapsed=#{lock_elapsed}s)")
+  puts "CHANNEL_EXCLUSIVE_LOCK: PASS (waited #{lock_elapsed.round(2)}s for active lock holder before proceeding)"
 
   puts "ALL PUBLISH-PORTS-STREAM TESTS PASSED"
 end

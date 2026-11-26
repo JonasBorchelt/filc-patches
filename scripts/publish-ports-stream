@@ -163,23 +163,198 @@ module PublishPortsStream
   TOOLCHAIN_INPUT_FILES = %w[
     UPSTREAM
     scripts/build-toolchain
-    scripts/fetch
-    scripts/fetch-runtime
-    scripts/fetch-musl
   ].freeze
   TOOLCHAIN_INPUT_DIRS = %w[
     llvm
     runtime
     libc
   ].freeze
+  HEX40_RE = /\A[0-9a-f]{40}\z/
+  HEX64_RE = /\A[0-9a-f]{64}\z/
+
+  def parse_kv_file(path)
+    data = {}
+    File.foreach(path, encoding: "UTF-8") do |raw|
+      line = raw.strip
+      next if line.empty? || line.start_with?("#")
+
+      m = /\A([A-Z0-9_]+)=(.*)\z/.match(line)
+      next unless m
+
+      val = m[2].strip
+      if val.length >= 2 && ((val.start_with?('"') && val.end_with?('"')) ||
+                             (val.start_with?("'") && val.end_with?("'")))
+        val = val[1..-2]
+      end
+      data[m[1]] = val
+    end
+    data
+  end
+
+  # Byte-for-byte compatible with PATCH_SERIES_SHA256 in scripts/package-release
+  # and scripts/build-toolchain.
+  def compute_patch_series_sha256(repo_root)
+    h = Digest::SHA256.new
+    candidates = []
+    upstream_file = File.join(repo_root, "UPSTREAM")
+    candidates << upstream_file if File.file?(upstream_file) && !File.symlink?(upstream_file)
+    TOOLCHAIN_INPUT_DIRS.each do |dir_rel|
+      dir_abs = File.join(repo_root, dir_rel)
+      next unless File.directory?(dir_abs)
+
+      Dir.glob(File.join(dir_abs, "**", "*")).each do |full|
+        next unless File.file?(full) && !File.symlink?(full)
+
+        candidates << full
+      end
+    end
+    candidates.uniq.sort_by { |full| full.sub("#{repo_root}/", "") }.each do |full|
+      rel = full.sub("#{repo_root}/", "")
+      h.update("#{rel}\0")
+      h.update(File.binread(full))
+      h.update("\0")
+    end
+    h.hexdigest
+  end
+
+  def with_exclusive_lock(lock_path, label: "PUBLISH_PORTS_LOCK")
+    return yield if lock_path.nil? || lock_path.empty?
+
+    FileUtils.mkdir_p(File.dirname(lock_path))
+    File.open(lock_path, File::CREAT | File::RDWR, 0o666) do |lf|
+      unless lf.flock(File::LOCK_EX | File::LOCK_NB)
+        $stdout.puts("#{label}: waiting for exclusive lock on #{lock_path} ...")
+        $stdout.flush
+        lf.flock(File::LOCK_EX)
+      end
+      $stdout.puts("#{label}: acquired #{lock_path}")
+      $stdout.flush
+      begin
+        yield
+      ensure
+        lf.flock(File::LOCK_UN)
+      end
+    end
+  end
+
+  # Guard 1: Verify before any port build or upload that the checked-out UPSTREAM
+  # commits + patch series + built toolchain (if present) exactly match the target
+  # release channel's published PROVENANCE / SHA256SUMS.
+  def verify_channel_toolchain_match!(toolchain_root:, repo_root:, channel:, arch:,
+                                      release_provenance_path: nil,
+                                      require_release_provenance: false,
+                                      verify_built_toolchain: true)
+    upstream_path = File.join(repo_root, "UPSTREAM")
+    raise "CHANNEL_TOOLCHAIN_VERIFY: FAIL missing UPSTREAM file: #{upstream_path}" unless File.file?(upstream_path)
+
+    upstream = parse_kv_file(upstream_path)
+    %w[LLVM_COMMIT FILC_COMMIT MUSL_COMMIT].each do |key|
+      val = upstream[key].to_s
+      unless HEX40_RE.match?(val)
+        raise "CHANNEL_TOOLCHAIN_VERIFY: FAIL invalid #{key} in #{upstream_path}: #{val.inspect}"
+      end
+    end
+
+    repo_patch_sha = compute_patch_series_sha256(repo_root)
+    expected_short_arch = arch.sub(/-linux\z/, "")
+
+    if verify_built_toolchain && toolchain_root && !toolchain_root.empty?
+      tc_prov_path = File.join(toolchain_root, "TOOLCHAIN_PROVENANCE")
+      if File.file?(tc_prov_path)
+        tc_prov = parse_kv_file(tc_prov_path)
+        if tc_prov["ARCH"] != expected_short_arch
+          raise "CHANNEL_TOOLCHAIN_VERIFY: FAIL built toolchain ARCH=#{tc_prov['ARCH']} != expected #{expected_short_arch} (#{tc_prov_path})"
+        end
+        %w[LLVM_COMMIT FILC_COMMIT MUSL_COMMIT].each do |key|
+          if tc_prov[key] != upstream[key]
+            raise "CHANNEL_TOOLCHAIN_VERIFY: FAIL built toolchain #{key}=#{tc_prov[key]} != UPSTREAM #{upstream[key]} (#{tc_prov_path})"
+          end
+        end
+        if tc_prov["PATCH_SERIES_SHA256"] != repo_patch_sha
+          raise "CHANNEL_TOOLCHAIN_VERIFY: FAIL built toolchain PATCH_SERIES_SHA256=#{tc_prov['PATCH_SERIES_SHA256']} != repo #{repo_patch_sha} (#{tc_prov_path})"
+        end
+      elsif require_release_provenance
+        raise "CHANNEL_TOOLCHAIN_VERIFY: FAIL missing built toolchain provenance: #{tc_prov_path}"
+      end
+    end
+
+    release_archive_sha = nil
+    if release_provenance_path && !release_provenance_path.empty?
+      if File.file?(release_provenance_path)
+        prov = parse_kv_file(release_provenance_path)
+        if prov["VERSION"] != channel
+          raise "CHANNEL_TOOLCHAIN_VERIFY: FAIL release PROVENANCE VERSION=#{prov['VERSION']} != channel #{channel} (#{release_provenance_path})"
+        end
+        if prov["ARCH"] != expected_short_arch
+          raise "CHANNEL_TOOLCHAIN_VERIFY: FAIL release PROVENANCE ARCH=#{prov['ARCH']} != expected #{expected_short_arch} (#{release_provenance_path})"
+        end
+        %w[LLVM_COMMIT FILC_COMMIT MUSL_COMMIT].each do |key|
+          if prov[key] != upstream[key]
+            raise "CHANNEL_TOOLCHAIN_VERIFY: FAIL channel #{channel} release #{key}=#{prov[key]} != repo UPSTREAM #{upstream[key]} (#{release_provenance_path})"
+          end
+        end
+        if prov["PATCH_SERIES_SHA256"] != repo_patch_sha
+          raise "CHANNEL_TOOLCHAIN_VERIFY: FAIL channel #{channel} release PATCH_SERIES_SHA256=#{prov['PATCH_SERIES_SHA256']} != repo #{repo_patch_sha} (#{release_provenance_path})"
+        end
+
+        rel_dir = File.dirname(release_provenance_path)
+        archive_name = prov["ARCHIVE"].to_s
+        sums_path = File.join(rel_dir, "SHA256SUMS")
+        if File.file?(sums_path) && !archive_name.empty?
+          File.foreach(sums_path, encoding: "UTF-8") do |line|
+            parts = line.strip.split(/\s+/, 2)
+            next unless parts.length == 2 && parts[1] == archive_name
+
+            release_archive_sha = parts[0]
+            break
+          end
+          unless HEX64_RE.match?(release_archive_sha.to_s)
+            raise "CHANNEL_TOOLCHAIN_VERIFY: FAIL archive #{archive_name} missing or invalid in #{sums_path}"
+          end
+
+          archive_path = File.join(rel_dir, archive_name)
+          if File.file?(archive_path)
+            actual_sha = sha256_file(archive_path)
+            if actual_sha != release_archive_sha
+              raise "CHANNEL_TOOLCHAIN_VERIFY: FAIL release tarball SHA-256 mismatch for #{archive_path}: actual=#{actual_sha} expected=#{release_archive_sha}"
+            end
+          end
+        elsif require_release_provenance
+          raise "CHANNEL_TOOLCHAIN_VERIFY: FAIL missing SHA256SUMS or ARCHIVE entry beside #{release_provenance_path}"
+        end
+      elsif require_release_provenance
+        raise "CHANNEL_TOOLCHAIN_VERIFY: FAIL missing release PROVENANCE for channel #{channel}: #{release_provenance_path} (run release.yaml for #{channel} first)"
+      end
+    elsif require_release_provenance
+      raise "CHANNEL_TOOLCHAIN_VERIFY: FAIL --require-release-provenance requires --release-provenance PATH"
+    end
+
+    info = {
+      "channel" => channel,
+      "arch" => arch,
+      "llvm_commit" => upstream["LLVM_COMMIT"],
+      "filc_commit" => upstream["FILC_COMMIT"],
+      "musl_commit" => upstream["MUSL_COMMIT"],
+      "patch_series_sha256" => repo_patch_sha,
+      "release_provenance" => (release_provenance_path && File.file?(release_provenance_path)) ? release_provenance_path : nil,
+      "release_archive_sha256" => release_archive_sha
+    }
+    $stdout.puts(
+      "CHANNEL_TOOLCHAIN_VERIFY: PASS channel=#{channel} arch=#{arch} " \
+      "filc_commit=#{upstream['FILC_COMMIT'][0, 12]} patch_series_sha256=#{repo_patch_sha[0, 12]}" \
+      "#{release_archive_sha ? " release_archive_sha256=#{release_archive_sha[0, 12]}" : ' release_provenance=unverified_dry_run'}"
+    )
+    $stdout.flush
+    info
+  end
 
   # Computes a deterministic toolchain identity from the pinned upstream sources,
-  # toolchain patches, and build scripts rather than freshly compiled binaries or
-  # static archives (whose ar member mtimes / linker build-IDs vary per CI run).
+  # toolchain patches, and build script rather than freshly compiled binaries or
+  # git-fetch helpers (which never alter compiled toolchain output).
   def compute_toolchain_identity(toolchain_root:, repo_root:, channel:, arch:)
     _ = toolchain_root
     h = Digest::SHA256.new
-    h.update("schema=2\0channel=#{channel}\0arch=#{arch}\0")
+    h.update("schema=3\0channel=#{channel}\0arch=#{arch}\0")
     TOOLCHAIN_INPUT_FILES.each do |rel|
       full = File.join(repo_root, rel)
       next unless File.file?(full)
@@ -448,17 +623,19 @@ module PublishPortsStream
   def save_timings!(timings_file, measured_durations)
     return if timings_file.nil? || timings_file.empty? || measured_durations.empty?
 
-    existing = load_timings(timings_file, bootstrap_glob: nil)
-    merged = existing.merge(measured_durations)
     FileUtils.mkdir_p(File.dirname(timings_file))
-    payload = {
-      "schema_version" => 1,
-      "updated_at" => Time.now.utc.iso8601,
-      "durations" => merged.keys.sort.each_with_object({}) { |k, h| h[k] = merged[k].round(3) }
-    }
-    tmp = "#{timings_file}.tmp.#{Process.pid}"
-    File.write(tmp, "#{JSON.pretty_generate(payload)}\n", encoding: "UTF-8")
-    File.rename(tmp, timings_file)
+    with_exclusive_lock("#{timings_file}.lock", label: "TIMINGS_LOCK") do
+      existing = load_timings(timings_file, bootstrap_glob: nil)
+      merged = existing.merge(measured_durations)
+      payload = {
+        "schema_version" => 1,
+        "updated_at" => Time.now.utc.iso8601,
+        "durations" => merged.keys.sort.each_with_object({}) { |k, h| h[k] = merged[k].round(3) }
+      }
+      tmp = "#{timings_file}.tmp.#{Process.pid}"
+      File.write(tmp, "#{JSON.pretty_generate(payload)}\n", encoding: "UTF-8")
+      File.rename(tmp, timings_file)
+    end
   rescue StandardError => e
     $stderr.puts("warning: failed to persist timings file #{timings_file}: #{e.message}")
   end
@@ -978,18 +1155,22 @@ module PublishPortsStream
       build_port_bin: nil,
       package_port_bin: nil,
       upload_ports_bin: nil,
-      source_date_epoch: ENV["SOURCE_DATE_EPOCH"]
+      source_date_epoch: ENV["SOURCE_DATE_EPOCH"],
+      release_provenance: nil,
+      require_release_provenance: false,
+      verify_channel_only: false,
+      lock_file: nil
     }
 
     parser = OptionParser.new do |o|
       o.banner = "Usage: scripts/publish-ports-stream [options]"
       o.on("--repo-root DIR", "Repository root") { |v| opts[:repo_root] = File.expand_path(v) }
       o.on("--ports-dir DIR", "Ports recipe directory (default: <repo-root>/ports)") { |v| opts[:ports_dir] = File.expand_path(v) }
-      o.on("--toolchain-root DIR", "Pristine Fil-C toolchain root (e.g. /opt/filc/0.1.4)") { |v| opts[:toolchain_root] = File.expand_path(v) }
+      o.on("--toolchain-root DIR", "Pristine Fil-C toolchain root (e.g. /opt/filc/0.1.5)") { |v| opts[:toolchain_root] = File.expand_path(v) }
       o.on("--work-dir DIR", "Work directory (e.g. /build/filc-ports)") { |v| opts[:work_dir] = File.expand_path(v) }
       o.on("--out-dir DIR", "Output channel root directory") { |v| opts[:out_dir] = File.expand_path(v) }
       o.on("--ports-cache-dir DIR", "Upstream source tarball cache directory") { |v| opts[:ports_cache_dir] = File.expand_path(v) }
-      o.on("--channel VERSION", "Toolchain release channel (e.g. 0.1.4)") { |v| opts[:channel] = v }
+      o.on("--channel VERSION", "Toolchain release channel (e.g. 0.1.5)") { |v| opts[:channel] = v }
       o.on("--arch ARCH", "Target architecture (default: x86_64-linux)") { |v| opts[:arch] = v }
       o.on("--revision N", Integer, "Package revision number (default: 1)") { |v| opts[:revision] = v }
       o.on("-j", "--parallel N", Integer, "Concurrent port slots (1..8, default: 4)") { |v| opts[:parallel] = v.clamp(1, 8) }
@@ -1013,6 +1194,10 @@ module PublishPortsStream
       o.on("--pubkey-file PATH", "Optional minisign public key to copy as pubkey.pub on finalize") { |v| opts[:pubkey_file] = File.expand_path(v) }
       o.on("--exact-tokens-env VAR", "Env var containing newline-separated exact infra tokens") { |v| opts[:exact_tokens_env] = v }
       o.on("--skip-package-smoke", "Skip alternate-prefix PACKAGE_SMOKE during verify") { opts[:verify_smoke] = false }
+      o.on("--release-provenance PATH", "Published release PROVENANCE file to pin channel toolchain match") { |v| opts[:release_provenance] = v.empty? ? nil : File.expand_path(v) }
+      o.on("--require-release-provenance", "Abort unless --release-provenance exists and matches UPSTREAM + patch series") { opts[:require_release_provenance] = true }
+      o.on("--verify-channel-only", "Run channel/toolchain provenance verification only and exit") { opts[:verify_channel_only] = true }
+      o.on("--lock-file PATH", "Exclusive lock file path to serialize concurrent runs on the same channel") { |v| opts[:lock_file] = v.empty? ? nil : File.expand_path(v) }
       o.on("--build-port-bin PATH", "Override build-port executable (tests)") { |v| opts[:build_port_bin] = File.expand_path(v) }
       o.on("--package-port-bin PATH", "Override package-port executable (tests)") { |v| opts[:package_port_bin] = File.expand_path(v) }
       o.on("--upload-ports-bin PATH", "Override upload-ports executable (tests)") { |v| opts[:upload_ports_bin] = File.expand_path(v) }
@@ -1020,12 +1205,54 @@ module PublishPortsStream
     end
     parser.parse!(argv)
 
+    raise ArgumentError, "--channel invalid" unless CHANNEL_RE.match?(opts[:channel].to_s)
+    raise ArgumentError, "--arch invalid" unless ARCH_RE.match?(opts[:arch].to_s)
+
+    if opts[:verify_channel_only]
+      return with_exclusive_lock(opts[:lock_file]) do
+        begin
+          verify_channel_toolchain_match!(
+            toolchain_root: opts[:toolchain_root],
+            repo_root: opts[:repo_root],
+            channel: opts[:channel],
+            arch: opts[:arch],
+            release_provenance_path: opts[:release_provenance],
+            require_release_provenance: opts[:require_release_provenance],
+            verify_built_toolchain: !opts[:toolchain_root].to_s.empty?
+          )
+          0
+        rescue StandardError => e
+          $stderr.puts(e.message)
+          2
+        end
+      end
+    end
+
     raise ArgumentError, "--toolchain-root is required" if opts[:toolchain_root].to_s.empty?
     raise ArgumentError, "--work-dir is required" if opts[:work_dir].to_s.empty?
     raise ArgumentError, "--out-dir is required" if opts[:out_dir].to_s.empty?
-    raise ArgumentError, "--channel invalid" unless CHANNEL_RE.match?(opts[:channel].to_s)
-    raise ArgumentError, "--arch invalid" unless ARCH_RE.match?(opts[:arch].to_s)
     raise ArgumentError, "invalid --schedule-order #{opts[:schedule_order]}" unless VALID_SCHEDULES.include?(opts[:schedule_order])
+
+    with_exclusive_lock(opts[:lock_file]) do
+      run_stream(opts)
+    end
+  end
+
+  def run_stream(opts)
+    begin
+      channel_verify_info = verify_channel_toolchain_match!(
+        toolchain_root: opts[:toolchain_root],
+        repo_root: opts[:repo_root],
+        channel: opts[:channel],
+        arch: opts[:arch],
+        release_provenance_path: opts[:release_provenance],
+        require_release_provenance: opts[:require_release_provenance],
+        verify_built_toolchain: true
+      )
+    rescue StandardError => e
+      $stderr.puts(e.message)
+      return 2
+    end
 
     ports_dir = opts[:ports_dir] || File.join(opts[:repo_root], "ports")
     build_port_bin = opts[:build_port_bin] || File.join(opts[:repo_root], "scripts", "build-port")
@@ -1691,6 +1918,7 @@ module PublishPortsStream
       "start_sequence" => start_sequence,
       "critical_paths" => cp_map,
       "toolchain_id" => toolchain_id,
+      "channel_verify" => channel_verify_info,
       "cached_ports" => cached_records.map { |r| r["name"] },
       "duration_seconds" => total_duration,
       "commit_allowed" => commit_allowed,

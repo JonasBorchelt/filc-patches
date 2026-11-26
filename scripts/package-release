@@ -546,17 +546,17 @@ without access to the build tree:
 - Computed-goto (\`indirectbr\` / \`BlockAddress\`) runtime verification at \`-O0\` and \`-O2\`
 - Upstream package build and test (\`zlib\` and \`lua\` 5.4.7 with computed-goto jump table) using only bundled toolchain binaries
 
-### Toolchain self-test (\`scripts/test-toolchain\`) and 54/54 userland port sweep
+### Toolchain self-test (\`scripts/test-toolchain\`) and userland port sweep
 
 Verified by the toolchain end-to-end self-test and full userland port sweep:
 
 - Shared-library \`-Wl,--version-script\` export filtering and safe \`-Wa\` assembler flag filtering
 - Clean compile-time rejection of unsupported constructs (\`__builtin_setjmp\`, \`__builtin_longjmp\`, reserved \`setjmp\` redefinition, non-zero address spaces, invalid module inline assembly, and runtime trap for \`asm goto\`)
-- \`<fenv.h>\` x87 and SSE rounding-mode and environment save/restore tests
+- \`<fenv.h>\` x87 and SSE rounding-mode, runtime float-environment isolation, and environment save/restore tests
 - \`semctl(GETALL/SETALL)\` roundtrip and out-of-bounds memory-safety trap
 - \`prctl(PR_SET_NAME)\` TGID leader \`/proc/self/comm\` synchronization
 - \`<ucontext.h>\` multi-fiber GC stress test and fiber stack-overflow memory-safety trap
-- Full 54/54 userland port sweep, including \`perl 5.40.5\` with zero platform exclusions
+- Full userland port sweep across the repository port set, including \`perl 5.40.5\` with zero platform exclusions
 
 ## Known limitations
 

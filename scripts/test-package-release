@@ -245,7 +245,7 @@ if [[ "$USE_REAL_ELF" == "1" ]]; then
 fi
 echo "CLEAN PACKAGING & MANIFEST OK"
 
-echo "=== [2/4] Default versioned release-notes/0.1.4.md lookup ==="
+echo "=== [2/4] Default versioned release-notes/0.1.4.md and 0.1.5.md lookup ==="
 OUT_014="$TMP_DIR/out-014"
 FILC_RELEASE_PUBLIC_COMMIT="$MOCK_PUBLIC_SHA" \
   "$REPO_ROOT/scripts/package-release" "$MOCK_WORK" "$OUT_014" "0.1.4"
@@ -258,6 +258,19 @@ grep -Fq "<ucontext.h>" "$OUT_014/RELEASE_NOTES.md"
 grep -Fq "provenance" "$OUT_014/RELEASE_NOTES.md"
 grep -Fq "54/54 verified userland ports" "$OUT_014/RELEASE_NOTES.md"
 echo "VERSIONED RELEASE NOTES 0.1.4 LOOKUP OK"
+
+OUT_015="$TMP_DIR/out-015"
+FILC_RELEASE_PUBLIC_COMMIT="$MOCK_PUBLIC_SHA" \
+  "$REPO_ROOT/scripts/package-release" "$MOCK_WORK" "$OUT_015" "0.1.5"
+grep -Fq "e7b7f1e8969e" "$OUT_015/RELEASE_NOTES.md"
+grep -Fq "Six downstream compatibility patches retired" "$OUT_015/RELEASE_NOTES.md"
+grep -Fq "pas_save_float_environment" "$OUT_015/RELEASE_NOTES.md"
+grep -Fq "PR #375" "$OUT_015/RELEASE_NOTES.md"
+if grep -Fq "54/54" "$OUT_015/RELEASE_NOTES.md"; then
+  echo "FAIL: 0.1.5 RELEASE_NOTES.md still contains stale 54/54 port count" >&2
+  exit 1
+fi
+echo "VERSIONED RELEASE NOTES 0.1.5 LOOKUP OK"
 
 echo "=== [3/4] Leak-Gate negative test ==="
 LEAK_WORK="$TMP_DIR/leak-tc"

@@ -12,8 +12,11 @@ VARIANT="${3:?usage: smoke.sh <image-ref> <php-series> <variant>}"
 
 echo "=== Smoke-testing ${IMAGE} (PHP ${PHP_SERIES}, variant=${VARIANT}) ==="
 
+set -x
+
 # 1. Verify official image layout, ENV, helper binaries, and INI templates
-docker run --rm "${IMAGE}" sh -eu -c '
+docker run --rm "${IMAGE}" sh -eux -c '
+  ls -la /usr/local/bin/php /usr/local/etc/php
   test -x /usr/local/bin/php
   test -x /usr/local/bin/docker-php-entrypoint
   test -x /usr/local/bin/docker-php-ext-install
@@ -21,18 +24,28 @@ docker run --rm "${IMAGE}" sh -eu -c '
   test -x /usr/local/bin/docker-php-ext-configure
   test -x /usr/local/bin/docker-php-source
   test "$PHP_INI_DIR" = "/usr/local/etc/php"
+  test "$PHP_SERIES" = "'"${PHP_SERIES}"'"
   test -f /usr/local/etc/php/php.ini-development
   test -f /usr/local/etc/php/php.ini-production
   test -d /usr/local/etc/php/conf.d
   test -d /var/www/html
 '
 
-VER_OUT="$(docker run --rm "${IMAGE}" php -v)"
-echo "$VER_OUT"
+RC=0
+VER_OUT="$(docker run --rm "${IMAGE}" php -v 2>&1)" || RC=$?
+echo "php -v (rc=${RC}): ${VER_OUT}"
+if [[ "$RC" -ne 0 ]]; then
+  docker run --rm "${IMAGE}" sh -c 'ls -la /opt/filc/*/pizfix/bin /opt/filc/*/pizfix/lib | head -n 60' 2>&1 || true
+  exit "$RC"
+fi
 printf '%s\n' "$VER_OUT" | head -n 1 | grep -Eq "^PHP ${PHP_SERIES//./\\.}\."
 
-MOD_OUT="$(docker run --rm "${IMAGE}" php -m)"
-echo "Loaded modules: $(printf '%s' "$MOD_OUT" | tr '\n' ' ')"
+RC=0
+MOD_OUT="$(docker run --rm "${IMAGE}" php -m 2>&1)" || RC=$?
+echo "php -m (rc=${RC}): $(printf '%s' "$MOD_OUT" | tr '\n' ' ')"
+if [[ "$RC" -ne 0 ]]; then
+  exit "$RC"
+fi
 for mod in openssl sqlite3 pdo_sqlite curl mbstring intl sodium bcmath exif pcntl sockets json pcre zlib; do
   printf '%s\n' "$MOD_OUT" | grep -Fxiq "$mod" || {
     echo "error: expected PHP module missing: $mod" >&2

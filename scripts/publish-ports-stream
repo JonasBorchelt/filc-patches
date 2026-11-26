@@ -898,7 +898,7 @@ module PublishPortsStream
     env
   end
 
-  def run_logged_cmd(cmd, env:, log_file:, cpu_range: nil, cwd: nil)
+  def run_logged_cmd(cmd, env:, log_file:, cpu_range: nil, cwd: nil, active_pids: nil, pid_mu: nil)
     full_cmd = if cpu_range && !cpu_range.empty? && cmd_available?("taskset")
                  ["taskset", "-c", cpu_range, *cmd]
                else
@@ -908,17 +908,26 @@ module PublishPortsStream
     output = +""
     opts = {}
     opts[:chdir] = cwd if cwd
+    opts[:pgroup] = true if active_pids
     Open3.popen2e(env, *full_cmd, **opts) do |stdin, oe, wait_thr|
-      stdin.close
-      oe.binmode
-      File.open(log_file, "a", encoding: "UTF-8") do |lf|
-        oe.each_line do |raw_line|
-          line = decode_utf8(raw_line)
-          lf.write(line)
-          output << line
+      pid = wait_thr.pid
+      pid_mu.synchronize { active_pids.add(pid) } if active_pids && pid_mu && pid
+      begin
+        stdin.close
+        oe.binmode
+        File.open(log_file, "a", encoding: "UTF-8") do |lf|
+          oe.each_line do |raw_line|
+            line = decode_utf8(raw_line)
+            lf.write(line)
+            output << line
+          end
         end
+        st = wait_thr.value
+        rc = st.exitstatus || (st.termsig ? 128 + st.termsig : 1)
+        [rc, output]
+      ensure
+        pid_mu.synchronize { active_pids.delete(pid) } if active_pids && pid_mu && pid
       end
-      [wait_thr.value.exitstatus, output]
     end
   end
 
@@ -1386,6 +1395,54 @@ module PublishPortsStream
 
     mu = Mutex.new
     cv = ConditionVariable.new
+    pid_mu = Mutex.new
+    active_pids = Set.new
+    abort_requested = false
+    interrupted_signal = nil
+    sig_r, sig_w = IO.pipe
+    sig_watcher = Thread.new do
+      loop do
+        byte = begin
+          sig_r.read(1)
+        rescue IOError
+          nil
+        end
+        break if byte.nil? || byte == "Q"
+
+        sig_name = byte == "I" ? "INT" : "TERM"
+        mu.synchronize do
+          abort_requested = true
+          interrupted_signal ||= sig_name
+          cv.broadcast
+        end
+        pids_to_kill = pid_mu.synchronize { active_pids.to_a }
+        pids_to_kill.each do |pid|
+          begin
+            Process.kill("-TERM", pid)
+          rescue Errno::ESRCH, Errno::EPERM
+            begin
+              Process.kill("TERM", pid)
+            rescue StandardError
+              nil
+            end
+          end
+        end
+      end
+    end
+    prev_term = Signal.trap("TERM") do
+      begin
+        sig_w.write_nonblock("T")
+      rescue StandardError
+        nil
+      end
+    end
+    prev_int = Signal.trap("INT") do
+      begin
+        sig_w.write_nonblock("I")
+      rescue StandardError
+        nil
+      end
+    end
     active_count = 0
     done_count = 0
     verified_count = 0
@@ -1445,12 +1502,12 @@ module PublishPortsStream
         loop do
           pname = nil
           mu.synchronize do
-            while ready.empty? && (active_count > 0 || done_count < selected.size)
+            while !abort_requested && ready.empty? && (active_count > 0 || done_count < selected.size)
               break if ready.empty? && active_count == 0
 
               cv.wait(mu)
             end
-            unless ready.empty?
+            if !abort_requested && !ready.empty?
               pname = ready.shift
               active_count += 1
               start_sequence << pname
@@ -1538,7 +1595,7 @@ module PublishPortsStream
                     "--base-url", opts[:upload_url],
                     "--head-verify-meta", tmp_probe
                   ]
-                  rc_hv, out_hv = run_logged_cmd(hv_cmd, env: up_env, log_file: log_file)
+                  rc_hv, out_hv = run_logged_cmd(hv_cmd, env: up_env, log_file: log_file, active_pids: active_pids, pid_mu: pid_mu)
                   remote_ok = (rc_hv == 0)
                   if remote_ok
                     cache_head = "hit"
@@ -1681,7 +1738,9 @@ module PublishPortsStream
               [build_port_bin, pname, opts[:work_dir]],
               env: build_env,
               log_file: log_file,
-              cpu_range: cpu_range
+              cpu_range: cpu_range,
+              active_pids: active_pids,
+              pid_mu: pid_mu
             )
             state_json_path = File.join(state_dir, "#{pname}.json")
             state_rec = File.file?(state_json_path) ? (JSON.parse(File.read(state_json_path, encoding: "UTF-8")) rescue nil) : nil
@@ -1734,7 +1793,9 @@ module PublishPortsStream
                 pkg_cmd,
                 env: pkg_env,
                 log_file: log_file,
-                cpu_range: cpu_range
+                cpu_range: cpu_range,
+                active_pids: active_pids,
+                pid_mu: pid_mu
               )
               if rc_p == 0
                 staged_meta_path = File.join(staged_dir, "#{pname}.json")
@@ -1805,7 +1866,7 @@ module PublishPortsStream
                 "--base-url", opts[:upload_url],
                 "--stage-port-meta", File.join(staged_dir, "#{pname}.json")
               ]
-              rc_u, out_u = run_logged_cmd(up_cmd, env: up_env, log_file: log_file)
+              rc_u, out_u = run_logged_cmd(up_cmd, env: up_env, log_file: log_file, active_pids: active_pids, pid_mu: pid_mu)
               if rc_u == 0
                 upload_ok = true
               else
@@ -1826,7 +1887,7 @@ module PublishPortsStream
                 "--stage-port-meta", File.join(staged_dir, "#{pname}.json"),
                 "--dry-run"
               ]
-              rc_u, out_u = run_logged_cmd(up_cmd, env: up_env, log_file: log_file)
+              rc_u, out_u = run_logged_cmd(up_cmd, env: up_env, log_file: log_file, active_pids: active_pids, pid_mu: pid_mu)
               if rc_u == 0
                 upload_ok = true
               else
@@ -1927,9 +1988,52 @@ module PublishPortsStream
     begin
       workers.each(&:join)
     ensure
+      Signal.trap("TERM", prev_term) if prev_term
+      Signal.trap("INT", prev_int) if prev_int
+      begin
+        sig_w.write_nonblock("Q")
+      rescue StandardError
+        nil
+      end
+      sig_watcher.join(2) if sig_watcher
+      sig_r.close unless sig_r.closed?
+      sig_w.close unless sig_w.closed?
       FileUtils.rm_rf(shared_wrapper_dir) if shared_wrapper_dir && File.exist?(shared_wrapper_dir)
     end
     total_duration = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - t_run_start).round(3)
+
+    incomplete_ports = topo_order.reject { |n| results.key?(n) }
+    unless incomplete_ports.empty?
+      abort_reason = interrupted_signal ? "aborted by SIG#{interrupted_signal}" : "incomplete stream: port did not complete"
+      incomplete_ports.each do |pname|
+        meta = all_ports[pname]
+        results[pname] = {
+          "name" => pname,
+          "version" => meta["version"],
+          "tier" => meta["tier"],
+          "status" => "failed",
+          "failed_stage" => "aborted",
+          "failed_kind" => "runner",
+          "failure_reason" => abort_reason,
+          "policy_class" => meta["policy_class"],
+          "deps" => meta["deps"],
+          "blocked_by" => [],
+          "duration_seconds" => 0,
+          "patch_count" => meta["patch_count"],
+          "added_lines" => meta["added_lines"],
+          "removed_lines" => meta["removed_lines"],
+          "files_changed" => meta["files_changed"]
+        }
+        failures << {
+          "name" => pname,
+          "stage" => "aborted",
+          "kind" => "runner",
+          "reason" => abort_reason,
+          "details" => [],
+          "log_file" => File.join(logs_dir, "#{pname}.log")
+        }
+      end
+    end
 
     save_timings!(opts[:timings_file], measured_durations)
     save_cache_manifest!(opts[:cache_manifest], updated_cache_entries) if opts[:cache_manifest]
@@ -1943,7 +2047,14 @@ module PublishPortsStream
 
     blocked_records = results.values.select { |r| r["status"] == "blocked" }.sort_by { |r| r["name"] }
     cached_records = results.values.select { |r| r["status"] == "cached" }.sort_by { |r| r["name"] }
-    commit_allowed = failures.empty? && blocked_records.empty?
+    completed_ok = results.values.count { |r| %w[tested built cached].include?(r["status"]) }
+    commit_allowed = !abort_requested &&
+                     interrupted_signal.nil? &&
+                     incomplete_ports.empty? &&
+                     failures.empty? &&
+                     blocked_records.empty? &&
+                     results.size == selected.size &&
+                     completed_ok == selected.size
 
     summary_obj = {
       "channel" => opts[:channel],
@@ -1959,6 +2070,10 @@ module PublishPortsStream
       "channel_verify" => channel_verify_info,
       "cached_ports" => cached_records.map { |r| r["name"] },
       "duration_seconds" => total_duration,
+      "selected_ports" => selected.size,
+      "completed_ports" => completed_ok,
+      "incomplete_ports" => incomplete_ports,
+      "interrupted_signal" => interrupted_signal,
       "commit_allowed" => commit_allowed,
       "failed_ports" => failures.sort_by { |f| f["name"] },
       "blocked_ports" => blocked_records.map { |r| { "name" => r["name"], "blocked_by" => r["blocked_by"] } },
@@ -1970,9 +2085,11 @@ module PublishPortsStream
       redact_tokens = secret_tokens_for_redaction(opts[:exact_tokens_env])
       $stdout.puts("FILC_PHASE stream-ports failure #{total_duration.round}")
       $stdout.puts("=" * 80)
+      sig_note = interrupted_signal ? " (interrupted by SIG#{interrupted_signal})" : ""
       $stdout.puts(
-        "PUBLISH_PORTS_COMMIT_BLOCKED: index commit prevented by #{failures.length} failed port(s) " \
-        "and #{blocked_records.length} blocked port(s)"
+        "PUBLISH_PORTS_COMMIT_BLOCKED: index commit prevented by #{failures.length} failed port(s), " \
+        "#{blocked_records.length} blocked port(s), and #{incomplete_ports.length} incomplete port(s) " \
+        "(completed=#{completed_ok}/#{selected.size})#{sig_note}"
       )
       $stdout.puts("FAILED PORTS PREVENTING INDEX COMMIT:")
       failures.sort_by { |f| f["name"] }.each do |f|
@@ -1999,6 +2116,9 @@ module PublishPortsStream
       end
       $stdout.puts("=" * 80)
       $stdout.flush
+      return 143 if interrupted_signal == "TERM"
+      return 130 if interrupted_signal == "INT"
+
       return 1
     end
 

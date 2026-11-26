@@ -960,5 +960,73 @@ Dir.mktmpdir("filc-stream-test-") do |tmp|
   assert(lock_elapsed >= 0.4, "locked run did not wait for holder (elapsed=#{lock_elapsed}s)")
   puts "CHANNEL_EXCLUSIVE_LOCK: PASS (waited #{lock_elapsed.round(2)}s for active lock holder before proceeding)"
 
+  puts "=== [12/12] Guard 3: SIGTERM mid-stream aborts cleanly with rc=143 and blocks commit ==="
+  work_sig = File.join(tmp, "work-sigterm")
+  out_sig = File.join(tmp, "out-sigterm")
+  slow_build = File.join(tmp, "fake-build-port-slow")
+  File.write(slow_build, <<~SH)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    PORT="$1"
+    WORK="$2"
+    mkdir -p "$WORK/ports-state"
+    if [ "$PORT" = "liba" ]; then
+      echo "BUILDING_LIBA_START"
+      sleep 30
+    fi
+    exit 0
+  SH
+  File.chmod(0o755, slow_build)
+
+  sig_out = +""
+  sig_err = +""
+  sig_rc = nil
+  Open3.popen3(
+    "ruby", STREAM_BIN,
+    "--repo-root", REPO_ROOT,
+    "--ports-dir", fix[:ports_dir],
+    "--toolchain-root", fix[:tc_root],
+    "--work-dir", work_sig,
+    "--out-dir", out_sig,
+    "--channel", "0.1.5",
+    "--arch", "x86_64-linux",
+    "--parallel", "1",
+    "--total-jobs", "2",
+    "--no-pin-cpus",
+    "--no-bootstrap-timings",
+    "--timings-file", "",
+    "--skip-package-smoke",
+    "--build-port-bin", slow_build
+  ) do |stdin, stdout, stderr, wait_thr|
+    stdin.close
+    t_out = Thread.new do
+      stdout.each_line do |ln|
+        sig_out << ln
+        if ln.include?("FILC_PORT liba building")
+          sleep 0.3
+          Process.kill("TERM", wait_thr.pid)
+        end
+      end
+    end
+    t_err = Thread.new { sig_err << stderr.read }
+    sig_rc = wait_thr.value.exitstatus
+    t_out.join
+    t_err.join
+  end
+  assert(sig_rc == 143, "SIGTERM mid-stream must exit 143 (not 0), got #{sig_rc}: out=#{sig_out}\nerr=#{sig_err}")
+  sig_summary_path = File.join(work_sig, "publish-summary.json")
+  assert(File.file?(sig_summary_path), "missing publish-summary.json after SIGTERM")
+  sig_summary = JSON.parse(File.read(sig_summary_path))
+  assert(sig_summary["commit_allowed"] == false, "commit_allowed must be false after SIGTERM")
+  assert(sig_summary["interrupted_signal"] == "TERM", "interrupted_signal must record TERM, got #{sig_summary['interrupted_signal'].inspect}")
+  assert(sig_summary["completed_ports"].to_i < sig_summary["selected_ports"].to_i,
+         "completed_ports must be < selected_ports after SIGTERM: #{sig_summary}")
+  assert(!Array(sig_summary["incomplete_ports"]).empty?, "incomplete_ports must be non-empty after SIGTERM")
+  assert(!File.file?(File.join(out_sig, "0.1.5", "x86_64-linux", "index.json")),
+         "index.json must NOT be finalized after SIGTERM")
+  assert(sig_out.include?("FILC_PHASE stream-ports failure"), "expected failure phase marker on SIGTERM")
+  assert(!sig_out.include?("FILC_PHASE stream-ports success"), "must NEVER emit success phase marker on SIGTERM")
+  puts "SIGTERM_ABORT_GUARD: PASS (rc=143, commit_allowed=false, interrupted_signal=TERM, incomplete=#{sig_summary['incomplete_ports'].length})"
+
   puts "ALL PUBLISH-PORTS-STREAM TESTS PASSED"
 end

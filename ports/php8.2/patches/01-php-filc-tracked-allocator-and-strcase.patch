@@ -10,7 +10,7 @@ Origin-URL: https://github.com/pizlonator/fil-c/commit/18e0199cef6c30fc815442c0d
 
 --- a/Zend/zend_alloc.c
 +++ b/Zend/zend_alloc.c
-@@ -3149,6 +3149,17 @@
+@@ -3149,6 +3149,17 @@ static zend_always_inline zend_result tracked_check_max_allocs(zend_mm_heap *hea
  	return SUCCESS;
  }
  
@@ -28,7 +28,7 @@ Origin-URL: https://github.com/pizlonator/fil-c/commit/18e0199cef6c30fc815442c0d
  static void *tracked_malloc(size_t size)
  {
  	zend_mm_heap *heap = AG(mm_heap);
-@@ -3168,6 +3179,7 @@
+@@ -3168,6 +3179,7 @@ static void *tracked_malloc(size_t size)
  	tracked_add(heap, ptr, size);
  	heap->size += size;
  	heap->real_size = heap->size;
@@ -36,7 +36,7 @@ Origin-URL: https://github.com/pizlonator/fil-c/commit/18e0199cef6c30fc815442c0d
  	return ptr;
  }
  
-@@ -3212,10 +3224,17 @@
+@@ -3212,10 +3224,17 @@ static void *tracked_realloc(void *ptr, size_t new_size) {
  	tracked_add(heap, ptr, new_size);
  	heap->size += new_size - old_size;
  	heap->real_size = heap->size;
@@ -54,7 +54,7 @@ Origin-URL: https://github.com/pizlonator/fil-c/commit/18e0199cef6c30fc815442c0d
  	HashTable *tracked_allocs = AG(mm_heap)->tracked_allocs;
  	zend_ulong h;
  	ZEND_HASH_FOREACH_NUM_KEY(tracked_allocs, h) {
-@@ -3231,8 +3250,20 @@
+@@ -3231,8 +3250,20 @@ static void alloc_globals_ctor(zend_alloc_globals *alloc_globals)
  
  #if ZEND_MM_CUSTOM
  	tmp = getenv("USE_ZEND_ALLOC");
@@ -77,7 +77,7 @@ Origin-URL: https://github.com/pizlonator/fil-c/commit/18e0199cef6c30fc815442c0d
  		mm_heap->use_custom_heap = ZEND_MM_CUSTOM_HEAP_STD;
 --- a/Zend/zend_operators.c
 +++ b/Zend/zend_operators.c
-@@ -2951,7 +2951,7 @@
+@@ -2819,7 +2819,7 @@ ZEND_API char* ZEND_FASTCALL zend_str_tolower_dup_ex(const char *source, size_t
  			if (p != (const unsigned char*)source) {
  				memcpy(res, source, p - (const unsigned char*)source);
  			}
@@ -86,7 +86,7 @@ Origin-URL: https://github.com/pizlonator/fil-c/commit/18e0199cef6c30fc815442c0d
  			zend_str_tolower_impl((char *)r, (const char*)p, end - p);
  			res[length] = '\0';
  			return res;
-@@ -2975,7 +2975,7 @@
+@@ -2843,7 +2843,7 @@ ZEND_API char* ZEND_FASTCALL zend_str_toupper_dup_ex(const char *source, size_t
  			if (p != (const unsigned char*)source) {
  				memcpy(res, source, p - (const unsigned char*)source);
  			}

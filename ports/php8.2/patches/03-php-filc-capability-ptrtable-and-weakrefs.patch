@@ -12,7 +12,7 @@ diff --git a/Zend/zend_types.h b/Zend/zend_types.h
 index 19e8d194..53302cb9 100644
 --- a/Zend/zend_types.h
 +++ b/Zend/zend_types.h
-@@ -587,6 +587,19 @@ typedef struct {
+@@ -529,6 +529,19 @@ typedef struct {
  	struct _zend_property_info *ptr[1];
  } zend_property_info_list;
  
@@ -32,7 +32,7 @@ index 19e8d194..53302cb9 100644
  typedef union {
  	struct _zend_property_info *ptr;
  	uintptr_t list;
-@@ -595,6 +608,7 @@ typedef union {
+@@ -537,6 +550,7 @@ typedef union {
  #define ZEND_PROPERTY_INFO_SOURCE_FROM_LIST(list) (0x1 | (uintptr_t) (list))
  #define ZEND_PROPERTY_INFO_SOURCE_TO_LIST(list) ((zend_property_info_list *) ((list) & ~0x1))
  #define ZEND_PROPERTY_INFO_SOURCE_IS_LIST(list) ((list) & 0x1)
@@ -42,8 +42,7 @@ index 19e8d194..53302cb9 100644
  	zend_refcounted_h              gc;
 --- a/Zend/zend_weakrefs.c
 +++ b/Zend/zend_weakrefs.c
-@@ -48,8 +48,23 @@
- #define ZEND_WEAKREF_TAG_REF 0
+@@ -49,8 +49,23 @@ typedef struct _zend_weakmap_iterator {
  #define ZEND_WEAKREF_TAG_MAP 1
  #define ZEND_WEAKREF_TAG_HT  2
  #define ZEND_WEAKREF_GET_TAG(p) (((uintptr_t) (p)) & 3)
@@ -69,7 +68,7 @@ index 19e8d194..53302cb9 100644
  zend_class_entry *zend_ce_weakmap;
 --- a/Zend/zend_weakrefs.h
 +++ b/Zend/zend_weakrefs.h
-@@ -51,6 +51,24 @@
+@@ -51,6 +51,24 @@ static zend_always_inline void *zend_weakrefs_hash_add_ptr(HashTable *ht, zend_o
   * It is not used for the HashTable instances associated with ZEND_WEAKREF_TAG_HT tags (created in zend_weakref_register, which uses ZEND_WEAKREF_ENCODE instead).
   * The ZEND_WEAKREF_TAG_HT instances are used to disambiguate between multiple weak references to the same zend_object.
   */
@@ -94,10 +93,11 @@ index 19e8d194..53302cb9 100644
  static zend_always_inline zend_ulong zend_object_to_weakref_key(const zend_object *object)
  {
  	ZEND_ASSERT(((uintptr_t)object) % ZEND_MM_ALIGNMENT == 0);
-@@ -61,5 +79,6 @@
+@@ -61,6 +79,7 @@ static zend_always_inline zend_object *zend_weakref_key_to_object(zend_ulong key
  {
  	return (zend_object *) (((uintptr_t) key) << ZEND_MM_ALIGNMENT_LOG2);
  }
 +#endif
  
  END_EXTERN_C()
+ 

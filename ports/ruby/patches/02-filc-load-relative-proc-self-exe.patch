@@ -1,3 +1,9 @@
+Subject: Fall back to /proc/self/exe in runtime_libruby_path when dladdr fails on Linux
+Policy-Class: P2-Package
+Rationale: Under Fil-C musl, dladdr() returns 0 for symbols inside the main ruby executable, causing --enable-load-relative to return an empty path and lose relative prefix relocation. Falling back to readlink("/proc/self/exe") on Linux restores native runtime relocation.
+Upstream-Status: Pending
+Fil-C-Origin-Commits: none
+
 --- a/ruby.c
 +++ b/ruby.c
 @@ -653,7 +653,14 @@ runtime_libruby_path(void)

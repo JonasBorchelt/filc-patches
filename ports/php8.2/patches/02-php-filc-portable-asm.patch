@@ -21,8 +21,6 @@ index 809e379c..386c7aee 100644
  	return eax;
  # elif defined(ZEND_WIN32) && defined(_XCR_XFEATURE_ENABLED_MASK)
  	return _xgetbv(_XCR_XFEATURE_ENABLED_MASK);
-diff --git a/Zend/zend_float.h b/Zend/zend_float.h
-index c8e91122..0f5bb7be 100644
 --- a/Zend/zend_float.h
 +++ b/Zend/zend_float.h
 @@ -312,7 +312,7 @@ END_EXTERN_C()
@@ -34,11 +32,9 @@ index c8e91122..0f5bb7be 100644
  
  /*
    Custom x86 inline assembler implementation.
-diff --git a/Zend/zend_multiply.h b/Zend/zend_multiply.h
-index b3f00860..11631121 100644
 --- a/Zend/zend_multiply.h
 +++ b/Zend/zend_multiply.h
-@@ -195,7 +195,7 @@ static zend_always_inline size_t zend_safe_address(size_t nmemb, size_t size, si
+@@ -193,7 +193,7 @@ static zend_always_inline size_t zend_safe_address(size_t nmemb, size_t size, si
  	return res;
  }
  
@@ -47,11 +43,9 @@ index b3f00860..11631121 100644
  
  static zend_always_inline size_t zend_safe_address(size_t nmemb, size_t size, size_t offset, bool *overflow)
  {
-diff --git a/Zend/zend_operators.h b/Zend/zend_operators.h
-index e2bcc79b..48efb809 100644
 --- a/Zend/zend_operators.h
 +++ b/Zend/zend_operators.h
-@@ -517,7 +517,10 @@ ZEND_API void zend_reset_lc_ctype_locale(void);
+@@ -503,7 +503,10 @@ ZEND_API void zend_reset_lc_ctype_locale(void);
  #define ZVAL_OFFSETOF_TYPE	\
  	(offsetof(zval, u1.type_info) - offsetof(zval, value))
  
@@ -63,11 +57,9 @@ index e2bcc79b..48efb809 100644
  # define ZEND_USE_ASM_ARITHMETIC 1
  #else
  # define ZEND_USE_ASM_ARITHMETIC 0
-diff --git a/Zend/zend_string.c b/Zend/zend_string.c
-index 66d0eb32..86ccf585 100644
 --- a/Zend/zend_string.c
 +++ b/Zend/zend_string.c
-@@ -396,7 +396,7 @@ ZEND_API void zend_interned_strings_switch_storage(bool request)
+@@ -386,7 +386,7 @@ ZEND_API void zend_interned_strings_switch_storage(bool request)
  	}
  }
  
@@ -76,7 +68,7 @@ index 66d0eb32..86ccf585 100644
  /* Even if we don't build with valgrind support, include the symbol so that valgrind available
   * only at runtime will not result in false positives. */
  #ifndef I_REPLACE_SONAME_FNNAME_ZU
-@@ -454,7 +454,7 @@ ZEND_API zend_never_inline NOIPA bool ZEND_FASTCALL zend_string_equal_val(const
+@@ -444,7 +444,7 @@ ZEND_API zend_never_inline NOIPA bool ZEND_FASTCALL zend_string_equal_val(const
  	return ret;
  }
  
@@ -85,11 +77,9 @@ index 66d0eb32..86ccf585 100644
  ZEND_API zend_never_inline NOIPA bool ZEND_FASTCALL zend_string_equal_val(const zend_string *s1, const zend_string *s2)
  {
  	const char *ptr = ZSTR_VAL(s1);
-diff --git a/Zend/zend_string.h b/Zend/zend_string.h
-index bb2ddd9f..74252775 100644
 --- a/Zend/zend_string.h
 +++ b/Zend/zend_string.h
-@@ -448,7 +448,7 @@ static zend_always_inline bool zend_string_equals_cstr(const zend_string *s1, co
+@@ -426,7 +426,7 @@ static zend_always_inline bool zend_string_equals_cstr(const zend_string *s1, co
  	return ZSTR_LEN(s1) == s2_length && !memcmp(ZSTR_VAL(s1), s2, s2_length);
  }
  

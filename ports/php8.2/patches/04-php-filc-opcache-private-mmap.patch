@@ -25,7 +25,7 @@ Origin-URL: https://github.com/pizlonator/fil-c/commit/fd1f26a649078e4e12cb01026
  #if defined(MAP_ALIGNED_SUPER)
  # include <sys/types.h>
  # include <sys/sysctl.h>
-@@ -232,7 +240,7 @@
+@@ -232,7 +240,7 @@ static int create_segments(size_t requested_size, zend_shared_segment ***shared_
  	 * (boot time config only, but enabled by default on most arches).
  	 */
  	if (requested_size >= huge_page_size && requested_size % huge_page_size == 0) {

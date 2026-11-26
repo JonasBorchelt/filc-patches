@@ -1,0 +1,146 @@
+Subject: Use portable C paths instead of inline assembly under Fil-C
+Policy-Class: P2-Package
+Rationale: Take Zend's portable C paths for zend_string_equal_val, zend_safe_address, signed multiply, and overflow arithmetic (avoiding asm goto callbr), and guard x87 inline asm to __i386__ under __FILC__.
+Upstream-Status: Upstream-Candidate
+Fil-C-Origin-Commits: fd1f26a649078e4e12cb01026cf43199b6e6d160 95f267d64fd1615bae8c6c25425d9b7857bee326
+Origin-Kind: filc-upstream
+Origin-Project: pizlonator/fil-c
+Origin-Commit: fd1f26a649078e4e12cb01026cf43199b6e6d160
+Origin-URL: https://github.com/pizlonator/fil-c/commit/fd1f26a649078e4e12cb01026cf43199b6e6d160
+
+--- a/Zend/zend_float.h
++++ b/Zend/zend_float.h
+@@ -315,7 +315,7 @@
+                 return _xpfpa_result; \
+             } while (0)
+ 
+-#elif defined(HAVE_FPU_INLINE_ASM_X86)
++#elif defined(HAVE_FPU_INLINE_ASM_X86) && defined(__i386__)
+ 
+ /*
+   Custom x86 inline assembler implementation.
+--- a/Zend/zend_multiply.h
++++ b/Zend/zend_multiply.h
+@@ -42,7 +42,7 @@
+ 	else (lval) = __tmpvar;											\
+ } while (0)
+ 
+-#elif (defined(__i386__) || defined(__x86_64__)) && defined(__GNUC__)
++#elif (defined(__i386__) || defined(__x86_64__)) && defined(__GNUC__) && !defined(__FILC__)
+ 
+ #define ZEND_SIGNED_MULTIPLY_LONG(a, b, lval, dval, usedval) do {	\
+ 	zend_long __tmpvar; 													\
+@@ -180,7 +180,7 @@
+ 	return res;
+ }
+ 
+-#elif defined(__GNUC__) && defined(__x86_64__)
++#elif defined(__GNUC__) && defined(__x86_64__) && !defined(__FILC__)
+ 
+ static zend_always_inline size_t zend_safe_address(size_t nmemb, size_t size, size_t offset, int *overflow)
+ {
+--- a/Zend/zend_operators.h
++++ b/Zend/zend_operators.h
+@@ -471,7 +471,7 @@
+ 
+ static zend_always_inline void fast_long_increment_function(zval *op1)
+ {
+-#if defined(HAVE_ASM_GOTO) && defined(__i386__) && !(4 == __GNUC__ && 8 == __GNUC_MINOR__)
++#if defined(HAVE_ASM_GOTO) && defined(__i386__) && !defined(__FILC__) && !(4 == __GNUC__ && 8 == __GNUC_MINOR__)
+ 	__asm__ goto(
+ 		"addl $1,(%0)\n\t"
+ 		"jo  %l1\n"
+@@ -482,7 +482,7 @@
+ 	return;
+ overflow: ZEND_ATTRIBUTE_COLD_LABEL
+ 	ZVAL_DOUBLE(op1, (double)ZEND_LONG_MAX + 1.0);
+-#elif defined(HAVE_ASM_GOTO) && defined(__x86_64__)
++#elif defined(HAVE_ASM_GOTO) && defined(__x86_64__) && !defined(__FILC__)
+ 	__asm__ goto(
+ 		"addq $1,(%0)\n\t"
+ 		"jo  %l1\n"
+@@ -521,7 +521,7 @@
+ 
+ static zend_always_inline void fast_long_decrement_function(zval *op1)
+ {
+-#if defined(HAVE_ASM_GOTO) && defined(__i386__) && !(4 == __GNUC__ && 8 == __GNUC_MINOR__)
++#if defined(HAVE_ASM_GOTO) && defined(__i386__) && !defined(__FILC__) && !(4 == __GNUC__ && 8 == __GNUC_MINOR__)
+ 	__asm__ goto(
+ 		"subl $1,(%0)\n\t"
+ 		"jo  %l1\n"
+@@ -532,7 +532,7 @@
+ 	return;
+ overflow: ZEND_ATTRIBUTE_COLD_LABEL
+ 	ZVAL_DOUBLE(op1, (double)ZEND_LONG_MIN - 1.0);
+-#elif defined(HAVE_ASM_GOTO) && defined(__x86_64__)
++#elif defined(HAVE_ASM_GOTO) && defined(__x86_64__) && !defined(__FILC__)
+ 	__asm__ goto(
+ 		"subq $1,(%0)\n\t"
+ 		"jo  %l1\n"
+@@ -571,7 +571,7 @@
+ 
+ static zend_always_inline void fast_long_add_function(zval *result, zval *op1, zval *op2)
+ {
+-#if defined(HAVE_ASM_GOTO) && defined(__i386__) && !(4 == __GNUC__ && 8 == __GNUC_MINOR__)
++#if defined(HAVE_ASM_GOTO) && defined(__i386__) && !defined(__FILC__) && !(4 == __GNUC__ && 8 == __GNUC_MINOR__)
+ 	__asm__ goto(
+ 		"movl	(%1), %%eax\n\t"
+ 		"addl   (%2), %%eax\n\t"
+@@ -589,7 +589,7 @@
+ 	return;
+ overflow: ZEND_ATTRIBUTE_COLD_LABEL
+ 	ZVAL_DOUBLE(result, (double) Z_LVAL_P(op1) + (double) Z_LVAL_P(op2));
+-#elif defined(HAVE_ASM_GOTO) && defined(__x86_64__)
++#elif defined(HAVE_ASM_GOTO) && defined(__x86_64__) && !defined(__FILC__)
+ 	__asm__ goto(
+ 		"movq	(%1), %%rax\n\t"
+ 		"addq   (%2), %%rax\n\t"
+@@ -661,7 +661,7 @@
+ 
+ static zend_always_inline void fast_long_sub_function(zval *result, zval *op1, zval *op2)
+ {
+-#if defined(HAVE_ASM_GOTO) && defined(__i386__) && !(4 == __GNUC__ && 8 == __GNUC_MINOR__)
++#if defined(HAVE_ASM_GOTO) && defined(__i386__) && !defined(__FILC__) && !(4 == __GNUC__ && 8 == __GNUC_MINOR__)
+ 	__asm__ goto(
+ 		"movl	(%1), %%eax\n\t"
+ 		"subl   (%2), %%eax\n\t"
+@@ -679,7 +679,7 @@
+ 	return;
+ overflow: ZEND_ATTRIBUTE_COLD_LABEL
+ 	ZVAL_DOUBLE(result, (double) Z_LVAL_P(op1) - (double) Z_LVAL_P(op2));
+-#elif defined(HAVE_ASM_GOTO) && defined(__x86_64__)
++#elif defined(HAVE_ASM_GOTO) && defined(__x86_64__) && !defined(__FILC__)
+ 	__asm__ goto(
+ 		"movq	(%1), %%rax\n\t"
+ 		"subq   (%2), %%rax\n\t"
+--- a/Zend/zend_string.c
++++ b/Zend/zend_string.c
+@@ -338,7 +338,7 @@
+ 	}
+ }
+ 
+-#if defined(__GNUC__) && defined(__i386__)
++#if defined(__GNUC__) && defined(__i386__) && !defined(__FILC__)
+ ZEND_API zend_bool ZEND_FASTCALL zend_string_equal_val(zend_string *s1, zend_string *s2)
+ {
+ 	char *ptr = ZSTR_VAL(s1);
+@@ -406,7 +406,7 @@
+ }
+ #endif
+ 
+-#elif defined(__GNUC__) && defined(__x86_64__) && !defined(__ILP32__)
++#elif defined(__GNUC__) && defined(__x86_64__) && !defined(__ILP32__) && !defined(__FILC__)
+ ZEND_API zend_bool ZEND_FASTCALL zend_string_equal_val(zend_string *s1, zend_string *s2)
+ {
+ 	char *ptr = ZSTR_VAL(s1);
+--- a/Zend/zend_string.h
++++ b/Zend/zend_string.h
+@@ -301,7 +301,7 @@
+ 	}
+ }
+ 
+-#if defined(__GNUC__) && (defined(__i386__) || (defined(__x86_64__) && !defined(__ILP32__)))
++#if defined(__GNUC__) && (defined(__i386__) || (defined(__x86_64__) && !defined(__ILP32__))) && !defined(__FILC__)
+ BEGIN_EXTERN_C()
+ ZEND_API zend_bool ZEND_FASTCALL zend_string_equal_val(zend_string *s1, zend_string *s2);
+ END_EXTERN_C()

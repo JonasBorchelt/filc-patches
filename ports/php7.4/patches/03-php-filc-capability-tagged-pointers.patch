@@ -1,0 +1,101 @@
+Subject: Preserve pointer capabilities for zend_type and typed-property source lists under Fil-C
+Policy-Class: P4-Audit
+Rationale: Fil-C drops a pointer's capability across integer round-trips. In PHP 7.4 both zend_type (which tags class name strings and zend_class_entry pointers in its low 2 bits) and zend_property_info_source_list (low 1 bit) store pointers in uintptr_t; switch both to char * pointer arithmetic under __FILC__ so capabilities survive.
+Upstream-Status: Fil-C-Specific
+Fil-C-Origin-Commits: fd1f26a649078e4e12cb01026cf43199b6e6d160
+Origin-Kind: filc-upstream
+Origin-Project: pizlonator/fil-c
+Origin-Commit: fd1f26a649078e4e12cb01026cf43199b6e6d160
+Origin-URL: https://github.com/pizlonator/fil-c/commit/fd1f26a649078e4e12cb01026cf43199b6e6d160
+
+--- a/Zend/zend_types.h
++++ b/Zend/zend_types.h
+@@ -120,7 +120,52 @@
+  * ZEND_TYPE_ENCODE() and ZEND_TYPE_ENCODE_CLASS() should be used for
+  * construction.
+  */
++
++#ifdef __FILC__
++/* Fil-C drops pointer capabilities across integer round-trips, so represent
++ * zend_type as char * and tag class name / zend_class_entry pointers via
++ * pointer arithmetic instead of bitwise ops on uintptr_t. */
++typedef char *zend_type;
++
++#define ZEND_TYPE_IS_SET(t) \
++	((uintptr_t)(t) > Z_L(0x3))
++
++#define ZEND_TYPE_IS_CODE(t) \
++	(((uintptr_t)(t) > Z_L(0x3)) && ((uintptr_t)(t) <= Z_L(0x3ff)))
++
++#define ZEND_TYPE_IS_CLASS(t) \
++	((uintptr_t)(t) > Z_L(0x3ff))
++
++#define ZEND_TYPE_IS_CE(t) \
++	((((uintptr_t)(t)) & Z_L(0x2)) != 0)
++
++#define ZEND_TYPE_IS_NAME(t) \
++	(ZEND_TYPE_IS_CLASS(t) && !ZEND_TYPE_IS_CE(t))
++
++#define ZEND_TYPE_NAME(t) \
++	((zend_string*)((t) - ((uintptr_t)(t) & Z_L(0x3))))
++
++#define ZEND_TYPE_CE(t) \
++	((zend_class_entry*)((t) - ((uintptr_t)(t) & Z_L(0x3))))
++
++#define ZEND_TYPE_CODE(t) \
++	(((uintptr_t)(t)) >> Z_L(2))
++
++#define ZEND_TYPE_ALLOW_NULL(t) \
++	((((uintptr_t)(t)) & Z_L(0x1)) != 0)
+ 
++#define ZEND_TYPE_WITHOUT_NULL(t) \
++	((t) - ((uintptr_t)(t) & Z_L(0x1)))
++
++#define ZEND_TYPE_ENCODE(code, allow_null) \
++	((zend_type)(uintptr_t)(((code) << Z_L(2)) | ((allow_null) ? Z_L(0x1) : Z_L(0x0))))
++
++#define ZEND_TYPE_ENCODE_CE(ce, allow_null) \
++	((char *)(ce) + ((allow_null) ? 3 : 2))
++
++#define ZEND_TYPE_ENCODE_CLASS(class_name, allow_null) \
++	((char *)(class_name) + ((allow_null) ? 1 : 0))
++#else
+ typedef uintptr_t zend_type;
+ 
+ #define ZEND_TYPE_IS_SET(t) \
+@@ -161,6 +206,7 @@
+ 
+ #define ZEND_TYPE_ENCODE_CLASS(class_name, allow_null) \
+ 	(((uintptr_t)(class_name)) | ((allow_null) ? Z_L(0x1) : Z_L(0x0)))
++#endif
+ 
+ #define ZEND_TYPE_ENCODE_CLASS_CONST_0(class_name) \
+ 	((zend_type) class_name)
+@@ -392,6 +438,19 @@
+ 	struct _zend_property_info *ptr[1];
+ } zend_property_info_list;
+ 
++#ifdef __FILC__
++/* Fil-C drops a pointer's capability when it becomes an integer, so tag the
++ * list pointer with pointer arithmetic instead. */
++typedef union {
++	struct _zend_property_info *ptr;
++	char *list;
++} zend_property_info_source_list;
++
++#define ZEND_PROPERTY_INFO_SOURCE_FROM_LIST(list) ((char *) (list) + 0x1)
++#define ZEND_PROPERTY_INFO_SOURCE_TO_LIST(list) \
++	((zend_property_info_list *) ((list) - ((uintptr_t) (list) & 0x1)))
++#define ZEND_PROPERTY_INFO_SOURCE_IS_LIST(list) ((uintptr_t) (list) & 0x1)
++#else
+ typedef union {
+ 	struct _zend_property_info *ptr;
+ 	uintptr_t list;
+@@ -400,6 +459,7 @@
+ #define ZEND_PROPERTY_INFO_SOURCE_FROM_LIST(list) (0x1 | (uintptr_t) (list))
+ #define ZEND_PROPERTY_INFO_SOURCE_TO_LIST(list) ((zend_property_info_list *) ((list) & ~0x1))
+ #define ZEND_PROPERTY_INFO_SOURCE_IS_LIST(list) ((list) & 0x1)
++#endif
+ 
+ struct _zend_reference {
+ 	zend_refcounted_h              gc;

@@ -1,0 +1,59 @@
+Subject: Preserve pointer capabilities for zend_type under Fil-C
+Policy-Class: P4-Audit
+Rationale: Fil-C drops pointer capabilities across integer round-trips. In PHP 7.3 zend_type packs class name strings and zend_class_entry pointers with low tag bits inside uintptr_t; represent zend_type as char * with pointer arithmetic under __FILC__ so capabilities survive.
+Upstream-Status: Fil-C-Specific
+Fil-C-Origin-Commits: fd1f26a649078e4e12cb01026cf43199b6e6d160
+Origin-Kind: filc-upstream
+Origin-Project: pizlonator/fil-c
+Origin-Commit: fd1f26a649078e4e12cb01026cf43199b6e6d160
+Origin-URL: https://github.com/pizlonator/fil-c/commit/fd1f26a649078e4e12cb01026cf43199b6e6d160
+
+--- a/Zend/zend_types.h
++++ b/Zend/zend_types.h
+@@ -119,6 +119,38 @@
+  * construction.
+  */
+ 
++#ifdef __FILC__
++/* Fil-C drops pointer capabilities across integer round-trips, so represent
++ * zend_type as char * and tag class pointers via pointer arithmetic. */
++typedef char *zend_type;
++
++#define ZEND_TYPE_IS_SET(t) \
++	((uintptr_t)(t) > Z_L(1))
++
++#define ZEND_TYPE_IS_CODE(t) \
++	(((uintptr_t)(t) > Z_L(1)) && ((uintptr_t)(t) <= Z_L(0x1ff)))
++
++#define ZEND_TYPE_IS_CLASS(t) \
++	((uintptr_t)(t) > Z_L(0x1ff))
++
++#define ZEND_TYPE_NAME(t) \
++	((zend_string*)((t) - ((uintptr_t)(t) & Z_L(0x3))))
++
++#define ZEND_TYPE_CE(t) \
++	((zend_class_entry*)((t) - ((uintptr_t)(t) & Z_L(0x3))))
++
++#define ZEND_TYPE_CODE(t) \
++	(((uintptr_t)(t)) >> Z_L(1))
++
++#define ZEND_TYPE_ALLOW_NULL(t) \
++	((((uintptr_t)(t)) & Z_L(0x1)) != 0)
++
++#define ZEND_TYPE_ENCODE(code, allow_null) \
++	((zend_type)(uintptr_t)(((code) << Z_L(1)) | ((allow_null) ? Z_L(0x1) : Z_L(0x0))))
++
++#define ZEND_TYPE_ENCODE_CLASS(class_name, allow_null) \
++	((char *)(class_name) + ((allow_null) ? 1 : 0))
++#else
+ typedef uintptr_t zend_type;
+ 
+ #define ZEND_TYPE_IS_SET(t) \
+@@ -147,6 +179,7 @@
+ 
+ #define ZEND_TYPE_ENCODE_CLASS(class_name, allow_null) \
+ 	(((uintptr_t)(class_name)) | ((allow_null) ? Z_L(0x1) : Z_L(0)))
++#endif
+ 
+ #define ZEND_TYPE_ENCODE_CLASS_CONST_0(class_name) \
+ 	((zend_type) class_name)

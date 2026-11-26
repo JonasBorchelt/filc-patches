@@ -1,0 +1,5 @@
+01-php-filc-system-allocator-and-strcase.patch
+02-php-filc-portable-asm.patch
+03-php-filc-capability-tagged-pointers.patch
+04-php-filc-opcache-private-mmap.patch
+05-php74-libxml2-icu-compat.patch

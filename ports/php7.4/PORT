@@ -1,0 +1,194 @@
+NAME="php7.4"
+VERSION="7.4.33+deb11u15"
+LICENSE="PHP-3.01"
+SUPPORT_STATUS="eol"
+EOL_DATE="2022-11-28"
+SECURITY_SOURCE="freexian-elts"
+UPSTREAM_URL="https://deb.freexian.com/extended-lts/pool/main/p/php7.4/php7.4_7.4.33.orig.tar.xz"
+UPSTREAM_SHA256="924846abf93bc613815c55dd3f5809377813ac62a9ec4eb3778675b82a27b927"
+UPSTREAM_SHA256_SOURCE="debian-elts:https://deb.freexian.com/extended-lts/dists/bullseye/InRelease pkg:php7.4 ver:7.4.33-1+deb11u15 key:ports/pgp-keys/freexian-elts-archive-key.asc fpr:AB597C4F6F3380BD4B2BEBC2A07310D369055D5A"
+UPSTREAM_PGP_KEY="ports/pgp-keys/freexian-elts-archive-key.asc"
+UPSTREAM_PGP_FPR="AB597C4F6F3380BD4B2BEBC2A07310D369055D5A"
+DEBIAN_TARBALL_URL="https://deb.freexian.com/extended-lts/pool/main/p/php7.4/php7.4_7.4.33-1+deb11u15.debian.tar.xz"
+DEBIAN_TARBALL_SHA256="ce38c3bfe543fd554c468eec10287dc07df45f7e672a7af6f5ae3fcab1333e99"
+DEBIAN_SECURITY_PATCHES="0048-Fix-81740-PDO-quote-may-return-unquoted-string.patch 0049-NEWS.patch 0050-Fix-GH-10187-Segfault-in-stripslashes-with-arm64.patch 0051-crypt-Fix-validation-of-malformed-BCrypt-hashes.patch 0052-crypt-Fix-possible-buffer-overread-in-php_crypt.patch 0053-Fix-array-overrun-when-appending-slash-to-paths.patch 0054-NEWS.patch 0055-Fix-repeated-warning-for-file-uploads-limit-exceedin.patch 0056-Introduce-max_multipart_body_parts-INI.patch 0057-NEWS.patch 0058-fix-NEWS-not-FPM-specific.patch 0059-Fix-missing-randomness-check-and-insufficient-random.patch 0060-Fix-GH-11382-add-missing-hash-header-for-bin2hex.patch 0068-add-cve.patch 0069-Fix-buffer-mismanagement-in-phar_dir_read.patch 0070-Sanitize-libxml2-globals-before-parsing.patch 0071-NEWS.patch 0072-backport-zend_test-changes-zend_test_override_libxml.patch 0075-Fix-GHSA-wpj3-hf5j-x4v4-__Host-__Secure-cookie-bypas.patch 0076-NEWS.patch 0077-Fix-bug-GHSA-q6x7-frmf-grcw-password_verify-can-erro.patch 0078-NEWS.patch 0079-Add-proc_open-escaping-for-cmd-file-execution-Backpo.patch 0080-NEWS.patch CVE-2022-4900.patch CVE-2024-5458.patch CVE-2024-8925.patch CVE-2024-8927.patch CVE-2024-9026.patch CVE-2024-8932.patch CVE-2024-11233.patch CVE-2024-11234.patch CVE-2024-11236/01-7742f79.patch CVE-2024-11236/02-2dbe142.patch GHSA-4w77-75f9-2c8w.patch CVE-2024-8929/01-2f5aa9f.patch CVE-2024-8929/02-32f905f.patch CVE-2024-8929/03-c70b97d.patch CVE-2024-8929/04-51f5539.patch CVE-2024-8929/05-eb951b3.patch http-server-8.0.patch openssl-server-8.1.patch CVE-2025-1217/01-1c157d3fa2e.patch CVE-2025-1217/02-d20b4c97a9f.patch CVE-2025-1219.patch CVE-2025-1734.patch CVE-2025-1736.patch CVE-2025-1861.patch GHSA-wg4p-4hqh-c3g9.patch CVE-2025-1220.patch CVE-2025-1735.patch CVE-2025-6491.patch 0100-Fix-bug-75708-getimagesize-with-imageinfo-fails-on-S.patch CVE-2025-14177.patch CVE-2025-14180.patch CVE-2025-14178.patch GHSA-www2-q4fc-65wf.patch CVE-2026-6722.patch CVE-2026-7261.patch CVE-2026-7262.patch CVE-2026-6735.patch CVE-2026-7259.patch CVE-2026-7568.patch CVE-2026-7258.patch 0112-Fix-leak-on-double-DatePeriod-__construct-call.patch CVE-2026-9672.patch CVE-2026-17543.patch CVE-2026-7260.patch CVE-2026-14355.patch CVE-2026-92842.patch 0118-Backport-sapi-fpm-tests-logtool.inc-from-8.2.patch CVE-2026-91768.patch CVE-2026-91769.patch CVE-2026-91767.patch CVE-2025-1218.patch CVE-2026-91766_CVE-2026-93682/01-1ede3137c9a.patch CVE-2026-91766_CVE-2026-93682/02-5af9465ca89.patch CVE-2026-91765.patch CVE-2025-14181/01-b11bd1d9390.patch CVE-2025-14181/02-3aedde06bc3.patch CVE-2026-6103.patch GHSA-ch8v-r6jh-4vvr.patch 0130-http-Fix-out-of-bounds-read-on-empty-Location-header.patch 0131-ext-standard-Fix-1-char-relative-Location-redirects-.patch CVE-2026-109618_CVE-2026-109619.patch CVE-2026-15353.patch CVE-2026-128090.patch CVE-2026-129538.patch CVE-2026-129292.patch CVE-2026-129289.patch CVE-2026-129506.patch CVE-2026-129496.patch CVE-2026-126714.patch CVE-2026-115560.patch CVE-2026-128064.patch CVE-2026-127960.patch CVE-2026-129291.patch"
+EXTRACT_DIR="php-7.4.33"
+TIER=5
+DEPS="openssl1.1 zlib bzip2 curl sqlite libxml2 pcre2 icu libedit oniguruma libsodium pkgconf"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--without-pcre-jit --with-external-pcre --enable-fpm --with-openssl --with-zlib --with-curl --with-sqlite3 --with-pdo-sqlite --enable-intl --with-libedit --enable-mbstring --with-sodium --enable-bcmath --enable-calendar --enable-exif --enable-pcntl --enable-sockets"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P4-Audit"
+POLICY_RATIONALE="EOL legacy PHP 7.4 built from Freexian Extended LTS bullseye (7.4.33-1+deb11u15, 97 ELTS security patches verified via signed InRelease -> Sources.gz) against OpenSSL 1.1.1w (openssl1.1) with 5 Fil-C/modern-lib patches: (01) USE_ZEND_ALLOC=0 default and strcase provenance fix, (02) portable C paths for inline assembly/asm-goto, (03) capability-preserving char * pointer arithmetic for zend_type and typed-property source lists, (04) MAP_PRIVATE opcache mapping, and (05) libxml2 2.12+ const xmlError/encoding.h and ICU 68+ boolean compatibility. Installed side-by-side with --program-suffix=7.4 and versioned directories."
+FILC_ORIGIN_REF="8553fcd026b9:projects/php.projeny"
+
+port_configure() {
+  local ossl_cflags ossl_libs
+  ossl_cflags="$(PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" "$PIZFIX/bin/pkg-config" --define-prefix --cflags openssl11)"
+  ossl_libs="$(PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" "$PIZFIX/bin/pkg-config" --define-prefix --libs openssl11)"
+  PATH="$PIZFIX/bin:$PATH" \
+    CPPFLAGS="-I$PIZFIX/include -I$PIZFIX/include/ncursesw" \
+    CXXFLAGS="${CXXFLAGS:-} -I$PIZFIX/include -std=c++17" \
+    LDFLAGS="-L$PIZFIX/lib" \
+    PKG_CONFIG="$PIZFIX/bin/pkg-config --define-prefix" \
+    PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" \
+    OPENSSL_CFLAGS="$ossl_cflags" \
+    OPENSSL_LIBS="$ossl_libs" \
+    EXTENSION_DIR="$PIZFIX/lib/php7.4/extensions" \
+    PHP_UNAME="Linux" \
+    PHP_BUILD_SYSTEM="Linux" \
+    PHP_BUILD_PROVIDER="Fil-C" \
+    ac_cv_phpdbg_userfaultfd_writefault=no \
+    ./configure --prefix="$PIZFIX" \
+      --with-layout=GNU \
+      --program-suffix=7.4 \
+      --libdir="$PIZFIX/lib/php7.4" \
+      --includedir="$PIZFIX/include/php7.4" \
+      --datadir="$PIZFIX/share/php7.4" \
+      --mandir="$PIZFIX/share/man" \
+      --sysconfdir="$PIZFIX/etc/php7.4" \
+      --localstatedir="$PIZFIX/var/php7.4" \
+      --with-config-file-path="$PIZFIX/etc/php7.4" \
+      --with-config-file-scan-dir="$PIZFIX/etc/php7.4/conf.d" \
+      --without-pcre-jit \
+      --with-external-pcre \
+      --enable-fpm \
+      --with-openssl \
+      --with-zlib \
+      --with-bz2="$PIZFIX" \
+      --with-curl \
+      --with-sqlite3 \
+      --with-pdo-sqlite \
+      --enable-intl \
+      --with-libedit \
+      --enable-mbstring \
+      --with-sodium \
+      --enable-bcmath \
+      --enable-calendar \
+      --enable-exif \
+      --enable-pcntl \
+      --enable-sockets
+}
+
+port_test() {
+  local php_bin fpm_bin ext_dir out ver fpm_ver
+  php_bin="$PIZFIX/bin/php7.4"
+  fpm_bin="$PIZFIX/sbin/php-fpm7.4"
+  ext_dir="$PIZFIX/lib/php7.4/extensions"
+
+  out="$("$php_bin" -n -v)"
+  ver="${out%%$'\n'*}"
+  echo "php7.4 version: $ver"
+  printf '%s\n' "$ver" | grep -q '^PHP 7\.4\.33 '
+
+  out="$("$fpm_bin" -n -v)"
+  fpm_ver="${out%%$'\n'*}"
+  echo "php-fpm7.4 version: $fpm_ver"
+  printf '%s\n' "$fpm_ver" | grep -q '^PHP 7\.4\.33 '
+
+  "$php_bin" -n \
+    -d extension_dir="$ext_dir" \
+    -d zend.assertions=1 \
+    -d assert.exception=1 \
+    -d zend_extension=opcache \
+    -d opcache.enable_cli=1 \
+    <<'EOF' | grep -Fxq 'PHP74_FILC_SMOKE_OK'
+<?php
+// 1. Typed properties + WeakReference + class type hints (zend_type + source_list capabilities)
+class Box {
+    public ?stdClass $item = null;
+    public int $count = 0;
+    public function setItem(?stdClass $o): ?stdClass {
+        $this->item = $o;
+        return $this->item;
+    }
+}
+$box = new Box();
+$o = new stdClass();
+$wr = WeakReference::create($o);
+assert($box->setItem($o) === $o);
+$ref =& $box->item;
+$ref = null;
+unset($ref, $o);
+gc_collect_cycles();
+assert($wr->get() === null);
+
+// 2. ext/dom XML C14N (libxml2 2.15)
+$xml = new DOMDocument();
+$xml->loadXML('<root xmlns="urn:test"><child a="1">ok</child></root>');
+assert(strpos($xml->C14N(), '<child a="1">ok</child>') !== false);
+
+// 3. Overflow arithmetic, strcase provenance, opcache
+$i = PHP_INT_MAX;
+$i++;
+assert(is_float($i));
+assert(strtolower("Fil-C PHP 7.4") === "fil-c php 7.4");
+assert(strtoupper("Fil-C php 7.4") === "FIL-C PHP 7.4");
+assert(opcache_get_status(false)["opcache_enabled"] === true);
+
+// 4. Core extensions: OpenSSL 1.1.1, zlib, bz2, SQLite3/PDO, PCRE2, JSON, curl, intl, mbstring, sodium, bcmath
+assert(strpos(OPENSSL_VERSION_TEXT, "OpenSSL 1.1.1") === 0);
+assert(hash("sha256", "hello\n") === "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03");
+assert(openssl_digest("hello\n", "sha256") === "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03");
+assert(gzuncompress(gzcompress("filc-zlib-php74")) === "filc-zlib-php74");
+assert(bzdecompress(bzcompress("filc-bz2-php74")) === "filc-bz2-php74");
+assert(preg_match('/^([a-z]+)-(\d+)$/', 'filc-74', $matches) === 1 && $matches[2] === '74');
+assert(json_decode(json_encode(["ok" => [1, 2, 3]]), true)["ok"] === [1, 2, 3]);
+assert(is_array(curl_version()) && !empty(curl_version()["version"]));
+assert(mb_strlen("hällo", "UTF-8") === 5);
+assert(mb_ereg_replace("([0-9]+)", "[\\1]", "v74") === "v[74]");
+assert((new Collator("en_US"))->compare("a", "b") < 0);
+assert(strlen(sodium_crypto_generichash("filc-sodium")) === SODIUM_CRYPTO_GENERICHASH_BYTES);
+assert(bcadd("12345678901234567890", "1", 0) === "12345678901234567891");
+
+$db = new SQLite3(":memory:");
+$db->exec("CREATE TABLE t (v INT); INSERT INTO t VALUES (42);");
+assert($db->querySingle("SELECT v FROM t") === 42);
+$db->close();
+
+$pdo = new PDO("sqlite::memory:");
+$pdo->exec("CREATE TABLE p (s TEXT); INSERT INTO p VALUES ('ok');");
+assert($pdo->query("SELECT s FROM p")->fetchColumn() === "ok");
+
+echo "PHP74_FILC_SMOKE_OK\n";
+EOF
+}
+
+port_package_smoke() {
+  local php_bin fpm_bin ext_dir out ver fpm_ver
+  php_bin="$PKG_PREFIX/bin/php7.4"
+  fpm_bin="$PKG_PREFIX/sbin/php-fpm7.4"
+  ext_dir="$PKG_PREFIX/lib/php7.4/extensions"
+
+  out="$("$php_bin" -n -v)"
+  ver="${out%%$'\n'*}"
+  printf '%s\n' "$ver" | grep -q '^PHP 7\.4\.33 '
+
+  out="$("$fpm_bin" -n -v)"
+  fpm_ver="${out%%$'\n'*}"
+  printf '%s\n' "$fpm_ver" | grep -q '^PHP 7\.4\.33 '
+
+  "$php_bin" -n \
+    -d extension_dir="$ext_dir" \
+    -d zend.assertions=1 \
+    -d assert.exception=1 \
+    -d zend_extension=opcache \
+    -d opcache.enable_cli=1 \
+    <<'EOF' | grep -Fxq 'PHP74_PKG_SMOKE_OK'
+<?php
+$prefix = realpath(getenv("PKG_PREFIX"));
+assert(is_string($prefix) && strpos(realpath(PHP_BINARY), $prefix . "/") === 0);
+assert(strpos(OPENSSL_VERSION_TEXT, "OpenSSL 1.1.1") === 0);
+assert(opcache_get_status(false)["opcache_enabled"] === true);
+assert(openssl_digest("hello\n", "sha256") === "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03");
+assert(gzuncompress(gzcompress("filc-zlib-php74")) === "filc-zlib-php74");
+assert(bzdecompress(bzcompress("filc-bz2-php74")) === "filc-bz2-php74");
+assert((new Collator("en_US"))->compare("a", "b") < 0);
+$xml = new DOMDocument();
+$xml->loadXML('<root><child>ok</child></root>');
+assert(strpos($xml->C14N(), '<child>ok</child>') !== false);
+echo "PHP74_PKG_SMOKE_OK\n";
+EOF
+}

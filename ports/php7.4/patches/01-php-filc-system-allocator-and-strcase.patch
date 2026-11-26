@@ -1,0 +1,57 @@
+Subject: Default to system allocator and fix strcase pointer provenance under Fil-C
+Policy-Class: P4-Audit
+Rationale: Zend's 2 MiB chunk allocator hides intra-chunk overflows and UAF between PHP values; default USE_ZEND_ALLOC=0 under __FILC__ so every value gets its own capability, guard tracked_free_all() against integer-to-pointer frees (reclaimed by Fil-C GC), and compute res offsets from res instead of source in zend_str_tolower_dup_ex()/zend_string_tolower_ex().
+Upstream-Status: Fil-C-Specific (strcase offset fix is upstreamable)
+Fil-C-Origin-Commits: 18e0199cef6c30fc815442c0dd3f9d97fae3702a
+Origin-Kind: filc-upstream
+Origin-Project: pizlonator/fil-c
+Origin-Commit: 18e0199cef6c30fc815442c0dd3f9d97fae3702a
+Origin-URL: https://github.com/pizlonator/fil-c/commit/18e0199cef6c30fc815442c0dd3f9d97fae3702a
+
+--- a/Zend/zend_alloc.c
++++ b/Zend/zend_alloc.c
+@@ -2756,6 +2756,10 @@
+ }
+ 
+ static void tracked_free_all() {
++#ifdef __FILC__
++	/* Keys are stripped addresses; Fil-C GC reclaims leftover allocations. */
++	return;
++#endif
+ 	HashTable *tracked_allocs = AG(mm_heap)->tracked_allocs;
+ 	zend_ulong h;
+ 	ZEND_HASH_FOREACH_NUM_KEY(tracked_allocs, h) {
+@@ -2771,7 +2775,13 @@
+ 
+ #if ZEND_MM_CUSTOM
+ 	tmp = getenv("USE_ZEND_ALLOC");
++#ifdef __FILC__
++	/* Default to system malloc so every PHP value gets its own capability.
++	 * Set USE_ZEND_ALLOC=1 to opt into Zend's chunk allocator. */
++	if (!tmp || !zend_atoi(tmp, 0)) {
++#else
+ 	if (tmp && !zend_atoi(tmp, 0)) {
++#endif
+ 		zend_bool tracked = (tmp = getenv("USE_TRACKED_ALLOC")) && zend_atoi(tmp, 0);
+ 		zend_mm_heap *mm_heap = alloc_globals->mm_heap = malloc(sizeof(zend_mm_heap));
+ 		memset(mm_heap, 0, sizeof(zend_mm_heap));
+--- a/Zend/zend_operators.c
++++ b/Zend/zend_operators.c
+@@ -2675,7 +2675,7 @@
+ 			if (p != (const unsigned char*)source) {
+ 				memcpy(res, source, p - (const unsigned char*)source);
+ 			}
+-			r = (unsigned char*)p + (res - source);
++			r = (unsigned char*)res + (p - (const unsigned char*)source);
+ 			while (p < end) {
+ 				*r = zend_tolower_ascii(*p);
+ 				p++;
+@@ -2703,7 +2703,7 @@
+ 			if (p != (unsigned char*)ZSTR_VAL(str)) {
+ 				memcpy(ZSTR_VAL(res), ZSTR_VAL(str), p - (unsigned char*)ZSTR_VAL(str));
+ 			}
+-			r = p + (ZSTR_VAL(res) - ZSTR_VAL(str));
++			r = (unsigned char*)ZSTR_VAL(res) + (p - (unsigned char*)ZSTR_VAL(str));
+ 			while (p < end) {
+ 				*r = zend_tolower_ascii(*p);
+ 				p++;

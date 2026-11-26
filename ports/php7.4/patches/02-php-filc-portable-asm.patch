@@ -1,0 +1,95 @@
+Subject: Use portable C paths instead of inline assembly under Fil-C
+Policy-Class: P2-Package
+Rationale: Take Zend's portable C paths for zend_string_equal_val, zend_safe_address, signed multiply, and overflow arithmetic (avoiding asm goto callbr), guard x87 inline asm to __i386__, and spell xgetbv directly instead of raw .byte opcodes under __FILC__.
+Upstream-Status: Upstream-Candidate
+Fil-C-Origin-Commits: fd1f26a649078e4e12cb01026cf43199b6e6d160 95f267d64fd1615bae8c6c25425d9b7857bee326
+Origin-Kind: filc-upstream
+Origin-Project: pizlonator/fil-c
+Origin-Commit: fd1f26a649078e4e12cb01026cf43199b6e6d160
+Origin-URL: https://github.com/pizlonator/fil-c/commit/fd1f26a649078e4e12cb01026cf43199b6e6d160
+
+--- a/Zend/zend_cpuinfo.c
++++ b/Zend/zend_cpuinfo.c
+@@ -81,7 +81,7 @@
+ 	// directly because older assemblers do not include support for xgetbv and
+ 	// there is no easy way to conditionally compile based on the assembler used.
+ 	unsigned eax, edx;
+-	__asm__(".byte 0x0f, 0x01, 0xd0" : "=a"(eax), "=d"(edx) : "c"(0));
++	__asm__("xgetbv" : "=a"(eax), "=d"(edx) : "c"(0));
+ 	return eax;
+ # elif defined(ZEND_WIN32) && defined(_XCR_XFEATURE_ENABLED_MASK)
+ 	return _xgetbv(_XCR_XFEATURE_ENABLED_MASK);
+--- a/Zend/zend_float.h
++++ b/Zend/zend_float.h
+@@ -312,7 +312,7 @@
+                 return _xpfpa_result; \
+             } while (0)
+ 
+-#elif defined(HAVE_FPU_INLINE_ASM_X86) && !defined(__x86_64__)
++#elif defined(HAVE_FPU_INLINE_ASM_X86) && defined(__i386__)
+ 
+ /*
+   Custom x86 inline assembler implementation.
+--- a/Zend/zend_multiply.h
++++ b/Zend/zend_multiply.h
+@@ -42,7 +42,7 @@
+ 	else (lval) = __tmpvar;											\
+ } while (0)
+ 
+-#elif (defined(__i386__) || defined(__x86_64__)) && defined(__GNUC__)
++#elif (defined(__i386__) || defined(__x86_64__)) && defined(__GNUC__) && !defined(__FILC__)
+ 
+ #define ZEND_SIGNED_MULTIPLY_LONG(a, b, lval, dval, usedval) do {	\
+ 	zend_long __tmpvar; 													\
+@@ -180,7 +180,7 @@
+ 	return res;
+ }
+ 
+-#elif defined(__GNUC__) && defined(__x86_64__)
++#elif defined(__GNUC__) && defined(__x86_64__) && !defined(__FILC__)
+ 
+ static zend_always_inline size_t zend_safe_address(size_t nmemb, size_t size, size_t offset, int *overflow)
+ {
+--- a/Zend/zend_operators.h
++++ b/Zend/zend_operators.h
+@@ -500,7 +500,8 @@
+ #define ZVAL_OFFSETOF_TYPE	\
+ 	(offsetof(zval, u1.type_info) - offsetof(zval, value))
+ 
+-#if defined(HAVE_ASM_GOTO) && !__has_feature(memory_sanitizer)
++/* Fil-C: use portable overflow builtins instead of asm goto callbr. */
++#if defined(HAVE_ASM_GOTO) && !__has_feature(memory_sanitizer) && !defined(__FILC__)
+ # define ZEND_USE_ASM_ARITHMETIC 1
+ #else
+ # define ZEND_USE_ASM_ARITHMETIC 0
+--- a/Zend/zend_string.c
++++ b/Zend/zend_string.c
+@@ -324,7 +324,7 @@
+ 	}
+ }
+ 
+-#if defined(__GNUC__) && defined(__i386__)
++#if defined(__GNUC__) && defined(__i386__) && !defined(__FILC__)
+ ZEND_API zend_bool ZEND_FASTCALL zend_string_equal_val(zend_string *s1, zend_string *s2)
+ {
+ 	char *ptr = ZSTR_VAL(s1);
+@@ -392,7 +392,7 @@
+ }
+ #endif
+ 
+-#elif defined(__GNUC__) && defined(__x86_64__) && !defined(__ILP32__)
++#elif defined(__GNUC__) && defined(__x86_64__) && !defined(__ILP32__) && !defined(__FILC__)
+ ZEND_API zend_bool ZEND_FASTCALL zend_string_equal_val(zend_string *s1, zend_string *s2)
+ {
+ 	char *ptr = ZSTR_VAL(s1);
+--- a/Zend/zend_string.h
++++ b/Zend/zend_string.h
+@@ -301,7 +301,7 @@
+ 	}
+ }
+ 
+-#if defined(__GNUC__) && (defined(__i386__) || (defined(__x86_64__) && !defined(__ILP32__)))
++#if defined(__GNUC__) && (defined(__i386__) || (defined(__x86_64__) && !defined(__ILP32__))) && !defined(__FILC__)
+ BEGIN_EXTERN_C()
+ ZEND_API zend_bool ZEND_FASTCALL zend_string_equal_val(zend_string *s1, zend_string *s2);
+ END_EXTERN_C()

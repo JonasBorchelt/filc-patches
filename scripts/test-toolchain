@@ -419,10 +419,10 @@ FAILURES=0
 
 run_and_capture() {
   local name="$1"
-  local bin="$2"
+  shift
   local rc=0
   set +e
-  "$bin" >"$TEST_DIR/${name}.stdout" 2>"$TEST_DIR/${name}.stderr"
+  "$@" >"$TEST_DIR/${name}.stdout" 2>"$TEST_DIR/${name}.stderr"
   rc=$?
   set -e
   echo "$rc" >"$TEST_DIR/${name}.rc"
@@ -1281,6 +1281,180 @@ else
   FAILURES=$((FAILURES + 1))
 fi
 
+echo "=== Running (l) RTLD_GLOBAL Duplicate-Export FunctionObject Isolation ==="
+cat > "$TEST_DIR/rtld_global_a.c" <<'EOF'
+#include <stdarg.h>
+
+const char *filc_plugin_id(void) {
+    return "plugin_a";
+}
+
+int filc_plugin_tag(int x) {
+    return x + 100;
+}
+
+int filc_plugin_vsum(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    int sum = 100;
+    for (int i = 0; i < count; ++i)
+        sum += va_arg(ap, int);
+    va_end(ap);
+    return sum;
+}
+EOF
+
+cat > "$TEST_DIR/rtld_global_b.c" <<'EOF'
+#include <stdarg.h>
+
+const char *filc_plugin_id(void) {
+    return "plugin_b";
+}
+
+int filc_plugin_tag(int x) {
+    return x + 200;
+}
+
+int filc_plugin_vsum(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    int sum = 200;
+    for (int i = 0; i < count; ++i)
+        sum += va_arg(ap, int);
+    va_end(ap);
+    return sum;
+}
+EOF
+
+cat > "$TEST_DIR/rtld_global_main.c" <<'EOF'
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <stdio.h>
+#include <string.h>
+
+typedef const char *(*id_fn_t)(void);
+typedef int (*tag_fn_t)(int);
+typedef int (*vsum_fn_t)(int, ...);
+
+int main(int argc, char **argv) {
+    if (argc != 3) {
+        fprintf(stderr, "usage: %s liba.so libb.so\n", argv[0]);
+        return 99;
+    }
+
+    void *ha = dlopen(argv[1], RTLD_LAZY | RTLD_GLOBAL);
+    if (!ha) {
+        fprintf(stderr, "dlopen(%s) failed: %s\n", argv[1], dlerror());
+        return 1;
+    }
+    void *hb = dlopen(argv[2], RTLD_LAZY | RTLD_GLOBAL);
+    if (!hb) {
+        fprintf(stderr, "dlopen(%s) failed: %s\n", argv[2], dlerror());
+        dlclose(ha);
+        return 2;
+    }
+
+    id_fn_t id_a = (id_fn_t)dlsym(ha, "filc_plugin_id");
+    id_fn_t id_b = (id_fn_t)dlsym(hb, "filc_plugin_id");
+    tag_fn_t tag_a = (tag_fn_t)dlsym(ha, "filc_plugin_tag");
+    tag_fn_t tag_b = (tag_fn_t)dlsym(hb, "filc_plugin_tag");
+    vsum_fn_t vsum_a = (vsum_fn_t)dlsym(ha, "filc_plugin_vsum");
+    vsum_fn_t vsum_b = (vsum_fn_t)dlsym(hb, "filc_plugin_vsum");
+    id_fn_t id_def = (id_fn_t)dlsym(RTLD_DEFAULT, "filc_plugin_id");
+
+    if (!id_a || !id_b || !tag_a || !tag_b || !vsum_a || !vsum_b || !id_def) {
+        fprintf(stderr, "dlsym failed: %s\n", dlerror());
+        return 3;
+    }
+
+    const char *sa = id_a();
+    const char *sb = id_b();
+    const char *sd = id_def();
+    int ta = tag_a(7);
+    int tb = tag_b(7);
+    int va = vsum_a(2, 10, 20);
+    int vb = vsum_b(2, 10, 20);
+
+    if (strcmp(sa, "plugin_a") != 0 || strcmp(sb, "plugin_b") != 0 || strcmp(sd, "plugin_a") != 0) {
+        fprintf(stderr, "id mismatch: a='%s' b='%s' default='%s'\n", sa, sb, sd);
+        return 4;
+    }
+    if (ta != 107 || tb != 207) {
+        fprintf(stderr, "tag mismatch: a=%d b=%d\n", ta, tb);
+        return 5;
+    }
+    if (va != 130 || vb != 230) {
+        fprintf(stderr, "vsum mismatch: a=%d b=%d\n", va, vb);
+        return 6;
+    }
+    if (id_a == id_b || tag_a == tag_b || vsum_a == vsum_b) {
+        fprintf(stderr, "function pointers unexpectedly identical across DSOs\n");
+        return 7;
+    }
+
+    printf("RTLD_GLOBAL_OK: a=%s(%d,%d) b=%s(%d,%d) default=%s\n", sa, ta, va, sb, tb, vb, sd);
+    return 0;
+}
+EOF
+
+RTLD_GLOBAL_OK=1
+RTLD_GLOBAL_ELF_OK=1
+"$CLANG" -O2 -Wall -Wextra -Werror -fPIC -shared "$TEST_DIR/rtld_global_a.c" -o "$TEST_DIR/librtld_global_a.so"
+"$CLANG" -O2 -Wall -Wextra -Werror -fPIC -shared "$TEST_DIR/rtld_global_b.c" -o "$TEST_DIR/librtld_global_b.so"
+"$CLANG" -O2 -Wall -Wextra -Werror "$TEST_DIR/rtld_global_main.c" -o "$TEST_DIR/rtld_global_main"
+
+READELF_BIN="$(command -v readelf || command -v llvm-readelf || true)"
+if [[ -z "$READELF_BIN" && -x "$BUILD_DIR/bin/llvm-readelf" ]]; then
+  READELF_BIN="$BUILD_DIR/bin/llvm-readelf"
+fi
+for so in "$TEST_DIR/librtld_global_a.so" "$TEST_DIR/librtld_global_b.so"; do
+  if "$LLVM_NM" -D --defined-only "$so" | grep -q 'pizlonatedFIP'; then
+    echo "error: unexpected exported pizlonatedFIP symbol in $so" >&2
+    "$LLVM_NM" -D --defined-only "$so" | grep 'pizlonatedFIP' >&2 || true
+    RTLD_GLOBAL_ELF_OK=0
+  fi
+  for sym in pizlonated_filc_plugin_id pizlonated_filc_plugin_tag pizlonated_filc_plugin_vsum; do
+    if ! "$LLVM_NM" -D --defined-only "$so" | grep -Eq " [A-Za-z] ${sym}$"; then
+      echo "error: expected exported getter ${sym} in $so" >&2
+      RTLD_GLOBAL_ELF_OK=0
+    fi
+  done
+  for fn in filc_plugin_id filc_plugin_tag; do
+    if ! "$LLVM_NM" -D --defined-only "$so" | grep -Eq " [A-Za-z] pizlonatedFI[0-9]+_${fn}$"; then
+      echo "error: expected exported fast-call alias pizlonatedFI*_${fn} in $so" >&2
+      RTLD_GLOBAL_ELF_OK=0
+    fi
+  done
+  if [[ -n "$READELF_BIN" ]]; then
+    if "$READELF_BIN" -rW "$so" | grep -q 'pizlonatedFIP'; then
+      echo "error: unexpected preemptible pizlonatedFIP dynamic relocation in $so" >&2
+      "$READELF_BIN" -rW "$so" | grep 'pizlonatedFIP' >&2 || true
+      RTLD_GLOBAL_ELF_OK=0
+    fi
+  else
+    echo "error: readelf / llvm-readelf not found for relocation verification" >&2
+    RTLD_GLOBAL_ELF_OK=0
+  fi
+done
+
+run_and_capture rtld_global_main "$TEST_DIR/rtld_global_main" "$TEST_DIR/librtld_global_a.so" "$TEST_DIR/librtld_global_b.so"
+RC_RTLD_GLOBAL="$(cat "$TEST_DIR/rtld_global_main.rc")"
+if [[ "$RC_RTLD_GLOBAL" -ne 0 ]] \
+  || [[ "$RTLD_GLOBAL_ELF_OK" -ne 1 ]] \
+  || ! grep -Fxq "RTLD_GLOBAL_OK: a=plugin_a(107,130) b=plugin_b(207,230) default=plugin_a" "$TEST_DIR/rtld_global_main.stdout"; then
+  echo "error: rtld_global_main failed (rc=$RC_RTLD_GLOBAL elf_ok=$RTLD_GLOBAL_ELF_OK)" >&2
+  cat "$TEST_DIR/rtld_global_main.stdout" >&2
+  cat "$TEST_DIR/rtld_global_main.stderr" >&2
+  RTLD_GLOBAL_OK=0
+fi
+
+if [[ "$RTLD_GLOBAL_OK" -eq 1 ]]; then
+  STATUS_RTLD_GLOBAL="PASS"
+else
+  STATUS_RTLD_GLOBAL="FAIL"
+  FAILURES=$((FAILURES + 1))
+fi
+
 OVERALL_STATUS="PASS"
 if (( FAILURES > 0 )); then
   OVERALL_STATUS="FAIL"
@@ -1401,6 +1575,17 @@ ARCH="$(uname -m)"
   echo ""
   echo "--- TEST (k) LLVM 23 PTRTOADDR & SPRINTF(\"%s\") -O2 [$STATUS_PTRTOADDR] ---"
   echo "SPRINTF_EXIT_CODE: $RC_PTRTOADDR_SPRINTF  IR_EXIT_CODE: $RC_PTRTOADDR_IR"
+  echo ""
+  echo "--- TEST (l) RTLD_GLOBAL DUPLICATE-EXPORT ISOLATION [$STATUS_RTLD_GLOBAL] ---"
+  echo "EXIT_CODE: $RC_RTLD_GLOBAL  ELF_OK: $RTLD_GLOBAL_ELF_OK"
+  if [[ -s "$TEST_DIR/rtld_global_main.stdout" ]]; then
+    echo "STDOUT:"
+    sed 's/^/  | /' "$TEST_DIR/rtld_global_main.stdout"
+  fi
+  if [[ -s "$TEST_DIR/rtld_global_main.stderr" ]]; then
+    echo "STDERR:"
+    sed 's/^/  | /' "$TEST_DIR/rtld_global_main.stderr"
+  fi
   echo "================================================================================"
 } > "$REPORT_FILE"
 

@@ -1584,8 +1584,14 @@ ARCH="$(uname -m)"
     echo "STDOUT:"
     sed 's/^/  | /' "$TEST_DIR/trap_oob.stdout"
   fi
-  echo "STDERR:"
-  sed 's/^/  | /' "$TEST_DIR/trap_oob.stderr"
+  if [[ "$STATUS_OOB" == "PASS" ]]; then
+    echo "expected memory-safety trap, test passes on panic"
+    echo "STDERR:"
+    sed 's/^/  | EXPECTED TRAP (test b1): /' "$TEST_DIR/trap_oob.stderr"
+  else
+    echo "STDERR:"
+    sed 's/^/  | /' "$TEST_DIR/trap_oob.stderr"
+  fi
   echo ""
   echo "--- TEST (b2) MEMORY-SAFETY TRAP: USE-AFTER-FREE [$STATUS_UAF] ---"
   echo "EXIT_CODE: $RC_UAF"
@@ -1593,8 +1599,14 @@ ARCH="$(uname -m)"
     echo "STDOUT:"
     sed 's/^/  | /' "$TEST_DIR/trap_uaf.stdout"
   fi
-  echo "STDERR:"
-  sed 's/^/  | /' "$TEST_DIR/trap_uaf.stderr"
+  if [[ "$STATUS_UAF" == "PASS" ]]; then
+    echo "expected memory-safety trap, test passes on panic"
+    echo "STDERR:"
+    sed 's/^/  | EXPECTED TRAP (test b2): /' "$TEST_DIR/trap_uaf.stderr"
+  else
+    echo "STDERR:"
+    sed 's/^/  | /' "$TEST_DIR/trap_uaf.stderr"
+  fi
   echo ""
   echo "--- TEST (c) C++ WITH LIBC++ [$STATUS_CXX] ---"
   echo "EXIT_CODE: $RC_CXX"
@@ -1659,8 +1671,14 @@ ARCH="$(uname -m)"
   echo "--- TEST (m) PANIC WITH CLOSED STDERR (FD 2) [$STATUS_CLOSED_STDERR] ---"
   echo "DEFAULT_RC: $RC_CLOSED_STDERR  EXIT_ON_PANIC_RC: $RC_CLOSED_STDERR_EXIT  LOG_FILE_RC: $RC_CLOSED_STDERR_FILE"
   if [[ -n "$CLOSED_LOG_FILE" && -s "$CLOSED_LOG_FILE" ]]; then
-    echo "LOG_FILE:"
-    sed 's/^/  | /' "$CLOSED_LOG_FILE"
+    if [[ "$STATUS_CLOSED_STDERR" == "PASS" ]]; then
+      echo "expected memory-safety trap, test passes on panic"
+      echo "LOG_FILE:"
+      sed 's/^/  | EXPECTED TRAP (test m): /' "$CLOSED_LOG_FILE"
+    else
+      echo "LOG_FILE:"
+      sed 's/^/  | /' "$CLOSED_LOG_FILE"
+    fi
   fi
   echo "================================================================================"
 } > "$REPORT_FILE"

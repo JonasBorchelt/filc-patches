@@ -20,6 +20,98 @@ def assert(cond, msg)
   raise "ASSERTION FAILED: #{msg}" unless cond
 end
 
+def capture3_with_timeout(timeout_sec, env, *cmd)
+  out_buf = +""
+  err_buf = +""
+  status = nil
+  Open3.popen3(env, *cmd, pgroup: true) do |stdin, stdout, stderr, wait_thr|
+    stdin.close
+    out_thr = Thread.new { stdout.read }
+    err_thr = Thread.new { stderr.read }
+    unless wait_thr.join(timeout_sec)
+      begin
+        Process.kill("KILL", -wait_thr.pid)
+      rescue Errno::ESRCH
+        nil
+      end
+      wait_thr.join(2)
+      out_buf = out_thr.join(1) ? out_thr.value.to_s : ""
+      err_buf = err_thr.join(1) ? err_thr.value.to_s : ""
+      raise "command timed out after #{timeout_sec}s: #{cmd.join(' ')}\nSTDOUT:\n#{out_buf}\nSTDERR:\n#{err_buf}"
+    end
+    status = wait_thr.value
+    out_buf = out_thr.value.to_s
+    err_buf = err_thr.value.to_s
+  end
+  [out_buf, err_buf, status]
+end
+
+def with_mock_http_server(handler)
+  srv = TCPServer.new("127.0.0.1", 0)
+  port = srv.addr[1]
+  server_error = nil
+  err_mu = Mutex.new
+  thr = Thread.new do
+    loop do
+      sock = begin
+        srv.accept
+      rescue IOError, Errno::EBADF
+        break
+      end
+      begin
+        req_head = +""
+        while (line = sock.gets)
+          req_head << line
+          break if line == "\r\n"
+        end
+        first = req_head.lines.first.to_s.strip
+        next if first.empty?
+
+        method, path, = first.split(" ", 3)
+        cl = req_head[/^Content-Length:\s*(\d+)/i, 1].to_i
+        body = cl > 0 ? (sock.read(cl) || "") : ""
+        handler.call(sock, method.to_s, path.to_s, req_head, body)
+      rescue StandardError => e
+        err_mu.synchronize { server_error ||= e }
+        begin
+          srv.close unless srv.closed?
+        rescue IOError
+          nil
+        end
+        break
+      ensure
+        begin
+          sock.close unless sock.closed?
+        rescue IOError
+          nil
+        end
+      end
+    end
+  end
+  thr.report_on_exception = false
+  result = nil
+  begin
+    result = yield port
+  ensure
+    begin
+      srv.close unless srv.closed?
+    rescue IOError
+      nil
+    end
+    unless thr.join(5)
+      thr.kill
+      thr.join(2)
+      raise "mock HTTP server thread did not exit within 5s"
+    end
+  end
+  err = err_mu.synchronize { server_error }
+  if err
+    raise "mock HTTP server thread failed (#{err.class}): #{err.message}\n#{Array(err.backtrace).first(5).join("\n")}"
+  end
+
+  result
+end
+
 def ip4(*octets)
   octets.map(&:to_s).join(".")
 end
@@ -341,42 +433,21 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
   File.write(File.join(ch_dir, "SHA256SUMS.minisig"), "untrusted comment: test\nAA==\ntrusted comment: t\nAA==\n")
 
   received = []
-  srv = TCPServer.new("127.0.0.1", 0)
-  port = srv.addr[1]
-  server_thr = Thread.new do
-    loop do
-      sock = begin
-        srv.accept
-      rescue IOError
-        break
-      end
-      req_head = +""
-      while (line = sock.gets)
-        req_head << line
-        break if line == "\r\n"
-      end
-      first = req_head.lines.first.to_s.strip
-      method, path, = first.split(" ", 3)
-      cl = req_head[/^Content-Length:\s*(\d+)/i, 1].to_i
-      auth = req_head[/^Authorization:\s*(.+)\r?$/i, 1].to_s.strip
-      body = cl > 0 ? sock.read(cl) : ""
-      received << [method, path, auth, body.bytesize]
-
-      if method == "HEAD"
-        sock.write("HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
-      elsif method == "PUT"
-        resp = JSON.generate("ok" => true, "created" => true)
-        sock.write("HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: #{resp.bytesize}\r\nConnection: close\r\n\r\n#{resp}")
-      elsif method == "POST"
-        resp = JSON.generate("ok" => true, "packages" => 1)
-        sock.write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: #{resp.bytesize}\r\nConnection: close\r\n\r\n#{resp}")
-      end
-      sock.close
+  with_mock_http_server(lambda do |sock, method, path, req_head, body|
+    auth = req_head[/^Authorization:\s*(.+)\r?$/i, 1].to_s.strip
+    received << [method, path, auth, body.bytesize]
+    if method == "HEAD"
+      sock.write("HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+    elsif method == "PUT"
+      resp = JSON.generate("ok" => true, "created" => true)
+      sock.write("HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: #{resp.bytesize}\r\nConnection: close\r\n\r\n#{resp}")
+    elsif method == "POST"
+      resp = JSON.generate("ok" => true, "packages" => 1)
+      sock.write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: #{resp.bytesize}\r\nConnection: close\r\n\r\n#{resp}")
     end
-  end
-
-  begin
-    uo2, ue2, ust2 = Open3.capture3(
+  end) do |port|
+    uo2, ue2, ust2 = capture3_with_timeout(
+      30,
       BASE_ENV.merge("FILC_PORTS_UPLOAD_TOKEN" => "ci-upload-secret"),
       "ruby", UPLOAD_SCRIPT,
       "--channel-dir", ch_dir,
@@ -393,9 +464,6 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
            "uploads must run in src -> recipes -> bin order: #{puts_paths.inspect}")
     assert(received.last[0] == "POST" && received.last[1].end_with?("/commit-index"), "must end with commit-index")
     assert(received.all? { |_, _, a, _| a == "Bearer ci-upload-secret" }, "every upload request must carry Bearer token")
-  ensure
-    srv.close
-    server_thr.join(2)
   end
 
   # 5. Repository minisign public key format & upload-ports missing-pubkey guard
@@ -799,44 +867,22 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
   File.write(File.join(ov_ch_dir, "SHA256SUMS.minisig"), "untrusted comment: test\nAA==\ntrusted comment: t\nAA==\n")
 
   commit_called = false
-  fail_srv = TCPServer.new("127.0.0.1", 0)
-  fail_port = fail_srv.addr[1]
-  fail_thr = Thread.new do
-    loop do
-      sock = begin
-        fail_srv.accept
-      rescue IOError
-        break
-      end
-      Thread.new(sock) do |s|
-        req_head = +""
-        while (line = s.gets)
-          req_head << line
-          break if line == "\r\n"
-        end
-        first = req_head.lines.first.to_s.strip
-        method, path, = first.split(" ", 3)
-        cl = req_head[/^Content-Length:\s*(\d+)/i, 1].to_i
-        s.read(cl) if cl > 0
-        if method == "HEAD"
-          s.write("HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
-        elsif method == "PUT" && path.include?("/bin/rsync-")
-          s.write("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 4\r\nConnection: close\r\n\r\nfail")
-        elsif method == "PUT"
-          resp = JSON.generate("ok" => true)
-          s.write("HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: #{resp.bytesize}\r\nConnection: close\r\n\r\n#{resp}")
-        elsif method == "POST"
-          commit_called = true
-          resp = JSON.generate("ok" => true, "packages" => 2)
-          s.write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: #{resp.bytesize}\r\nConnection: close\r\n\r\n#{resp}")
-        end
-        s.close
-      end
+  with_mock_http_server(lambda do |s, method, path, _req_head, _body|
+    if method == "HEAD"
+      s.write("HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+    elsif method == "PUT" && path.include?("/bin/rsync-")
+      s.write("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 4\r\nConnection: close\r\n\r\nfail")
+    elsif method == "PUT"
+      resp = JSON.generate("ok" => true)
+      s.write("HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: #{resp.bytesize}\r\nConnection: close\r\n\r\n#{resp}")
+    elsif method == "POST"
+      commit_called = true
+      resp = JSON.generate("ok" => true, "packages" => 2)
+      s.write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: #{resp.bytesize}\r\nConnection: close\r\n\r\n#{resp}")
     end
-  end
-
-  begin
-    _fuo, _fue, fust = Open3.capture3(
+  end) do |fail_port|
+    _fuo, _fue, fust = capture3_with_timeout(
+      30,
       BASE_ENV.merge("FILC_PORTS_UPLOAD_TOKEN" => "ci-upload-secret"),
       "ruby", UPLOAD_SCRIPT,
       "--channel-dir", ov_ch_dir,
@@ -848,9 +894,6 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
     )
     assert(!fust.success?, "upload-ports must fail when one package PUT fails")
     assert(!commit_called, "commit-index MUST NOT be called when any package upload failed")
-  ensure
-    fail_srv.close
-    fail_thr.join(2)
   end
   # 9. Verify explicit --xz-threads 1 produces deterministic .tar.xz output
   out_t1a = File.join(td, "out-t1a")
@@ -1204,49 +1247,28 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
     "/api/ports-artifacts/0.1.4/x86_64-linux/#{bin_art['path']}" => old_bin_sha
   }
   repl_puts = []
-  repl_srv = TCPServer.new("127.0.0.1", 0)
-  repl_port = repl_srv.addr[1]
-  repl_thr = Thread.new do
-    loop do
-      sock = begin
-        repl_srv.accept
-      rescue IOError
-        break
+  with_mock_http_server(lambda do |sock, method, path, req_head, body|
+    x_sha = req_head[/^X-Content-SHA256:\s*([0-9a-f]{64})/i, 1]
+    if method == "HEAD"
+      if stored_hashes.key?(path)
+        sock.write("HTTP/1.1 200 OK\r\nX-Content-SHA256: #{stored_hashes[path]}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+      else
+        sock.write("HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
       end
-      req_head = +""
-      while (line = sock.gets)
-        req_head << line
-        break if line == "\r\n"
-      end
-      first = req_head.lines.first.to_s.strip
-      method, path, = first.split(" ", 3)
-      cl = req_head[/^Content-Length:\s*(\d+)/i, 1].to_i
-      x_sha = req_head[/^X-Content-SHA256:\s*([0-9a-f]{64})/i, 1]
-      body = cl > 0 ? sock.read(cl) : ""
-
-      if method == "HEAD"
-        if stored_hashes.key?(path)
-          sock.write("HTTP/1.1 200 OK\r\nX-Content-SHA256: #{stored_hashes[path]}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-        else
-          sock.write("HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
-        end
-      elsif method == "PUT"
-        existed = stored_hashes.key?(path)
-        stored_hashes[path] = Digest::SHA256.hexdigest(body)
-        repl_puts << [path, x_sha, existed]
-        status_line = existed ? "HTTP/1.1 200 OK" : "HTTP/1.1 201 Created"
-        resp = JSON.generate("ok" => true, "created" => !existed, "sha256" => stored_hashes[path])
-        sock.write("#{status_line}\r\nContent-Type: application/json\r\nContent-Length: #{resp.bytesize}\r\nConnection: close\r\n\r\n#{resp}")
-      elsif method == "POST"
-        resp = JSON.generate("ok" => true, "packages" => 1)
-        sock.write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: #{resp.bytesize}\r\nConnection: close\r\n\r\n#{resp}")
-      end
-      sock.close
+    elsif method == "PUT"
+      existed = stored_hashes.key?(path)
+      stored_hashes[path] = Digest::SHA256.hexdigest(body)
+      repl_puts << [path, x_sha, existed]
+      status_line = existed ? "HTTP/1.1 200 OK" : "HTTP/1.1 201 Created"
+      resp = JSON.generate("ok" => true, "created" => !existed, "sha256" => stored_hashes[path])
+      sock.write("#{status_line}\r\nContent-Type: application/json\r\nContent-Length: #{resp.bytesize}\r\nConnection: close\r\n\r\n#{resp}")
+    elsif method == "POST"
+      resp = JSON.generate("ok" => true, "packages" => 1)
+      sock.write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: #{resp.bytesize}\r\nConnection: close\r\n\r\n#{resp}")
     end
-  end
-
-  begin
-    ruo, rue, rust = Open3.capture3(
+  end) do |repl_port|
+    ruo, rue, rust = capture3_with_timeout(
+      30,
       BASE_ENV.merge("FILC_PORTS_UPLOAD_TOKEN" => "ci-upload-secret"),
       "ruby", UPLOAD_SCRIPT,
       "--channel-dir", hl_ch_dir,
@@ -1262,9 +1284,6 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
            "changed bin package must replace old invisible file via PUT: #{repl_puts.inspect}")
     assert(stored_hashes["/api/ports-artifacts/0.1.4/x86_64-linux/#{bin_art['path']}"] == bin_art["sha256"],
            "server must hold new bin SHA-256 after replacement")
-  ensure
-    repl_srv.close
-    repl_thr.join(2)
   end
 
   # 15. Post-packaging extract + smoke verification in a fresh alternate prefix:
@@ -1578,35 +1597,17 @@ Dir.mktmpdir("filc-upload-leak-test-") do |td|
 
   # 17a-2: upload-ports --stage-port-meta against mock HTTP server must PASS
   st_puts = []
-  st_srv = TCPServer.new("127.0.0.1", 0)
-  st_port = st_srv.addr[1]
-  st_thr = Thread.new do
-    loop do
-      sock = begin
-        st_srv.accept
-      rescue IOError
-        break
-      end
-      req_head = +""
-      while (line = sock.gets)
-        req_head << line
-        break if line == "\r\n"
-      end
-      method, path, = req_head.lines.first.to_s.strip.split(" ", 3)
-      cl = req_head[/^Content-Length:\s*(\d+)/i, 1].to_i
-      sock.read(cl) if cl > 0
-      if method == "HEAD"
-        sock.write("HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
-      elsif method == "PUT"
-        st_puts << path
-        resp = JSON.generate("ok" => true, "created" => true)
-        sock.write("HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: #{resp.bytesize}\r\nConnection: close\r\n\r\n#{resp}")
-      end
-      sock.close
+  with_mock_http_server(lambda do |sock, method, path, _req_head, _body|
+    if method == "HEAD"
+      sock.write("HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+    elsif method == "PUT"
+      st_puts << path
+      resp = JSON.generate("ok" => true, "created" => true)
+      sock.write("HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: #{resp.bytesize}\r\nConnection: close\r\n\r\n#{resp}")
     end
-  end
-  begin
-    lv_o, lv_e, lv_st = Open3.capture3(
+  end) do |st_port|
+    lv_o, lv_e, lv_st = capture3_with_timeout(
+      30,
       BASE_ENV.merge("FILC_PORTS_UPLOAD_TOKEN" => "ci-upload-secret"),
       "ruby", UPLOAD_SCRIPT,
       "--channel-dir", up_ch_dir,
@@ -1617,9 +1618,6 @@ Dir.mktmpdir("filc-upload-leak-test-") do |td|
     )
     assert(lv_st.success?, "staged upload failed for docip with upstream IP: #{lv_o}\n#{lv_e}")
     assert(st_puts.length == 3, "expected 3 PUT uploads for docip, got #{st_puts.inspect}")
-  ensure
-    st_srv.close
-    st_thr.join(2)
   end
 
   # 17b-1: Real internal IP from FILC_LEAK_EXACT_TOKENS in metadata MUST be blocked (without echoing secret)
@@ -1765,7 +1763,7 @@ Dir.mktmpdir("filc-pkg-ca-") do |td|
 end
 
 # Test 19: Optional DOCKER_IMAGE_* metadata in PORT is forwarded into index.json
-puts "[19/19] Optional DOCKER_IMAGE_* metadata in PORT is forwarded into index.json"
+puts "[19/20] Optional DOCKER_IMAGE_* metadata in PORT is forwarded into index.json"
 Dir.mktmpdir("filc-test-pkg-docker-") do |td|
   dm_repo = File.join(td, "repo")
   dm_work = File.join(td, "work")
@@ -1830,4 +1828,122 @@ Dir.mktmpdir("filc-test-pkg-docker-") do |td|
          "unexpected docker_image in index.json: #{idx.dig('packages', 'php8.5', 'docker_image').inspect}")
 end
 
-puts "TEST_PACKAGE_PORT: PASS (19/19)"
+# Test 20: Bounded idempotent retry with backoff for transient upload errors
+puts "[20/20] upload-ports bounded idempotent retry (EOFError/503, HEAD SHA check, hard 4xx/mismatch)"
+Dir.mktmpdir("filc-test-upload-retry-") do |td|
+  ch_dir = File.join(td, "0.1.6", "x86_64-linux")
+  %w[src recipes bin].each { |b| FileUtils.mkdir_p(File.join(ch_dir, b)) }
+
+  src_rel = "src/retrytest-1.0.tar.gz"
+  rec_rel = "recipes/retrytest-1.0-r1.recipe.tar.xz"
+  bin_rel = "bin/retrytest-1.0-r1-x86_64-linux.tar.xz"
+  File.binwrite(File.join(ch_dir, src_rel), "src-bytes-retry\n")
+  File.binwrite(File.join(ch_dir, rec_rel), "rec-bytes-retry\n")
+  File.binwrite(File.join(ch_dir, bin_rel), "bin-bytes-retry\n")
+  src_sha = Digest::SHA256.file(File.join(ch_dir, src_rel)).hexdigest
+  rec_sha = Digest::SHA256.file(File.join(ch_dir, rec_rel)).hexdigest
+  bin_sha = Digest::SHA256.file(File.join(ch_dir, bin_rel)).hexdigest
+
+  meta_path = File.join(td, "retrytest.json")
+  File.write(meta_path, JSON.pretty_generate(
+    "channel" => "0.1.6",
+    "arch" => "x86_64-linux",
+    "name" => "retrytest",
+    "package" => {
+      "source" => { "path" => src_rel, "sha256" => src_sha, "size_bytes" => File.size(File.join(ch_dir, src_rel)) },
+      "recipe" => { "path" => rec_rel, "sha256" => rec_sha, "size_bytes" => File.size(File.join(ch_dir, rec_rel)) },
+      "binary" => { "path" => bin_rel, "sha256" => bin_sha, "size_bytes" => File.size(File.join(ch_dir, bin_rel)) }
+    }
+  ) + "\n")
+
+  run_retry_case = lambda do |mode|
+    events = []
+    stored = {}
+    bin_puts = 0
+    with_mock_http_server(lambda do |sock, method, path, _req_head, body|
+      events << [method, path]
+      is_bin = path.end_with?("/#{bin_rel}")
+      if method == "HEAD"
+        if is_bin && mode == :head_mismatch_after_eof && bin_puts >= 1
+          wrong_sha = "0" * 64
+          sock.write("HTTP/1.1 200 OK\r\nX-Content-SHA256: #{wrong_sha}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        elsif stored.key?(path)
+          sock.write("HTTP/1.1 200 OK\r\nX-Content-SHA256: #{stored[path]}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        else
+          sock.write("HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+        end
+      elsif method == "PUT"
+        bin_puts += 1 if is_bin
+        if is_bin && mode == :eof_before_store && bin_puts == 1
+          # Simulate dropped connection before response status line (EOFError)
+          sock.close
+        elsif is_bin && mode == :eof_after_store && bin_puts == 1
+          # Server persisted artifact, then dropped connection before response
+          stored[path] = Digest::SHA256.hexdigest(body)
+          sock.close
+        elsif is_bin && mode == :head_mismatch_after_eof && bin_puts == 1
+          sock.close
+        elsif is_bin && mode == :transient_503 && bin_puts == 1
+          sock.write("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbusy")
+        elsif is_bin && mode == :hard_409
+          sock.write("HTTP/1.1 409 Conflict\r\nContent-Length: 8\r\nConnection: close\r\n\r\nconflict")
+        else
+          stored[path] = Digest::SHA256.hexdigest(body)
+          resp = JSON.generate("ok" => true, "created" => true)
+          sock.write("HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: #{resp.bytesize}\r\nConnection: close\r\n\r\n#{resp}")
+        end
+      end
+    end) do |port|
+      o, e, st = capture3_with_timeout(
+        30,
+        BASE_ENV.merge("FILC_PORTS_UPLOAD_TOKEN" => "retry-secret"),
+        "ruby", UPLOAD_SCRIPT,
+        "--channel-dir", ch_dir,
+        "--channel", "0.1.6",
+        "--arch", "x86_64-linux",
+        "--base-url", "http://127.0.0.1:#{port}",
+        "--retry-delays", "0.01,0.02,0.03",
+        "--stage-port-meta", meta_path
+      )
+      [o, e, st, events, bin_puts]
+    end
+  end
+
+  # 20a: EOFError before store -> retry runs fresh HEAD (404), succeeds on PUT #2, verifies via HEAD
+  o, e, st, events, bin_puts = run_retry_case.call(:eof_before_store)
+  assert(st.success?, "20a EOFError retry must succeed: #{o}\n#{e}")
+  assert(bin_puts == 2, "20a expected 2 PUTs for bin artifact, got #{bin_puts}")
+  bin_events = events.select { |_, p| p.end_with?("/#{bin_rel}") }.map(&:first)
+  assert(bin_events == %w[HEAD PUT HEAD PUT HEAD], "20a expected HEAD->PUT->HEAD->PUT->HEAD, got #{bin_events.inspect}")
+  assert(e.include?("UPLOAD_PORTS_RETRY:") && e.include?("EOFError"), "20a must log retry line with EOFError: #{e}")
+
+  # 20b: EOFError after server already stored artifact -> retry HEAD (200 matching SHA) skips 2nd PUT
+  o, e, st, events, bin_puts = run_retry_case.call(:eof_after_store)
+  assert(st.success?, "20b idempotent HEAD after EOFError must succeed: #{o}\n#{e}")
+  assert(bin_puts == 1, "20b must NOT re-PUT when retry HEAD matches SHA-256, got #{bin_puts}")
+  bin_events = events.select { |_, p| p.end_with?("/#{bin_rel}") }.map(&:first)
+  assert(bin_events == %w[HEAD PUT HEAD], "20b expected HEAD->PUT->HEAD, got #{bin_events.inspect}")
+  assert(e.include?("UPLOAD_PORTS_RETRY:") && e.include?("UPLOAD_PORTS_RETRY_VERIFIED:"), "20b must log retry + verified lines: #{e}")
+
+  # 20c: HTTP 503 on first PUT -> retry succeeds on PUT #2
+  o, e, st, _events, bin_puts = run_retry_case.call(:transient_503)
+  assert(st.success?, "20c HTTP 503 retry must succeed: #{o}\n#{e}")
+  assert(bin_puts == 2, "20c expected 2 PUTs for HTTP 503 retry, got #{bin_puts}")
+  assert(e.include?("UPLOAD_PORTS_RETRY:") && e.include?("503"), "20c must log retry line with 503: #{e}")
+
+  # 20d: HTTP 409 Conflict (4xx) -> immediate hard failure with zero retries
+  o, e, st, _events, bin_puts = run_retry_case.call(:hard_409)
+  assert(!st.success?, "20d HTTP 409 must fail immediately: #{o}\n#{e}")
+  assert(bin_puts == 1, "20d must NOT retry 4xx (expected 1 PUT, got #{bin_puts})")
+  assert(!e.include?("UPLOAD_PORTS_RETRY:"), "20d must not log any retry on 4xx: #{e}")
+
+  # 20e: Mismatched remote SHA-256 after retry -> pre-check does not skip, post-upload verify fails hard (no 3rd PUT)
+  o, e, st, events, bin_puts = run_retry_case.call(:head_mismatch_after_eof)
+  assert(!st.success?, "20e post-upload SHA-256 mismatch after retry must fail hard: #{o}\n#{e}")
+  assert(bin_puts == 2, "20e expected retry PUT #2 followed by hard post-upload failure (got #{bin_puts} PUTs)")
+  bin_events = events.select { |_, p| p.end_with?("/#{bin_rel}") }.map(&:first)
+  assert(bin_events == %w[HEAD PUT HEAD PUT HEAD], "20e expected HEAD->PUT->HEAD->PUT->HEAD then hard fail, got #{bin_events.inspect}")
+  assert(e.include?("post-upload HEAD") && e.include?("SHA-256 mismatch"), "20e must fail in post-upload SHA-256 check: #{e}")
+end
+
+puts "TEST_PACKAGE_PORT: PASS (20/20)"

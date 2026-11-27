@@ -10,14 +10,44 @@ require "json"
 require "net/http"
 require "open3"
 require "optparse"
+require "socket"
+require "timeout"
 require "uri"
+begin
+  require "openssl"
+rescue LoadError
+  nil
+end
 
 Encoding.default_external = Encoding::UTF_8
 Encoding.default_internal = Encoding::UTF_8
 
 module PortsUploader
+  class TransientUploadError < StandardError; end
+
   DEFAULT_PUBKEY = File.expand_path("../ports/ports-pubkey.pub", __dir__)
   MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
+  DEFAULT_RETRY_DELAYS = [5, 15, 45].freeze
+  TRANSIENT_HTTP_CODES = %w[502 503 504].freeze
+  TRANSIENT_ERROR_CLASSES = [
+    TransientUploadError,
+    EOFError,
+    IOError,
+    SocketError,
+    Timeout::Error,
+    Errno::ECONNRESET,
+    Errno::ECONNABORTED,
+    Errno::EPIPE,
+    Errno::ETIMEDOUT,
+    Errno::ECONNREFUSED,
+    Errno::EHOSTUNREACH,
+    Errno::ENETUNREACH
+  ].tap do |list|
+    list << Net::OpenTimeout if defined?(Net::OpenTimeout)
+    list << Net::ReadTimeout if defined?(Net::ReadTimeout)
+    list << Net::WriteTimeout if defined?(Net::WriteTimeout)
+    list << OpenSSL::SSL::SSLError if defined?(OpenSSL::SSL::SSLError)
+  end.freeze
   SHA256_RE = /\A[0-9a-f]{64}\z/
   IPV4_EXACT_RE = /\A\d{1,3}(?:\.\d{1,3}){3}\z/
   CHANNEL_RE = /\A\d+\.\d+\.\d+(?:-[a-z0-9.]+)?\z/
@@ -248,75 +278,237 @@ module PortsUploader
     { name: pkg_name, items: items }
   end
 
+  def parse_retry_delays(raw)
+    return DEFAULT_RETRY_DELAYS if raw.nil?
+
+    str = raw.to_s.strip
+    return DEFAULT_RETRY_DELAYS if str.empty?
+    return [].freeze if str.casecmp("none").zero?
+
+    parts = str.split(",").map(&:strip)
+    raise OptionParser::InvalidArgument, "--retry-delays supports at most 10 entries" if parts.length > 10
+
+    parts.map do |p|
+      raise OptionParser::InvalidArgument, "invalid retry delay: #{p.inspect}" unless /\A\d+(?:\.\d+)?\z/.match?(p)
+
+      val = p.to_f
+      raise OptionParser::InvalidArgument, "retry delay out of range (0..300s): #{p.inspect}" if val < 0.0 || val > 300.0
+
+      val
+    end.freeze
+  end
+
+  def format_backoff(delay)
+    delay == delay.to_i ? delay.to_i.to_s : format("%.3f", delay).sub(/\.?0+\z/, "")
+  end
+
+  def log_retry_line(log_io, line)
+    return unless log_io
+
+    log_io.puts(line)
+    log_io.flush
+  end
+
   def http_for(uri)
     http = Net::HTTP.new(uri.host, uri.port)
     http.use_ssl = uri.scheme == "https"
     http.open_timeout = 15
     http.read_timeout = 300
     http.write_timeout = 300 if http.respond_to?(:write_timeout=)
+    # Disable Net::HTTP's internal retry (default 1 on PUT/HEAD) because it retries
+    # streaming PUTs without rewinding body_stream (sending 0 bytes) and bypasses
+    # our idempotent HEAD check and UPLOAD_PORTS_RETRY logging.
+    http.max_retries = 0 if http.respond_to?(:max_retries=)
     http
   end
 
-  def head_verify_artifact(base_uri, channel, arch, item, token)
+  def head_verify_artifact(base_uri, channel, arch, item, token, retry_delays: DEFAULT_RETRY_DELAYS, log_io: $stderr)
     path = "/api/ports-artifacts/#{channel}/#{arch}/#{item[:rel]}"
-    http = http_for(base_uri)
-    head_req = Net::HTTP::Head.new(path)
-    head_req["Authorization"] = "Bearer #{token}"
-    head_res = http.request(head_req)
-    return [false, "http=#{head_res.code}(#{item[:rel]})"] unless head_res.code == "200"
+    max_attempts = 1 + retry_delays.length
+    attempt = 1
 
-    got_sha = head_res["x-content-sha256"].to_s
-    return [false, "sha_mismatch(#{item[:rel]}:got=#{got_sha[0, 12]},want=#{item[:sha256][0, 12]})"] unless got_sha == item[:sha256]
+    loop do
+      begin
+        http = http_for(base_uri)
+        head_req = Net::HTTP::Head.new(path)
+        head_req["Authorization"] = "Bearer #{token}"
+        head_res = http.request(head_req)
+        if TRANSIENT_HTTP_CODES.include?(head_res.code)
+          raise TransientUploadError, "HEAD #{path} transient HTTP #{head_res.code}"
+        end
+        return [false, "http=#{head_res.code}(#{item[:rel]})"] unless head_res.code == "200"
 
-    [true, "ok"]
-  rescue StandardError => e
-    [false, "error=#{e.class}:#{e.message}"]
-  end
+        got_sha = head_res["x-content-sha256"].to_s
+        return [false, "sha_mismatch(#{item[:rel]}:got=#{got_sha[0, 12]},want=#{item[:sha256][0, 12]})"] unless got_sha == item[:sha256]
 
-  def upload_artifact(base_uri, channel, arch, item, token)
-    path = "/api/ports-artifacts/#{channel}/#{arch}/#{item[:rel]}"
-    http = http_for(base_uri)
-
-    # 1. Idempotency check via HEAD
-    head_req = Net::HTTP::Head.new(path)
-    head_req["Authorization"] = "Bearer #{token}"
-    head_res = http.request(head_req)
-    if head_res.code == "200" && head_res["x-content-sha256"] == item[:sha256]
-      return :skipped
-    end
-
-    # 2. Streaming PUT (never loads full tarball into RAM)
-    File.open(item[:full], "rb") do |io|
-      put_req = Net::HTTP::Put.new(path)
-      put_req["Authorization"] = "Bearer #{token}"
-      put_req["Content-Type"] = "application/octet-stream"
-      put_req["Content-Length"] = item[:size].to_s
-      put_req["X-Content-SHA256"] = item[:sha256]
-      put_req.body_stream = io
-      res = http.request(put_req)
-      unless %w[200 201].include?(res.code)
-        raise "PUT #{path} failed (#{res.code}): #{res.body}"
+        return [true, "ok"]
+      rescue *TRANSIENT_ERROR_CLASSES => e
+        if attempt <= retry_delays.length
+          delay = retry_delays[attempt - 1]
+          reason = e.message.to_s.lines.first.to_s.strip
+          log_retry_line(
+            log_io,
+            "UPLOAD_PORTS_RETRY: op=head_verify attempt=#{attempt}/#{max_attempts} next_attempt=#{attempt + 1}/#{max_attempts} " \
+            "artifact=#{item[:rel]} error=#{e.class} reason=#{reason.inspect} backoff=#{format_backoff(delay)}s"
+          )
+          sleep(delay) if delay > 0
+          attempt += 1
+          next
+        end
+        return [false, "error=#{e.class}:#{e.message}"]
+      rescue StandardError => e
+        return [false, "error=#{e.class}:#{e.message}"]
       end
     end
-    :uploaded
   end
 
-  def commit_index(base_uri, channel, arch, verified, token)
+  def upload_artifact(base_uri, channel, arch, item, token, retry_delays: DEFAULT_RETRY_DELAYS, log_io: $stderr)
+    path = "/api/ports-artifacts/#{channel}/#{arch}/#{item[:rel]}"
+    max_attempts = 1 + retry_delays.length
+    attempt = 1
+
+    loop do
+      begin
+        # 1. Idempotency check via fresh HEAD before every attempt (including retries).
+        # Skip ONLY when the remote artifact exists with the exact expected SHA-256;
+        # a differing SHA-256 or 404 proceeds to PUT so replacement uploads still work,
+        # while non-404 4xx (and 500) responses fail immediately without retrying.
+        head_http = http_for(base_uri)
+        head_req = Net::HTTP::Head.new(path)
+        head_req["Authorization"] = "Bearer #{token}"
+        head_res = head_http.request(head_req)
+        if head_res.code == "200"
+          got_sha = head_res["x-content-sha256"].to_s
+          if got_sha == item[:sha256]
+            if attempt > 1
+              log_retry_line(
+                log_io,
+                "UPLOAD_PORTS_RETRY_VERIFIED: attempt=#{attempt}/#{max_attempts} artifact=#{item[:rel]} " \
+                "status=already_present sha256=#{item[:sha256][0, 12]}"
+              )
+            end
+            return :skipped
+          end
+        elsif TRANSIENT_HTTP_CODES.include?(head_res.code)
+          raise TransientUploadError, "HEAD #{path} transient HTTP #{head_res.code}: #{head_res.body}"
+        elsif head_res.code != "404"
+          raise "HEAD #{path} failed (#{head_res.code}): #{head_res.body}"
+        end
+
+        # 2. Streaming PUT on a fresh connection (never loads full tarball into RAM)
+        put_res = nil
+        File.open(item[:full], "rb") do |io|
+          put_http = http_for(base_uri)
+          put_req = Net::HTTP::Put.new(path)
+          put_req["Authorization"] = "Bearer #{token}"
+          put_req["Content-Type"] = "application/octet-stream"
+          put_req["Content-Length"] = item[:size].to_s
+          put_req["X-Content-SHA256"] = item[:sha256]
+          put_req.body_stream = io
+          res = put_http.request(put_req)
+          if %w[200 201].include?(res.code)
+            put_res = res
+          elsif TRANSIENT_HTTP_CODES.include?(res.code)
+            raise TransientUploadError, "PUT #{path} transient HTTP #{res.code}: #{res.body}"
+          else
+            raise "PUT #{path} failed (#{res.code}): #{res.body}"
+          end
+        end
+
+        # 3. Post-upload SHA-256 verification: check response header/JSON digest if returned,
+        # and after any retry PUT also confirm remote SHA-256 via a fresh HEAD.
+        hdr_sha = put_res["x-content-sha256"].to_s.strip
+        if !hdr_sha.empty? && hdr_sha != item[:sha256]
+          raise "PUT #{path} post-upload SHA-256 mismatch (header=#{hdr_sha}, expected=#{item[:sha256]})"
+        end
+        if put_res.body && !put_res.body.strip.empty?
+          parsed_put = begin
+            JSON.parse(put_res.body)
+          rescue JSON::ParserError
+            nil
+          end
+          if parsed_put.is_a?(Hash) && parsed_put["sha256"].is_a?(String) && !parsed_put["sha256"].empty? &&
+             parsed_put["sha256"] != item[:sha256]
+            raise "PUT #{path} post-upload SHA-256 mismatch (body=#{parsed_put['sha256']}, expected=#{item[:sha256]})"
+          end
+        end
+        if attempt > 1
+          verify_http = http_for(base_uri)
+          verify_req = Net::HTTP::Head.new(path)
+          verify_req["Authorization"] = "Bearer #{token}"
+          verify_res = verify_http.request(verify_req)
+          if TRANSIENT_HTTP_CODES.include?(verify_res.code)
+            raise TransientUploadError, "post-upload HEAD #{path} transient HTTP #{verify_res.code}"
+          end
+          unless verify_res.code == "200"
+            raise "post-upload HEAD #{path} failed (#{verify_res.code})"
+          end
+
+          verify_sha = verify_res["x-content-sha256"].to_s
+          unless verify_sha == item[:sha256]
+            raise "post-upload HEAD #{path} SHA-256 mismatch (remote=#{verify_sha.empty? ? '<missing>' : verify_sha}, expected=#{item[:sha256]})"
+          end
+        end
+        return :uploaded
+      rescue *TRANSIENT_ERROR_CLASSES => e
+        if attempt <= retry_delays.length
+          delay = retry_delays[attempt - 1]
+          reason = e.message.to_s.lines.first.to_s.strip
+          log_retry_line(
+            log_io,
+            "UPLOAD_PORTS_RETRY: op=upload attempt=#{attempt}/#{max_attempts} next_attempt=#{attempt + 1}/#{max_attempts} " \
+            "artifact=#{item[:rel]} error=#{e.class} reason=#{reason.inspect} backoff=#{format_backoff(delay)}s"
+          )
+          sleep(delay) if delay > 0
+          attempt += 1
+          next
+        end
+        raise "PUT #{path} failed after #{max_attempts} attempts (#{e.class}): #{e.message}"
+      end
+    end
+  end
+
+  def commit_index(base_uri, channel, arch, verified, token, retry_delays: DEFAULT_RETRY_DELAYS, log_io: $stderr)
     path = "/api/ports-artifacts/#{channel}/#{arch}/commit-index"
-    http = http_for(base_uri)
-    req = Net::HTTP::Post.new(path)
-    req["Authorization"] = "Bearer #{token}"
-    req["Content-Type"] = "application/json"
-    req.body = JSON.generate(
+    body = JSON.generate(
       "index_json" => verified[:index_raw],
       "index_minisig" => verified[:index_sig],
       "sha256sums" => verified[:sums_raw],
       "sha256sums_minisig" => verified[:sums_sig]
     )
-    res = http.request(req)
-    raise "POST #{path} failed (#{res.code}): #{res.body}" unless res.code == "200"
+    max_attempts = 1 + retry_delays.length
+    attempt = 1
 
-    JSON.parse(res.body)
+    loop do
+      begin
+        http = http_for(base_uri)
+        req = Net::HTTP::Post.new(path)
+        req["Authorization"] = "Bearer #{token}"
+        req["Content-Type"] = "application/json"
+        req.body = body
+        res = http.request(req)
+        return JSON.parse(res.body) if res.code == "200"
+        if TRANSIENT_HTTP_CODES.include?(res.code)
+          raise TransientUploadError, "POST #{path} transient HTTP #{res.code}: #{res.body}"
+        end
+
+        raise "POST #{path} failed (#{res.code}): #{res.body}"
+      rescue *TRANSIENT_ERROR_CLASSES => e
+        if attempt <= retry_delays.length
+          delay = retry_delays[attempt - 1]
+          reason = e.message.to_s.lines.first.to_s.strip
+          log_retry_line(
+            log_io,
+            "UPLOAD_PORTS_RETRY: op=commit_index attempt=#{attempt}/#{max_attempts} next_attempt=#{attempt + 1}/#{max_attempts} " \
+            "artifact=commit-index error=#{e.class} reason=#{reason.inspect} backoff=#{format_backoff(delay)}s"
+          )
+          sleep(delay) if delay > 0
+          attempt += 1
+          next
+        end
+        raise "POST #{path} failed after #{max_attempts} attempts (#{e.class}): #{e.message}"
+      end
+    end
   end
 
   def main(argv)
@@ -336,7 +528,8 @@ module PortsUploader
       stage_port_meta: nil,
       head_verify_meta: nil,
       commit_only: false,
-      max_artifact_bytes: MAX_ARTIFACT_BYTES
+      max_artifact_bytes: MAX_ARTIFACT_BYTES,
+      retry_delays: parse_retry_delays(ENV["FILC_UPLOAD_RETRY_DELAYS"])
     }
 
     parser = OptionParser.new do |o|
@@ -355,6 +548,9 @@ module PortsUploader
         raise OptionParser::InvalidArgument, "--max-artifact-bytes must be >= 1" if v < 1
 
         opts[:max_artifact_bytes] = v
+      end
+      o.on("--retry-delays CSV", "Comma-separated retry backoff delays in seconds for transient network/502/503/504 errors (default: 5,15,45)") do |v|
+        opts[:retry_delays] = parse_retry_delays(v)
       end
       o.on("--allow-unsigned-test", "Skip cryptographic minisign verification (unit tests only)") { opts[:verify_sig] = false }
       o.on("--dry-run", "Verify locally without uploading") { opts[:dry_run] = true }
@@ -394,7 +590,7 @@ module PortsUploader
       base_uri = URI.parse(opts[:base_url])
       miss_reason = nil
       all_present = items.all? do |item|
-        ok, reason = head_verify_artifact(base_uri, opts[:channel], opts[:arch], item, token)
+        ok, reason = head_verify_artifact(base_uri, opts[:channel], opts[:arch], item, token, retry_delays: opts[:retry_delays])
         miss_reason = reason unless ok
         ok
       end
@@ -427,7 +623,7 @@ module PortsUploader
       uploaded = 0
       skipped = 0
       staged[:items].each do |item|
-        st = upload_artifact(base_uri, opts[:channel], opts[:arch], item, token)
+        st = upload_artifact(base_uri, opts[:channel], opts[:arch], item, token, retry_delays: opts[:retry_delays])
         if st == :uploaded
           uploaded += 1
         else
@@ -499,7 +695,7 @@ module PortsUploader
               end
               next if already
 
-              st = upload_artifact(base_uri, opts[:channel], opts[:arch], item, token)
+              st = upload_artifact(base_uri, opts[:channel], opts[:arch], item, token, retry_delays: opts[:retry_delays])
               mu.synchronize do
                 uploaded_rel[rel] = st
                 if st == :uploaded
@@ -528,7 +724,7 @@ module PortsUploader
     raise first_error if first_error
 
     # Atomic publish boundary: commit-index is ONLY invoked once 100% of packages succeeded.
-    result = commit_index(base_uri, opts[:channel], opts[:arch], verified, token)
+    result = commit_index(base_uri, opts[:channel], opts[:arch], verified, token, retry_delays: opts[:retry_delays])
     mode_tag = opts[:commit_only] ? "COMMIT_ONLY " : ""
     puts "UPLOAD_PORTS: #{mode_tag}OK channel=#{opts[:channel]} arch=#{opts[:arch]} packages=#{result['packages']} uploaded=#{uploaded} skipped=#{skipped}"
     0

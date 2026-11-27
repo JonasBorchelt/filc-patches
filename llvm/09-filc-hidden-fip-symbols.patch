@@ -1,0 +1,51 @@
+Subject: Mark pizlonatedFIP<sig>_* function implementations hidden to prevent RTLD_GLOBAL interposition
+Upstream-Base: llvmorg-23.1.6 (5b10d2d74929eae78912771222c9855af97496f4)
+Fil-C-Head: e7b7f1e8969e24411b3d588bb9a043e5676f854d (branch deluge)
+
+FilPizlonator emits each function's local FunctionObject (pizlonatedFO_<name>)
+with a data pointer referencing the function implementation symbol
+pizlonatedFIP<sig>_<name>. Previously, pizlonatedFIP<sig>_<name> inherited
+F->getVisibility() (STV_DEFAULT), making that data relocation preemptible in
+shared libraries.
+
+When two shared libraries export a function with the same name and signature
+(such as plugin entrypoints like PHP's get_module, Apache modules, PAM, or NSS)
+and are loaded with RTLD_GLOBAL on a libc without RTLD_DEEPBIND (such as musl),
+dynamic relocation interposes the first library's pizlonatedFIP<sig>_<name>
+into the second library's pizlonatedFO_<name>. Consequently,
+dlsym(handle2, "get_module") invokes library 1's implementation instead of
+library 2's. The same interposition breaks dlsym(RTLD_NEXT, ...).
+
+Keep pizlonatedFIP<sig>_<name> STV_HIDDEN (whenever it has non-local linkage,
+after PutImplIntoComdat) so each DSO's pizlonatedFO_<name> resolves locally via
+a relative relocation. Cross-DSO fast calls and symbol interposition continue
+to use the exported pizlonatedFI<sig>_<name> GlobalAlias and pizlonated_<name>
+getter, which retain F->getVisibility().
+
+---
+diff --git a/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp b/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp
+index 32adbb8..93bece6 100644
+--- a/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp
++++ b/llvm/lib/Transforms/Instrumentation/FilPizlonator.cpp
+@@ -16862,13 +16862,18 @@ public:
+           ImplFuncTy, Linkage, F->getAddressSpace(),
+           buf.str(), &M);
+         FunctionToHiddenFunction[F] = NewF;
+-        if (!UsesCallee) {
+-          NewF->setVisibility(F->getVisibility());
++        if (!UsesCallee)
+           FunctionToSignature[F] = Signature;
+-        }
+         NewF->setSubprogram(F->getSubprogram());
+ 
+         PutImplIntoComdat(F, NewF);
++        // Keep pizlonatedFIP<sig>_* hidden so each DSO's local pizlonatedFO_*
++        // function object binds to its own implementation via a relative
++        // relocation instead of being interposed across RTLD_GLOBAL DSOs
++        // (e.g. plugin entrypoints like PHP's get_module or dlsym(RTLD_NEXT)).
++        // External callers still resolve the exported pizlonatedFI<sig>_* alias.
++        if (!NewF->hasLocalLinkage())
++          NewF->setVisibility(GlobalValue::HiddenVisibility);
+ 
+         if (F->getLinkage() == GlobalValue::ExternalLinkage && !UsesCallee) {
+           std::ostringstream buf;

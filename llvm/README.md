@@ -17,6 +17,7 @@ Applied by default via `scripts/apply`:
 8. `06c-clang-driver-sarcasm-safe-wa-flags.patch`: Accepts safe no-op assembler metadata flags (`-Wa,--noexecstack`, `-Wa,--generate-missing-build-notes={yes,no}`, `-Wa,-mrelax-relocations={yes,no}`, `-Wa,--compress-debug-sections[=...]`) in `SarcasmAs` while still rejecting unsafe flags.
 9. `07-filc-hardened-compile-diagnostics.patch`: Rejects `__builtin_setjmp`/`__builtin_longjmp` cleanly in Clang Sema and replaces all user-input-reachable `llvm_unreachable`/`assert` sites in `FilPizlonator`, `CGRecordLayoutBuilder`, and `Gnu.cpp` with `report_fatal_error(..., /*GenCrashDiag=*/false)` so Release builds (`LLVM_ENABLE_ASSERTIONS=OFF`) never turn unsupported constructs into compiler UB.
 10. `08-filc-pass-assertions-option.patch`: Adds CMake option `FILC_ENABLE_PASS_ASSERTIONS` that activates ODR-safe `FILC_ASSERT` checks for all 515 internal `assert(...)` invariants in `FilPizlonator.cpp` and `KillUB.cpp` without undefining `NDEBUG` across LLVM headers.
+11. `09-filc-hidden-fip-symbols.patch`: Marks `pizlonatedFIP<sig>_*` function implementations `STV_HIDDEN` (after `PutImplIntoComdat`, when non-local linkage) so each DSO's local `pizlonatedFO_*` function object binds via a relative relocation instead of being interposed across `RTLD_GLOBAL` shared libraries on musl, while preserving exported `pizlonatedFI<sig>_*` aliases and `pizlonated_*` getters.
 
 ## Optional (`llvm/series.optional`)
 

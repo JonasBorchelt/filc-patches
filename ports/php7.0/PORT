@@ -142,9 +142,34 @@ port_test() {
     -d opcache.enable_cli=1 \
     <<'EOF' | grep -Fxq 'PHP70_FILC_SMOKE_OK'
 <?php
+libxml_use_internal_errors(true);
+$bad = new DOMDocument();
+assert($bad->loadXML('<broken>') === false);
+$err = libxml_get_last_error();
+assert($err instanceof LibXMLError && $err->code > 0);
+libxml_clear_errors();
+libxml_use_internal_errors(false);
+
 $xml = new DOMDocument();
-$xml->loadXML('<root xmlns="urn:test"><child a="1">ok</child></root>');
+assert($xml->loadXML('<root xmlns="urn:test"><child a="1">ok</child></root>') === true);
 assert(strpos($xml->C14N(), '<child a="1">ok</child>') !== false);
+$xml2 = new DOMDocument();
+assert($xml2->loadXML('<root><item id="a">one</item><item id="b">two</item></root>') === true);
+$xp = new DOMXPath($xml2);
+$nodes = $xp->query('//item[@id="b"]');
+assert($nodes !== false && $nodes->length === 1 && $nodes->item(0)->textContent === 'two');
+
+$sxe = simplexml_load_string('<root><item id="a">one</item><item id="b">two</item></root>');
+assert($sxe !== false);
+$sxe_nodes = $sxe->xpath('//item[@id="a"]');
+assert(is_array($sxe_nodes) && count($sxe_nodes) === 1 && (string)$sxe_nodes[0] === 'one');
+
+$xw = new XMLWriter();
+$xw->openMemory();
+$xw->startElement('ok');
+$xw->text('v');
+$xw->endElement();
+assert($xw->outputMemory() === '<ok>v</ok>');
 
 $i = PHP_INT_MAX;
 $i++;

@@ -1,14 +1,35 @@
-Subject: Fix libxml2 2.12+ const xmlError and ICU 70+ compatibility in PHP 7.0
+Subject: Backport upstream PHP libxml2 2.12-2.15 and ICU 70+ compatibility fixes to PHP 7.0
 Policy-Class: P2-Package
-Rationale: libxml2 2.12+ changed xmlGetLastError() and xmlStructuredErrorFunc to const xmlError * and dropped transitive libxml/encoding.h includes; ICU 68+ removed TRUE/FALSE macros and ICU 70+ changed BreakIterator::operator== to return bool. Backport these fixes so PHP 7.0 builds cleanly against libxml2 2.15 and ICU 79.
-Upstream-Status: Backport (upstream PHP 7.4/8.x libxml2 2.12 and ICU 70 compatibility fixes)
+Rationale: Backport upstream php/php-src libxml2 2.12/2.13/2.14 fixes (8a95e616b9 GH-12702, 0a39890c96, 4fe821311c, 903fcb45c3): include libxml/parser.h in php_libxml.h, remove libxml2-private ATTRIBUTE_UNUSED in ext/libxml/libxml.c, update xmlGetLastError()/xmlStructuredErrorFunc to const xmlError *, replace deprecated libxml/SAX.h with libxml/xmlsave.h and libxml/encoding.h, and use xmlBufferContent() in ext/xmlwriter; plus ICU 68+/70+ boolean literals and BreakIterator::operator== bool return type so PHP 7.0 builds cleanly against libxml2 2.15 and ICU 79.
+Upstream-Status: Backport (upstream PHP 7.4/8.x libxml2 2.12-2.14 and ICU 70 compatibility fixes)
 Fil-C-Origin-Commits: none
 Origin-Kind: backport
 Origin-Project: php/php-src
 
+--- a/ext/libxml/php_libxml.h
++++ b/ext/libxml/php_libxml.h
+@@ -39,6 +39,7 @@
+ 
+ #include "zend_smart_str.h"
+ #include <libxml/tree.h>
++#include <libxml/parser.h>
+ 
+ #define LIBXML_SAVE_NOEMPTYTAG 1<<2
+ 
 --- a/ext/libxml/libxml.c
 +++ b/ext/libxml/libxml.c
-@@ -545,7 +545,11 @@
+@@ -428,8 +428,9 @@
+ static xmlOutputBufferPtr
+ php_libxml_output_buffer_create_filename(const char *URI,
+                               xmlCharEncodingHandlerPtr encoder,
+-                              int compression ATTRIBUTE_UNUSED)
++                              int compression)
+ {
++	(void)compression;
+ 	xmlOutputBufferPtr ret;
+ 	xmlURIPtr puri;
+ 	void *context = NULL;
+@@ -545,7 +546,11 @@
  	return 1;
  }
  
@@ -20,7 +41,7 @@ Origin-Project: php/php-src
  {
  	xmlError error_copy;
  	int ret;
-@@ -796,7 +800,11 @@
+@@ -796,7 +801,11 @@
  	va_end(args);
  }
  
@@ -32,7 +53,7 @@ Origin-Project: php/php-src
  {
  	_php_list_set_error_structure(error, NULL);
  
-@@ -1074,7 +1082,11 @@
+@@ -1074,7 +1083,11 @@
     Retrieve last error from libxml */
  static PHP_FUNCTION(libxml_get_last_error)
  {
@@ -46,14 +67,28 @@ Origin-Project: php/php-src
  
 --- a/ext/dom/document.c
 +++ b/ext/dom/document.c
-@@ -27,6 +27,7 @@
+@@ -26,7 +26,8 @@
+ #include "php.h"
  #if HAVE_LIBXML && HAVE_DOM
  #include "php_dom.h"
- #include <libxml/SAX.h>
+-#include <libxml/SAX.h>
++#include <libxml/xmlsave.h>
 +#include <libxml/encoding.h>
  #ifdef LIBXML_SCHEMAS_ENABLED
  #include <libxml/relaxng.h>
  #include <libxml/xmlschemas.h>
+--- a/ext/xmlwriter/php_xmlwriter.c
++++ b/ext/xmlwriter/php_xmlwriter.c
+@@ -1803,7 +1803,8 @@
+ 		}
+ 		output_bytes = xmlTextWriterFlush(ptr);
+ 		if (buffer) {
+-			RETVAL_STRING((char *) buffer->content);
++			const xmlChar *content = xmlBufferContent(buffer);
++			RETVAL_STRING((const char *) content);
+ 			if (empty) {
+ 				xmlBufferEmpty(buffer);
+ 			}
 --- a/ext/soap/soap.c
 +++ b/ext/soap/soap.c
 @@ -23,6 +23,7 @@

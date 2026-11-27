@@ -130,6 +130,56 @@ SHIM
   fi
 }
 
+port_build() {
+  local rc=0
+  make -j"$JOBS" || rc=$?
+  if [[ "$rc" -ne 0 && -x sapi/cli/php ]]; then
+    echo "=== PHP70 PHAR DIAGNOSTIC (make rc=$rc) ===" >&2
+    ./sapi/cli/php -n -v 2>&1 || true
+    echo "--- direct phar.phar pack command (stderr merged) ---" >&2
+    rm -f ext/phar/phar.phar
+    local phar_rc=0
+    ./sapi/cli/php -n -d open_basedir= -d output_buffering=0 -d memory_limit=-1 -d phar.readonly=0 -d safe_mode=0 \
+      ext/phar/phar.php pack -f ext/phar/phar.phar -a pharcommand -c auto -x '\\.svn' -p 0 \
+      -s ext/phar/phar/phar.php -h sha1 -b "$PIZFIX/bin/php7.0" ext/phar/phar/ 2>&1 || phar_rc=$?
+    echo "--- direct phar.phar rc=$phar_rc ---" >&2
+    echo "--- step-by-step phar probe ---" >&2
+    ./sapi/cli/php -n -d phar.readonly=0 -d display_errors=1 -d error_reporting=E_ALL <<'PHP' 2>&1 || true
+<?php
+$f = sys_get_temp_dir() . '/diag-' . getmypid() . '.phar';
+@unlink($f);
+fwrite(STDERR, "step 1: new Phar\n");
+$p = new Phar($f, 0, 'diag');
+fwrite(STDERR, "step 2: startBuffering\n");
+$p->startBuffering();
+fwrite(STDERR, "step 3: addFromString\n");
+$p->addFromString('a.txt', 'hello');
+fwrite(STDERR, "step 4: addFile phar.inc\n");
+if (file_exists('ext/phar/phar/phar.inc')) {
+    $p->addFile('ext/phar/phar/phar.inc', 'phar.inc');
+}
+fwrite(STDERR, "step 5: decompressFiles\n");
+$p->decompressFiles();
+fwrite(STDERR, "step 6: setSignatureAlgorithm SHA1\n");
+$p->setSignatureAlgorithm(Phar::SHA1);
+fwrite(STDERR, "step 7: stopBuffering\n");
+$p->stopBuffering();
+fwrite(STDERR, "step 8: done\n");
+@unlink($f);
+PHP
+    if command -v gdb >/dev/null 2>&1; then
+      echo "--- gdb backtrace ---" >&2
+      rm -f ext/phar/phar.phar
+      gdb -batch -ex run -ex bt -ex 'x/4i $pc' --args \
+        ./sapi/cli/php -n -d open_basedir= -d output_buffering=0 -d memory_limit=-1 -d phar.readonly=0 -d safe_mode=0 \
+        ext/phar/phar.php pack -f ext/phar/phar.phar -a pharcommand -c auto -x '\\.svn' -p 0 \
+        -s ext/phar/phar/phar.php -h sha1 -b "$PIZFIX/bin/php7.0" ext/phar/phar/ 2>&1 || true
+    fi
+    return "$rc"
+  fi
+  return "$rc"
+}
+
 port_test() {
   local php_bin fpm_bin ext_dir out ver fpm_ver
   php_bin="$PIZFIX/bin/php7.0"

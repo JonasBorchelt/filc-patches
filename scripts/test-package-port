@@ -1764,16 +1764,15 @@ Dir.mktmpdir("filc-pkg-ca-") do |td|
   assert(!e1.key?("docker_image"), "port without DOCKER_IMAGE_* must not emit docker_image")
 end
 
-# ---------------------------------------------------------------------------
-# 19. Optional DOCKER_IMAGE_* metadata in PORT is forwarded into index.json
-# ---------------------------------------------------------------------------
+# Test 19: Optional DOCKER_IMAGE_* metadata in PORT is forwarded into index.json
+puts "[19/19] Optional DOCKER_IMAGE_* metadata in PORT is forwarded into index.json"
 Dir.mktmpdir("filc-test-pkg-docker-") do |td|
   dm_repo = File.join(td, "repo")
   dm_work = File.join(td, "work")
-  dm_pizfix = File.join(td, "pizfix")
+  dm_pizfix = File.join(dm_work, "pizfix")
   dm_cache = File.join(td, "cache")
   dm_out = File.join(td, "out")
-  dm_state = File.join(dm_work, "state")
+  dm_state = File.join(dm_work, "ports-state")
   FileUtils.mkdir_p([
     File.join(dm_repo, "ports", "php8.5"),
     File.join(dm_pizfix, "bin"),

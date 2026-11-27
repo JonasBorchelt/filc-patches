@@ -70,6 +70,7 @@ port_configure() {
       --with-config-file-path="$PIZFIX/etc/php7.4" \
       --with-config-file-scan-dir="$PIZFIX/etc/php7.4/conf.d" \
       --without-pcre-jit \
+      --without-pear \
       --with-external-pcre \
       --enable-fpm \
       --with-openssl \

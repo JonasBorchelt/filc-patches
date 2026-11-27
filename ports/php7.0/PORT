@@ -136,6 +136,7 @@ SHIM
       --with-config-file-path="$PIZFIX/etc/php7.0" \
       --with-config-file-scan-dir="$PIZFIX/etc/php7.0/conf.d" \
       --without-pcre-jit \
+      --without-pear \
       --with-libxml-dir="$shim_dir" \
       --with-icu-dir="$shim_dir" \
       --enable-fpm \
@@ -491,6 +492,9 @@ PY
   test -L "$PKG_PREFIX/bin/phar7.0"
   test ! -e "$PKG_PREFIX/bin/phar"
   test ! -e "$PKG_PREFIX/bin/phar.phar"
+  test ! -e "$PKG_PREFIX/bin/pear"
+  test ! -e "$PKG_PREFIX/bin/peardev"
+  test ! -e "$PKG_PREFIX/bin/pecl"
   "$php_bin" -n -d phar.readonly=0 -d zend.assertions=1 -d assert.exception=1 <<'EOF' | grep -Fxq 'PHP70_PHAR_SHUTDOWN_OK'
 <?php
 $f = sys_get_temp_dir() . '/filc-php70-phar-' . getmypid() . '-' . mt_rand(1000, 999999) . '.phar';

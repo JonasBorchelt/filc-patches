@@ -6,65 +6,47 @@ Fil-C-Origin-Commits: none
 Origin-Kind: backport
 Origin-Project: php/php-src
 
---- a/ext/libxml/php_libxml.h
-+++ b/ext/libxml/php_libxml.h
-@@ -39,6 +39,7 @@
+diff --git a/Zend/zend_hash.h b/Zend/zend_hash.h
+index 499c07c..45f97e9 100644
+--- a/Zend/zend_hash.h
++++ b/Zend/zend_hash.h
+@@ -248,7 +248,7 @@ END_EXTERN_C()
  
- #include "zend_smart_str.h"
- #include <libxml/tree.h>
-+#include <libxml/parser.h>
- 
- #define LIBXML_SAVE_NOEMPTYTAG 1<<2
- 
---- a/ext/libxml/libxml.c
-+++ b/ext/libxml/libxml.c
-@@ -428,8 +428,9 @@
- static xmlOutputBufferPtr
- php_libxml_output_buffer_create_filename(const char *URI,
-                               xmlCharEncodingHandlerPtr encoder,
--                              int compression ATTRIBUTE_UNUSED)
-+                              int compression)
+ static zend_always_inline int _zend_handle_numeric_str(const char *key, size_t length, zend_ulong *idx)
  {
-+	(void)compression;
- 	xmlOutputBufferPtr ret;
- 	xmlURIPtr puri;
- 	void *context = NULL;
-@@ -545,7 +546,11 @@
- 	return 1;
- }
+-	register const char *tmp = key;
++	const char *tmp = key;
  
-+#if LIBXML_VERSION >= 21200
-+static void _php_list_set_error_structure(const xmlError *error, const char *msg)
-+#else
- static void _php_list_set_error_structure(xmlErrorPtr error, const char *msg)
-+#endif
+ 	if (*tmp > '9') {
+ 		return 0;
+diff --git a/Zend/zend_operators.h b/Zend/zend_operators.h
+index 70e447f..8646cc3 100644
+--- a/Zend/zend_operators.h
++++ b/Zend/zend_operators.h
+@@ -185,7 +185,7 @@ zend_memnstr(const char *haystack, const char *needle, size_t needle_len, const
+ 
+ static zend_always_inline const void *zend_memrchr(const void *s, int c, size_t n)
  {
- 	xmlError error_copy;
- 	int ret;
-@@ -796,7 +801,11 @@
- 	va_end(args);
- }
+-	register const unsigned char *e;
++	const unsigned char *e;
+ 	if (n <= 0) {
+ 		return NULL;
+ 	}
+diff --git a/Zend/zend_string.h b/Zend/zend_string.h
+index e3286e1..f49f1ce 100644
+--- a/Zend/zend_string.h
++++ b/Zend/zend_string.h
+@@ -326,7 +326,7 @@ static zend_always_inline zend_bool zend_string_equals(zend_string *s1, zend_str
  
-+#if LIBXML_VERSION >= 21200
-+PHP_LIBXML_API void php_libxml_structured_error_handler(void *userData, const xmlError *error)
-+#else
- PHP_LIBXML_API void php_libxml_structured_error_handler(void *userData, xmlErrorPtr error)
-+#endif
+ static zend_always_inline zend_ulong zend_inline_hash_func(const char *str, size_t len)
  {
- 	_php_list_set_error_structure(error, NULL);
+-	register zend_ulong hash = Z_UL(5381);
++	zend_ulong hash = Z_UL(5381);
  
-@@ -1074,7 +1083,11 @@
-    Retrieve last error from libxml */
- static PHP_FUNCTION(libxml_get_last_error)
- {
-+#if LIBXML_VERSION >= 21200
-+	const xmlError *error;
-+#else
- 	xmlErrorPtr error;
-+#endif
- 
- 	error = xmlGetLastError();
- 
+ 	/* variant with the hash unrolled eight times */
+ 	for (; len >= 8; len -= 8) {
+diff --git a/ext/dom/document.c b/ext/dom/document.c
+index 1d9c702..5c0aef4 100644
 --- a/ext/dom/document.c
 +++ b/ext/dom/document.c
 @@ -26,7 +26,8 @@
@@ -77,9 +59,11 @@ Origin-Project: php/php-src
  #ifdef LIBXML_SCHEMAS_ENABLED
  #include <libxml/relaxng.h>
  #include <libxml/xmlschemas.h>
+diff --git a/ext/dom/dom_iterators.c b/ext/dom/dom_iterators.c
+index f08d8a4..0c7e263 100644
 --- a/ext/dom/dom_iterators.c
 +++ b/ext/dom/dom_iterators.c
-@@ -42,7 +42,11 @@
+@@ -42,7 +42,11 @@ struct _notationIterator {
  	xmlNotation *notation;
  };
  
@@ -91,59 +75,11 @@ Origin-Project: php/php-src
  {
  	nodeIterator *priv = (nodeIterator *)data;
  
---- a/ext/xmlwriter/php_xmlwriter.c
-+++ b/ext/xmlwriter/php_xmlwriter.c
-@@ -1803,7 +1803,8 @@
- 		}
- 		output_bytes = xmlTextWriterFlush(ptr);
- 		if (buffer) {
--			RETVAL_STRING((char *) buffer->content);
-+			const xmlChar *content = xmlBufferContent(buffer);
-+			RETVAL_STRING((const char *) content);
- 			if (empty) {
- 				xmlBufferEmpty(buffer);
- 			}
---- a/ext/soap/soap.c
-+++ b/ext/soap/soap.c
-@@ -23,6 +23,7 @@
- #include "config.h"
- #endif
- #include "php_soap.h"
-+#include <libxml/encoding.h>
- #if HAVE_PHP_SESSION && !defined(COMPILE_DL_SESSION)
- #include "ext/session/php_session.h"
- #endif
---- a/ext/soap/php_sdl.c
-+++ b/ext/soap/php_sdl.c
-@@ -332,7 +332,11 @@
- 	sdl_restore_uri_credentials(ctx);
- 
- 	if (!wsdl) {
-+#if LIBXML_VERSION >= 21200
-+		const xmlError *xmlErrorPtr = xmlGetLastError();
-+#else
- 		xmlErrorPtr xmlErrorPtr = xmlGetLastError();
-+#endif
- 
- 		if (xmlErrorPtr) {
- 			soap_error2(E_ERROR, "Parsing WSDL: Couldn't load from '%s' : %s", struri, xmlErrorPtr->message);
---- a/ext/intl/breakiterator/codepointiterator_internal.h
-+++ b/ext/intl/breakiterator/codepointiterator_internal.h
-@@ -36,7 +36,11 @@
- 
- 		virtual ~CodePointBreakIterator();
- 
-+#if U_ICU_VERSION_MAJOR_NUM >= 70
-+		virtual bool operator==(const BreakIterator& that) const;
-+#else
- 		virtual UBool operator==(const BreakIterator& that) const;
-+#endif
- 
- 		virtual CodePointBreakIterator* clone(void) const;
- 
+diff --git a/ext/intl/breakiterator/codepointiterator_internal.cpp b/ext/intl/breakiterator/codepointiterator_internal.cpp
+index 723cfd5..25e94c6 100644
 --- a/ext/intl/breakiterator/codepointiterator_internal.cpp
 +++ b/ext/intl/breakiterator/codepointiterator_internal.cpp
-@@ -57,7 +57,7 @@
+@@ -57,7 +57,7 @@ CodePointBreakIterator& CodePointBreakIterator::operator=(const CodePointBreakIt
  		return *this;
  	}
  
@@ -152,7 +88,7 @@ Origin-Project: php/php-src
  
  	//don't bother copying the character iterator, getText() is deprecated
  	clearCurrentCharIter();
-@@ -74,20 +74,24 @@
+@@ -74,20 +74,24 @@ CodePointBreakIterator::~CodePointBreakIterator()
  	clearCurrentCharIter();
  }
  
@@ -180,7 +116,7 @@ Origin-Project: php/php-src
  }
  
  CodePointBreakIterator* CodePointBreakIterator::clone(void) const
-@@ -108,7 +112,7 @@
+@@ -108,7 +112,7 @@ CharacterIterator& CodePointBreakIterator::getText(void) const
  
  UText *CodePointBreakIterator::getUText(UText *fillIn, UErrorCode &status) const
  {
@@ -189,7 +125,7 @@ Origin-Project: php/php-src
  }
  
  void CodePointBreakIterator::setText(const UnicodeString &text)
-@@ -127,7 +131,7 @@
+@@ -127,7 +131,7 @@ void CodePointBreakIterator::setText(UText *text, UErrorCode &status)
  		return;
  	}
  
@@ -198,7 +134,7 @@ Origin-Project: php/php-src
  
  	clearCurrentCharIter();
  }
-@@ -279,7 +283,7 @@
+@@ -279,7 +283,7 @@ CodePointBreakIterator &CodePointBreakIterator::refreshInputText(UText *input, U
  	}
  
  	int64_t pos = utext_getNativeIndex(this->fText);
@@ -207,31 +143,27 @@ Origin-Project: php/php-src
  	if (U_FAILURE(status)) {
  		return *this;
  	}
---- a/ext/intl/timezone/timezone_class.cpp
-+++ b/ext/intl/timezone/timezone_class.cpp
-@@ -321,7 +321,7 @@
+diff --git a/ext/intl/breakiterator/codepointiterator_internal.h b/ext/intl/breakiterator/codepointiterator_internal.h
+index d34fc0a..25759c1 100644
+--- a/ext/intl/breakiterator/codepointiterator_internal.h
++++ b/ext/intl/breakiterator/codepointiterator_internal.h
+@@ -36,7 +36,11 @@ namespace PHP {
  
- 	int32_t rawOffset, dstOffset;
- 	UDate now = Calendar::getNow();
--	tz->getOffset(now, FALSE, rawOffset, dstOffset, uec);
-+	tz->getOffset(now, false, rawOffset, dstOffset, uec);
- 	if (U_FAILURE(uec)) {
- 		return debug_info;
- 	}
---- a/ext/intl/timezone/timezone_methods.cpp
-+++ b/ext/intl/timezone/timezone_methods.cpp
-@@ -91,7 +91,7 @@
- 		RETURN_NULL();
- 	}
+ 		virtual ~CodePointBreakIterator();
  
--	tz = timezone_convert_datetimezone(tzobj->type, tzobj, FALSE, NULL,
-+	tz = timezone_convert_datetimezone(tzobj->type, tzobj, false, NULL,
- 		"intltz_from_date_time_zone");
- 	if (tz == NULL) {
- 		RETURN_NULL();
++#if U_ICU_VERSION_MAJOR_NUM >= 70
++		virtual bool operator==(const BreakIterator& that) const;
++#else
+ 		virtual UBool operator==(const BreakIterator& that) const;
++#endif
+ 
+ 		virtual CodePointBreakIterator* clone(void) const;
+ 
+diff --git a/ext/intl/collator/collator_sort.c b/ext/intl/collator/collator_sort.c
+index 7e7bde6..fecb232 100644
 --- a/ext/intl/collator/collator_sort.c
 +++ b/ext/intl/collator/collator_sort.c
-@@ -344,7 +344,7 @@
+@@ -344,7 +344,7 @@ static void collator_sort_internal( int renumber, INTERNAL_FUNCTION_PARAMETERS )
   */
  PHP_FUNCTION( collator_sort )
  {
@@ -240,7 +172,7 @@ Origin-Project: php/php-src
  }
  /* }}} */
  
-@@ -538,7 +538,7 @@
+@@ -538,7 +538,7 @@ PHP_FUNCTION( collator_sort_with_sort_keys )
   */
  PHP_FUNCTION( collator_asort )
  {
@@ -249,9 +181,11 @@ Origin-Project: php/php-src
  }
  /* }}} */
  
+diff --git a/ext/intl/dateformat/dateformat_attr.c b/ext/intl/dateformat/dateformat_attr.c
+index dffb1b4..d5be3dd 100644
 --- a/ext/intl/dateformat/dateformat_attr.c
 +++ b/ext/intl/dateformat/dateformat_attr.c
-@@ -88,7 +88,7 @@
+@@ -88,7 +88,7 @@ PHP_FUNCTION( datefmt_get_pattern )
  	UChar  value_buf[64];
  	int    length = USIZE( value_buf );
  	UChar* value  = value_buf;
@@ -260,7 +194,7 @@ Origin-Project: php/php-src
  
  	DATE_FORMAT_METHOD_INIT_VARS;
  
-@@ -131,7 +131,7 @@
+@@ -131,7 +131,7 @@ PHP_FUNCTION( datefmt_set_pattern )
  	size_t      value_len = 0;
  	int32_t     slength = 0;
  	UChar*	    svalue  = NULL;
@@ -269,7 +203,7 @@ Origin-Project: php/php-src
  
  
  	DATE_FORMAT_METHOD_INIT_VARS;
-@@ -227,7 +227,7 @@
+@@ -227,7 +227,7 @@ PHP_FUNCTION( datefmt_is_lenient )
   */
  PHP_FUNCTION( datefmt_set_lenient )
  {
@@ -278,9 +212,11 @@ Origin-Project: php/php-src
  
  	DATE_FORMAT_METHOD_INIT_VARS;
  
+diff --git a/ext/intl/normalizer/normalizer_normalize.c b/ext/intl/normalizer/normalizer_normalize.c
+index 52780ac..91cff89 100644
 --- a/ext/intl/normalizer/normalizer_normalize.c
 +++ b/ext/intl/normalizer/normalizer_normalize.c
-@@ -178,7 +178,7 @@
+@@ -178,7 +178,7 @@ PHP_FUNCTION( normalizer_is_normalized )
  	int		uinput_len = 0;
  	UErrorCode	status = U_ZERO_ERROR;
  
@@ -289,9 +225,155 @@ Origin-Project: php/php-src
  
  	intl_error_reset( NULL );
  
+diff --git a/ext/intl/timezone/timezone_class.cpp b/ext/intl/timezone/timezone_class.cpp
+index d1e8e2e..61f4160 100644
+--- a/ext/intl/timezone/timezone_class.cpp
++++ b/ext/intl/timezone/timezone_class.cpp
+@@ -321,7 +321,7 @@ static HashTable *TimeZone_get_debug_info(zval *object, int *is_temp)
+ 
+ 	int32_t rawOffset, dstOffset;
+ 	UDate now = Calendar::getNow();
+-	tz->getOffset(now, FALSE, rawOffset, dstOffset, uec);
++	tz->getOffset(now, false, rawOffset, dstOffset, uec);
+ 	if (U_FAILURE(uec)) {
+ 		return debug_info;
+ 	}
+diff --git a/ext/intl/timezone/timezone_methods.cpp b/ext/intl/timezone/timezone_methods.cpp
+index a35174d..ef04ce3 100644
+--- a/ext/intl/timezone/timezone_methods.cpp
++++ b/ext/intl/timezone/timezone_methods.cpp
+@@ -91,7 +91,7 @@ U_CFUNC PHP_FUNCTION(intltz_from_date_time_zone)
+ 		RETURN_NULL();
+ 	}
+ 
+-	tz = timezone_convert_datetimezone(tzobj->type, tzobj, FALSE, NULL,
++	tz = timezone_convert_datetimezone(tzobj->type, tzobj, false, NULL,
+ 		"intltz_from_date_time_zone");
+ 	if (tz == NULL) {
+ 		RETURN_NULL();
+diff --git a/ext/libxml/libxml.c b/ext/libxml/libxml.c
+index 11e34c1..afe51a8 100644
+--- a/ext/libxml/libxml.c
++++ b/ext/libxml/libxml.c
+@@ -491,8 +491,9 @@ php_libxml_input_buffer_create_filename(const char *URI, xmlCharEncoding enc)
+ static xmlOutputBufferPtr
+ php_libxml_output_buffer_create_filename(const char *URI,
+                               xmlCharEncodingHandlerPtr encoder,
+-                              int compression ATTRIBUTE_UNUSED)
++                              int compression)
+ {
++	(void)compression;
+ 	xmlOutputBufferPtr ret;
+ 	xmlURIPtr puri;
+ 	void *context = NULL;
+@@ -545,7 +546,11 @@ static int _php_libxml_free_error(xmlErrorPtr error)
+ 	return 1;
+ }
+ 
++#if LIBXML_VERSION >= 21200
++static void _php_list_set_error_structure(const xmlError *error, const char *msg)
++#else
+ static void _php_list_set_error_structure(xmlErrorPtr error, const char *msg)
++#endif
+ {
+ 	xmlError error_copy;
+ 	int ret;
+@@ -796,7 +801,11 @@ PHP_LIBXML_API void php_libxml_ctx_warning(void *ctx, const char *msg, ...)
+ 	va_end(args);
+ }
+ 
++#if LIBXML_VERSION >= 21200
++PHP_LIBXML_API void php_libxml_structured_error_handler(void *userData, const xmlError *error)
++#else
+ PHP_LIBXML_API void php_libxml_structured_error_handler(void *userData, xmlErrorPtr error)
++#endif
+ {
+ 	_php_list_set_error_structure(error, NULL);
+ 
+@@ -1074,7 +1083,11 @@ static PHP_FUNCTION(libxml_use_internal_errors)
+    Retrieve last error from libxml */
+ static PHP_FUNCTION(libxml_get_last_error)
+ {
++#if LIBXML_VERSION >= 21200
++	const xmlError *error;
++#else
+ 	xmlErrorPtr error;
++#endif
+ 
+ 	error = xmlGetLastError();
+ 
+diff --git a/ext/libxml/php_libxml.h b/ext/libxml/php_libxml.h
+index db5dfad..1c105ce 100644
+--- a/ext/libxml/php_libxml.h
++++ b/ext/libxml/php_libxml.h
+@@ -39,6 +39,7 @@ extern zend_module_entry libxml_module_entry;
+ 
+ #include "zend_smart_str.h"
+ #include <libxml/tree.h>
++#include <libxml/parser.h>
+ 
+ #define LIBXML_SAVE_NOEMPTYTAG 1<<2
+ 
+diff --git a/ext/soap/php_sdl.c b/ext/soap/php_sdl.c
+index c15b7b4..9fea47d 100644
+--- a/ext/soap/php_sdl.c
++++ b/ext/soap/php_sdl.c
+@@ -332,7 +332,11 @@ static void load_wsdl_ex(zval *this_ptr, char *struri, sdlCtx *ctx, int include)
+ 	sdl_restore_uri_credentials(ctx);
+ 
+ 	if (!wsdl) {
++#if LIBXML_VERSION >= 21200
++		const xmlError *xmlErrorPtr = xmlGetLastError();
++#else
+ 		xmlErrorPtr xmlErrorPtr = xmlGetLastError();
++#endif
+ 
+ 		if (xmlErrorPtr) {
+ 			soap_error2(E_ERROR, "Parsing WSDL: Couldn't load from '%s' : %s", struri, xmlErrorPtr->message);
+diff --git a/ext/soap/soap.c b/ext/soap/soap.c
+index 0450693..4f100ad 100644
+--- a/ext/soap/soap.c
++++ b/ext/soap/soap.c
+@@ -23,6 +23,7 @@
+ #include "config.h"
+ #endif
+ #include "php_soap.h"
++#include <libxml/encoding.h>
+ #if HAVE_PHP_SESSION && !defined(COMPILE_DL_SESSION)
+ #include "ext/session/php_session.h"
+ #endif
+diff --git a/ext/xmlwriter/php_xmlwriter.c b/ext/xmlwriter/php_xmlwriter.c
+index 813fe0b..dde039c 100644
+--- a/ext/xmlwriter/php_xmlwriter.c
++++ b/ext/xmlwriter/php_xmlwriter.c
+@@ -1803,7 +1803,8 @@ static void php_xmlwriter_flush(INTERNAL_FUNCTION_PARAMETERS, int force_string)
+ 		}
+ 		output_bytes = xmlTextWriterFlush(ptr);
+ 		if (buffer) {
+-			RETVAL_STRING((char *) buffer->content);
++			const xmlChar *content = xmlBufferContent(buffer);
++			RETVAL_STRING((const char *) content);
+ 			if (empty) {
+ 				xmlBufferEmpty(buffer);
+ 			}
+diff --git a/main/php.h b/main/php.h
+index 25fffee..947d329 100644
+--- a/main/php.h
++++ b/main/php.h
+@@ -324,7 +324,7 @@ END_EXTERN_C()
+ BEGIN_EXTERN_C()
+ PHPAPI extern int (*php_register_internal_extensions_func)(void);
+ PHPAPI int php_register_internal_extensions(void);
+-PHPAPI int php_mergesort(void *base, size_t nmemb, register size_t size, int (*cmp)(const void *, const void *));
++PHPAPI int php_mergesort(void *base, size_t nmemb, size_t size, int (*cmp)(const void *, const void *));
+ PHPAPI void php_register_pre_request_shutdown(void (*func)(void *), void *userdata);
+ PHPAPI void php_com_initialize(void);
+ PHPAPI char *php_get_current_user(void);
+diff --git a/main/snprintf.h b/main/snprintf.h
+index 3585a37..5e1d86c 100644
 --- a/main/snprintf.h
 +++ b/main/snprintf.h
-@@ -86,7 +86,7 @@
+@@ -86,7 +86,7 @@ PHPAPI int ap_php_vasprintf(char **buf, const char *format, va_list ap);
  PHPAPI int ap_php_asprintf(char **buf, const char *format, ...);
  PHPAPI int php_sprintf (char* s, const char* format, ...) PHP_ATTRIBUTE_FORMAT(printf, 2, 3);
  PHPAPI char * php_gcvt(double value, int ndigit, char dec_point, char exponent, char *buf);
@@ -300,7 +382,7 @@ Origin-Project: php/php-src
  		 boolean_e add_dp, int precision, char dec_point, bool_int * is_negative, char *buf, size_t *len);
  
  END_EXTERN_C()
-@@ -153,11 +153,11 @@
+@@ -153,11 +153,11 @@ typedef enum {
  typedef WIDE_INT wide_int;
  typedef unsigned WIDE_INT u_wide_int;
  
@@ -316,48 +398,3 @@ Origin-Project: php/php-src
  
  /* The maximum precision that's allowed for float conversion. Does not include
   * decimal separator, exponent, sign, terminator. Currently does not affect
---- a/main/php.h
-+++ b/main/php.h
-@@ -324,7 +324,7 @@
- BEGIN_EXTERN_C()
- PHPAPI extern int (*php_register_internal_extensions_func)(void);
- PHPAPI int php_register_internal_extensions(void);
--PHPAPI int php_mergesort(void *base, size_t nmemb, register size_t size, int (*cmp)(const void *, const void *));
-+PHPAPI int php_mergesort(void *base, size_t nmemb, size_t size, int (*cmp)(const void *, const void *));
- PHPAPI void php_register_pre_request_shutdown(void (*func)(void *), void *userdata);
- PHPAPI void php_com_initialize(void);
- PHPAPI char *php_get_current_user(void);
---- a/Zend/zend_operators.h
-+++ b/Zend/zend_operators.h
-@@ -185,7 +185,7 @@
- 
- static zend_always_inline const void *zend_memrchr(const void *s, int c, size_t n)
- {
--	register const unsigned char *e;
-+	const unsigned char *e;
- 	if (n <= 0) {
- 		return NULL;
- 	}
---- a/Zend/zend_hash.h
-+++ b/Zend/zend_hash.h
-@@ -248,7 +248,7 @@
- 
- static zend_always_inline int _zend_handle_numeric_str(const char *key, size_t length, zend_ulong *idx)
- {
--	register const char *tmp = key;
-+	const char *tmp = key;
- 
- 	if (*tmp > '9') {
- 		return 0;
---- a/Zend/zend_string.h
-+++ b/Zend/zend_string.h
-@@ -323,7 +323,7 @@
- 
- static zend_always_inline zend_ulong zend_inline_hash_func(const char *str, size_t len)
- {
--	register zend_ulong hash = Z_UL(5381);
-+	zend_ulong hash = Z_UL(5381);
- 
- 	/* variant with the hash unrolled eight times */
- 	for (; len >= 8; len -= 8) {
- 

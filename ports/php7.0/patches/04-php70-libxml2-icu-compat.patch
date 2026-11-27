@@ -288,6 +288,7 @@ Origin-Project: php/php-src
 +	UBool		uret = 0;
  
  	intl_error_reset( NULL );
+ 
 --- a/main/snprintf.h
 +++ b/main/snprintf.h
 @@ -86,7 +86,7 @@

@@ -1155,10 +1155,55 @@ module PortPackager
         SH
         bash_cmd = [bash_bin, "-eEuo", "pipefail", "-c", smoke_script]
         bash_cmd = [timeout_bin, "120", *bash_cmd] if timeout_bin
+        panics_dir = ENV.fetch("FILC_PANICS_DIR", "/var/filc/panics")
+        begin
+          FileUtils.mkdir_p(panics_dir)
+        rescue StandardError
+          nil
+        end
+        panics_before = File.directory?(panics_dir) ? Dir.children(panics_dir).each_with_object({}) { |n, h| h[n] = true } : {}
         out_err, st = Open3.capture2e(smoke_env, *bash_cmd)
         unless st.success?
           tail = out_err.lines.last(80).join.strip
-          errors << "port_package_smoke failed (exit=#{st.exitstatus}):\n#{tail}"
+          panic_blocks = []
+          if File.directory?(panics_dir)
+            new_panics = Dir.children(panics_dir).reject { |n| panics_before[n] || n.start_with?(".") }
+            primary = []
+            conftest = []
+            new_panics.each do |fname|
+              ppath = File.join(panics_dir, fname)
+              next unless File.file?(ppath)
+
+              exe_line = nil
+              File.open(ppath, "rb") do |f|
+                5.times do
+                  ln = f.gets
+                  break unless ln
+                  if ln.start_with?("executable:")
+                    exe_line = ln.sub(/\Aexecutable:\s*/, "").strip
+                    break
+                  end
+                end
+              end
+              if (exe_line && File.basename(exe_line) == "conftest") || fname.include?("-conftest-")
+                conftest << fname
+              else
+                mtime = (File.mtime(ppath).to_f rescue 0.0)
+                primary << [mtime, fname, ppath]
+              end
+            end
+            primary.sort_by { |mtime, fname, _| [-mtime, fname] }.first(3).each_with_index do |(_, fname, ppath), idx|
+              plines = File.binread(ppath).force_encoding("UTF-8").encode("UTF-8", invalid: :replace, undef: :replace).lines
+              excerpt = (idx == 0 || plines.length <= 60) ? plines : (plines.first(40) + ["... (#{plines.length - 60} lines omitted)\n"] + plines.last(20))
+              panic_blocks << "--- FIL-C PANIC REPORT (#{ppath}) ---\n#{excerpt.join.chomp}\n--- END FIL-C PANIC REPORT (#{fname}) ---"
+            end
+            unless conftest.empty?
+              panic_blocks << "--- FIL-C CONFTEST PANICS (count=#{conftest.length}): #{conftest.sort.join(', ')} ---"
+            end
+          end
+          msg = "port_package_smoke failed (exit=#{st.exitstatus}):\n#{tail}"
+          msg = "#{msg}\n#{panic_blocks.join("\n")}" unless panic_blocks.empty?
+          errors << msg
         end
       end
     end

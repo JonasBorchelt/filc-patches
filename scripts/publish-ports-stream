@@ -959,6 +959,15 @@ module PublishPortsStream
     total = lines.length
     return lines if total <= max_lines
 
+    # When build-port dumped a Fil-C panic report at the end of the log, preserve
+    # the primary report completely unabridged together with the preceding failure lines.
+    panic_start = lines.index { |ln| ln.start_with?("--- FIL-C PANIC REPORT (") }
+    if panic_start
+      win_start = [panic_start - 10, 0].max
+      slice = lines[win_start..]
+      return slice.length <= 240 ? slice : (slice.first(220) + slice.last(20))
+    end
+
     tail_start = total - max_lines
     first_test_anchor = lines.index { |ln| TEST_HARNESS_FAIL_RE.match?(ln) }
     if first_test_anchor && (stage == "test" || first_test_anchor < tail_start) && first_test_anchor < tail_start

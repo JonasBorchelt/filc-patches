@@ -37,6 +37,17 @@ STATE_DIR="$WORK_ROOT/ports-state"
 BUILD_BASE="$WORK_ROOT/ports-build"
 mkdir -p "$CACHE_DIR" "$STATE_DIR" "$BUILD_BASE"
 
+# Ensure the Fil-C runtime panic report directory exists before building so
+# safety panics remain readable even when a failing program has closed fd 2.
+FILC_PANICS_DIR="${FILC_PANICS_DIR:-/var/filc/panics}"
+mkdir -p "$FILC_PANICS_DIR" 2>/dev/null || true
+PANIC_SNAPSHOT="$STATE_DIR/$PORT_NAME.panics-before.$$"
+if [[ -d "$FILC_PANICS_DIR" ]]; then
+  ls -1 "$FILC_PANICS_DIR" 2>/dev/null | sort > "$PANIC_SNAPSHOT" || : > "$PANIC_SNAPSHOT"
+else
+  : > "$PANIC_SNAPSHOT"
+fi
+
 # Locate Stage 5 Fil-C toolchain
 if [[ -n "${FILC_TOOLCHAIN_ROOT:-}" ]]; then
   TOOLCHAIN_ROOT="$FILC_TOOLCHAIN_ROOT"
@@ -360,6 +371,82 @@ save_clang_crash_reproducers() {
   fi
 }
 
+dump_filc_panics() {
+  [[ -d "${FILC_PANICS_DIR:-}" && -f "${PANIC_SNAPSHOT:-}" ]] || return 0
+  "$HOST_RUBY" - "$FILC_PANICS_DIR" "$PANIC_SNAPSHOT" "$BUILD_BASE" "$PORT_NAME" >&2 <<'RB' || true
+panics_dir, snap_file, build_base, port_name = ARGV
+before = {}
+if File.file?(snap_file)
+  File.readlines(snap_file, chomp: true).each { |n| before[n] = true unless n.empty? }
+end
+new_files = Dir.children(panics_dir).reject { |n| before[n] || n.start_with?(".") }.sort
+exit 0 if new_files.empty?
+
+own_prefix = File.join(build_base, port_name) + "/"
+other_prefix = build_base.end_with?("/") ? build_base : "#{build_base}/"
+build_base_real = File.directory?(build_base) ? File.realpath(build_base) : build_base
+own_real = File.join(build_base_real, port_name) + "/"
+other_real = build_base_real.end_with?("/") ? build_base_real : "#{build_base_real}/"
+
+primary = []
+conftest = []
+new_files.each do |fname|
+  path = File.join(panics_dir, fname)
+  next unless File.file?(path)
+
+  exe_line = nil
+  File.open(path, "rb") do |f|
+    5.times do
+      ln = f.gets
+      break unless ln
+      if ln.start_with?("executable:")
+        exe_line = ln.sub(/\Aexecutable:\s*/, "").strip
+        break
+      end
+    end
+  end
+  if exe_line && ((exe_line.start_with?(other_prefix) && !exe_line.start_with?(own_prefix)) ||
+                  (exe_line.start_with?(other_real) && !exe_line.start_with?(own_real)))
+    next
+  end
+
+  is_conftest = (exe_line && File.basename(exe_line) == "conftest") || fname.include?("-conftest-")
+  mtime = begin
+    File.mtime(path).to_f
+  rescue StandardError
+    0.0
+  end
+  if is_conftest
+    conftest << fname
+  else
+    primary << [mtime, fname, path]
+  end
+end
+
+# Print the most recent non-conftest panic first and completely unabridged so
+# the actual failing command's report is never buried or truncated.
+primary.sort_by { |mtime, fname, _| [-mtime, fname] }.first(5).each_with_index do |(_, fname, path), idx|
+  lines = File.binread(path)
+              .force_encoding("UTF-8")
+              .encode("UTF-8", invalid: :replace, undef: :replace)
+              .lines
+  puts "--- FIL-C PANIC REPORT (#{path}) ---"
+  if idx == 0 || lines.length <= 60
+    puts lines
+  else
+    puts lines.first(40)
+    puts "... (#{lines.length - 60} lines omitted)"
+    puts lines.last(20)
+  end
+  puts "--- END FIL-C PANIC REPORT (#{fname}) ---"
+end
+
+unless conftest.empty?
+  puts "--- FIL-C CONFTEST PANICS (count=#{conftest.length}): #{conftest.sort.join(', ')} ---"
+end
+RB
+}
+
 classify_failure_kind() {
   local stage="$1"
   local rc="$2"
@@ -394,12 +481,14 @@ on_exit() {
     elif [[ "$CURRENT_STAGE" == "build" ]]; then
       save_clang_crash_reproducers || true
     fi
+    dump_filc_panics || true
     local dur=$(( $(date +%s) - T_START ))
     echo "FILC_PORT $PORT_NAME failed:$fkind policy=$POLICY_CLASS duration=$dur stage=$CURRENT_STAGE rc=$rc" >&2
     if ! write_state "failed" "$CURRENT_STAGE" "$fkind"; then
       echo "warning: write_state failed for $PORT_NAME ($STATE_DIR/$PORT_NAME.json)" >&2
     fi
   fi
+  rm -f "${PANIC_SNAPSHOT:-}" 2>/dev/null || true
 }
 trap on_exit EXIT
 

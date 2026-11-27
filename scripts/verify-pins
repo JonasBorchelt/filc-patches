@@ -257,6 +257,12 @@ def validate_metadata(name: str, meta: dict, repo_root: str) -> list:
         dsc_sha = meta.get("DEBIAN_DSC_SHA256", "")
         if dsc_sha and not SHA256_RE.match(dsc_sha):
             errors.append(f"{name}: invalid DEBIAN_DSC_SHA256={dsc_sha!r}")
+        for bspec in meta.get("DEBIAN_BINARY_TARBALLS", "").split():
+            parts = bspec.split(":", 1)
+            bname = parts[0] if len(parts) == 2 else ""
+            bsha = parts[1] if len(parts) == 2 else ""
+            if not bname or "/" in bname or ".." in bname or not SHA256_RE.match(bsha):
+                errors.append(f"{name}: invalid DEBIAN_BINARY_TARBALLS entry {bspec!r}")
 
         key_abs = os.path.join(repo_root, spec["key"])
         if not os.path.isfile(key_abs):

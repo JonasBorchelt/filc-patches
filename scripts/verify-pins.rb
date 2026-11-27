@@ -282,6 +282,12 @@ def validate_metadata(name, meta, repo_root)
     if !dsc_sha.empty? && !SHA256_RE.match?(dsc_sha)
       errors << "#{name}: invalid DEBIAN_DSC_SHA256=#{py_repr(dsc_sha)}"
     end
+    meta.fetch("DEBIAN_BINARY_TARBALLS", "").split.each do |bspec|
+      bname, bsha = bspec.split(":", 2)
+      if bname.nil? || bname.empty? || bname.include?("/") || bname.include?("..") || !SHA256_RE.match?(bsha.to_s)
+        errors << "#{name}: invalid DEBIAN_BINARY_TARBALLS entry #{py_repr(bspec)}"
+      end
+    end
 
     key_abs = File.expand_path(spec["key"], repo_root)
     if !File.file?(key_abs)

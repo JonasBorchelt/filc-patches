@@ -225,13 +225,14 @@ end
 def verify_port_patches(name, meta, port_dir, cache_dir, cached_only)
   patches = read_series(port_dir)
   deb_patches = meta.fetch("DEBIAN_SECURITY_PATCHES", "").split.reject(&:empty?)
-  return "SKIP [no-patches] #{name} #{meta['VERSION']}" if patches.empty? && deb_patches.empty?
+  deb_binaries = meta.fetch("DEBIAN_BINARY_TARBALLS", "").split.reject(&:empty?)
+  return "SKIP [no-patches] #{name} #{meta['VERSION']}" if patches.empty? && deb_patches.empty? && deb_binaries.empty?
 
   tarball_path = ensure_tarball(meta, cache_dir, cached_only)
   return "SKIP [uncached] #{name} #{meta['VERSION']}" if tarball_path.nil?
 
   deb_tarball_path = nil
-  unless deb_patches.empty?
+  unless deb_patches.empty? && deb_binaries.empty?
     deb_tarball_path = ensure_debian_tarball(meta, cache_dir, cached_only)
     return "SKIP [uncached] #{name} #{meta['VERSION']}" if deb_tarball_path.nil?
   end
@@ -240,7 +241,7 @@ def verify_port_patches(name, meta, port_dir, cache_dir, cached_only)
   targets = extract_patch_targets(patches)
 
   Dir.mktmpdir("filc-vpatch-#{name}-") do |td|
-    if deb_patches.empty?
+    if deb_patches.empty? && deb_binaries.empty?
       members = targets.map { |t| "#{extract_dir}/#{t}" }
       # Fast selective extract first; fall back to full extract if a patch creates new files
       _sout, _serr, sel_status = Open3.capture3("tar", "-xf", tarball_path, "-C", td, *members)
@@ -256,7 +257,7 @@ def verify_port_patches(name, meta, port_dir, cache_dir, cached_only)
     src_dir = File.join(td, extract_dir)
     raise "#{name}: extract dir #{extract_dir.inspect} not found in #{tarball_path}" unless File.directory?(src_dir)
 
-    unless deb_patches.empty?
+    unless deb_patches.empty? && deb_binaries.empty?
       deb_dir = File.join(td, "_debian")
       FileUtils.mkdir_p(deb_dir)
       _dout, derr, dstatus = Open3.capture3("tar", "-xf", deb_tarball_path, "-C", deb_dir)
@@ -278,6 +279,37 @@ def verify_port_patches(name, meta, port_dir, cache_dir, cached_only)
           ].join("\n").strip
           raise "#{name}/debian:#{dp}: patch failed (rc=#{status.exitstatus}):\n#{combined}"
         end
+      end
+
+      deb_binaries.each do |bspec|
+        bname, bsha = bspec.split(":", 2)
+        if bname.nil? || bname.empty? || bname.include?("/") || bname.include?("..")
+          raise "#{name}: unsafe DEBIAN_BINARY_TARBALLS entry: #{bspec.inspect}"
+        end
+        unless /\A[0-9a-f]{64}\z/.match?(bsha.to_s)
+          raise "#{name}: invalid SHA-256 in DEBIAN_BINARY_TARBALLS for #{bname}: #{bsha.inspect}"
+        end
+
+        bfile = File.join(deb_dir, "debian", bname)
+        raise "#{name}: Debian ELTS binary tarball missing: #{bname}" unless File.file?(bfile)
+
+        actual_bsha = sha256_file(bfile)
+        if actual_bsha != bsha
+          raise "#{name}: SHA-256 mismatch for Debian ELTS binary tarball #{bname}: expected #{bsha}, got #{actual_bsha}"
+        end
+
+        list_out, list_err, list_st = Open3.capture3("tar", "-tf", bfile)
+        raise "#{name}: tar -tf failed for #{bname}: #{list_err.strip}" unless list_st.success?
+
+        list_out.each_line do |mraw|
+          member = mraw.strip
+          next if member.empty?
+          if member.start_with?("/") || member.split("/").include?("..")
+            raise "#{name}: unsafe tar member in #{bname}: #{member.inspect}"
+          end
+        end
+        _bout, berr, bst = Open3.capture3("tar", "-xf", bfile, "-C", src_dir)
+        raise "#{name}: tar -xf failed for #{bname}: #{berr.strip}" unless bst.success?
       end
     end
 

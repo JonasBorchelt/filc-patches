@@ -117,6 +117,7 @@ DEBIAN_TARBALL_URL=""
 DEBIAN_TARBALL_SHA256=""
 DEBIAN_DSC_SHA256=""
 DEBIAN_SECURITY_PATCHES=""
+DEBIAN_BINARY_TARBALLS=""
 
 # shellcheck source=/dev/null
 source "$PORT_FILE"
@@ -588,6 +589,49 @@ if [[ -n "$DEBIAN_TARBALL_URL" ]]; then
     DEB_APPLIED=$((DEB_APPLIED + 1))
   done
   echo "Applied $DEB_APPLIED Debian ELTS security patch(es)"
+  DEB_BIN_EXTRACTED=0
+  for bspec in $DEBIAN_BINARY_TARBALLS; do
+    if [[ "$bspec" != *:* ]]; then
+      echo "error: invalid DEBIAN_BINARY_TARBALLS entry (expected <filename>:<sha256>): $bspec" >&2
+      exit 1
+    fi
+    bname="${bspec%%:*}"
+    bsha="${bspec#*:}"
+    if [[ -z "$bname" || "$bname" == */* || "$bname" == *".."* ]]; then
+      echo "error: unsafe DEBIAN_BINARY_TARBALLS filename: $bname" >&2
+      exit 1
+    fi
+    if [[ ! "$bsha" =~ ^[0-9a-f]{64}$ ]]; then
+      echo "error: invalid SHA-256 in DEBIAN_BINARY_TARBALLS for $bname: $bsha" >&2
+      exit 1
+    fi
+    bfile="$DEB_EXTRACT_DIR/debian/$bname"
+    if [[ ! -f "$bfile" ]]; then
+      echo "error: Debian ELTS binary tarball not found in debian/: $bfile" >&2
+      exit 1
+    fi
+    actual_bsha="$(compute_sha256 "$bfile")"
+    if [[ "$actual_bsha" != "$bsha" ]]; then
+      echo "error: SHA-256 mismatch for Debian ELTS binary tarball $bname (expected=$bsha, actual=$actual_bsha)" >&2
+      exit 1
+    fi
+    while IFS= read -r member; do
+      [[ -z "$member" ]] && continue
+      if [[ "$member" == /* || "$member" == *".."* ]]; then
+        echo "error: unsafe member path in $bname: $member" >&2
+        exit 1
+      fi
+    done < <(tar -tf "$bfile")
+    echo "Extracting verified Debian ELTS binary tarball: $bname ($actual_bsha)"
+    tar -xf "$bfile" -C "$SRC_DIR"
+    DEB_BIN_EXTRACTED=$((DEB_BIN_EXTRACTED + 1))
+  done
+  if [[ "$DEB_BIN_EXTRACTED" -gt 0 ]]; then
+    echo "Extracted $DEB_BIN_EXTRACTED Debian ELTS binary tarball(s)"
+  fi
+elif [[ -n "$DEBIAN_BINARY_TARBALLS" ]]; then
+  echo "error: $PORT_FILE sets DEBIAN_BINARY_TARBALLS without DEBIAN_TARBALL_URL" >&2
+  exit 1
 fi
 if [[ -f "$PORT_DIR/patches/series" ]]; then
   while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do

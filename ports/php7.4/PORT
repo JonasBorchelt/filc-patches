@@ -25,6 +25,18 @@ POLICY_RATIONALE="EOL legacy PHP 7.4 built from Freexian Extended LTS bullseye (
 FILC_ORIGIN_REF="8553fcd026b9:projects/php.projeny"
 
 port_configure() {
+  # PHP 7.x ext/iconv/config.m4 falls back to /usr/local /usr and unconditionally
+  # prepends -I$PHP_ICONV_PREFIX/include and -L$PHP_ICONV_PREFIX/lib to CFLAGS
+  # and LDFLAGS whenever libc provides iconv() (leaving ICONV_DIR empty). Under
+  # Fil-C that poisons subsequent configure probes with host glibc headers.
+  "${HOST_RUBY:-ruby}" -e '
+    p = "configure"
+    s = File.binread(p)
+    pat = %r{for i in /usr/local /usr; do\s*\n\s*if test -f "\$i/include/iconv\.h" \|\| test -f "\$i/include/giconv\.h"; then\s*\n\s*PHP_ICONV_PREFIX="\$i"\s*\n\s*break\s*\n\s*fi\s*\n\s*done\s*\n\s*if test -z "\$PHP_ICONV_PREFIX"; then\s*\n\s*PHP_ICONV_PREFIX="/usr"\s*\n\s*fi}
+    matches = s.scan(pat).length
+    raise "ext/iconv /usr prefix fallback not found in configure (matches=#{matches})" unless matches == 1
+    File.binwrite(p, s.sub(pat, "PHP_ICONV_PREFIX=\"$prefix\""))
+  '
   local ossl_cflags ossl_libs
   ossl_cflags="$(PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" "$PIZFIX/bin/pkg-config" --define-prefix --cflags openssl11)"
   ossl_libs="$(PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" "$PIZFIX/bin/pkg-config" --define-prefix --libs openssl11)"
@@ -71,6 +83,10 @@ port_configure() {
       --enable-exif \
       --enable-pcntl \
       --enable-sockets
+  if grep -En -- '(^|[[:space:]"'"'"'])(-I["'"'"']?/usr/(local/)?include|-L["'"'"']?/usr/(local/)?lib(64)?)([[:space:]"'"'"'/]|$)' Makefile config.status >&2; then
+    echo "error: host /usr include or lib path leaked into php7.4 Makefile/config.status" >&2
+    return 1
+  fi
 }
 
 port_test() {
@@ -139,6 +155,7 @@ assert(preg_match('/^([a-z]+)-(\d+)$/', 'filc-74', $matches) === 1 && $matches[2
 assert(json_decode(json_encode(["ok" => [1, 2, 3]]), true)["ok"] === [1, 2, 3]);
 assert(is_array(curl_version()) && !empty(curl_version()["version"]));
 assert(mb_strlen("hällo", "UTF-8") === 5);
+assert(iconv("UTF-8", "ISO-8859-1", "h\xc3\xa4llo") === "h\xe4llo");
 assert(mb_ereg_replace("([0-9]+)", "[\\1]", "v74") === "v[74]");
 assert((new Collator("en_US"))->compare("a", "b") < 0);
 assert(strlen(sodium_crypto_generichash("filc-sodium")) === SODIUM_CRYPTO_GENERICHASH_BYTES);

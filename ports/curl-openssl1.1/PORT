@@ -1,0 +1,420 @@
+NAME="curl-openssl1.1"
+VERSION="8.23.0"
+LICENSE="curl"
+SUPPORT_STATUS="eol"
+EOL_DATE="2023-09-11"
+SECURITY_SOURCE="freexian-elts"
+UPSTREAM_URL="https://github.com/curl/curl/releases/download/curl-8_23_0/curl-8.23.0.tar.xz"
+UPSTREAM_SHA256="8dadd7d2536a314f982ad05a651b713f426bf7d02cc2c76cffb9796f2218e6c5"
+UPSTREAM_SHA256_SOURCE="pgp:https://github.com/curl/curl/releases/download/curl-8_23_0/curl-8.23.0.tar.xz.asc key:ports/pgp-keys/curl-release-key.asc fpr:27EDEAF22F3ABCEB50DB9A125CC908FDB71E12C2"
+UPSTREAM_SIG_URL="https://github.com/curl/curl/releases/download/curl-8_23_0/curl-8.23.0.tar.xz.asc"
+UPSTREAM_PGP_KEY="ports/pgp-keys/curl-release-key.asc"
+UPSTREAM_PGP_FPR="27EDEAF22F3ABCEB50DB9A125CC908FDB71E12C2"
+EXTRACT_DIR="curl-8.23.0"
+TIER=4
+DEPS="openssl1.1 nghttp2 zlib zstd brotli libidn2 pkgconf"
+BUILD_SYSTEM="autotools"
+CONFIGURE_ARGS="--disable-shared --enable-static --with-openssl --with-nghttp2 --with-zlib --with-zstd --with-brotli --with-libidn2 --without-libpsl --enable-websockets"
+MAKE_ARGS=""
+INSTALL_ARGS=""
+TEST_CMD=""
+POLICY_CLASS="P3-BuildOpt"
+POLICY_RATIONALE="Static libcurl.a variant of curl 8.23.0 (0 patches) built against openssl1.1 and installed side-by-side under opt/openssl1.1/ so legacy PHP 7.x/5.6 ports link exclusively against OpenSSL 1.1.1w without loading OpenSSL 3 into the same musl process (musl ignores ELF symbol versioning)."
+FILC_ORIGIN_REF="cede3de02b42:projects/curl.projeny"
+
+port_configure() {
+  CPPFLAGS="-I$PIZFIX/opt/openssl1.1/include -I$PIZFIX/include" \
+    LDFLAGS="-L$PIZFIX/opt/openssl1.1/lib -L$PIZFIX/lib -Wl,-rpath,$PIZFIX/lib" \
+    PKG_CONFIG_PATH="$PIZFIX/opt/openssl1.1/lib/pkgconfig:$PIZFIX/lib/pkgconfig" \
+    ./configure --prefix="$PIZFIX/opt/openssl1.1" \
+      --disable-shared \
+      --enable-static \
+      --with-openssl="$PIZFIX/opt/openssl1.1" \
+      --with-nghttp2="$PIZFIX" \
+      --with-zlib="$PIZFIX" \
+      --with-zstd="$PIZFIX" \
+      --with-brotli="$PIZFIX" \
+      --with-libidn2="$PIZFIX" \
+      --without-libpsl \
+      --enable-websockets \
+      --with-ca-bundle=/etc/ssl/certs/ca-certificates.crt \
+      --with-ca-path=/etc/ssl/certs
+}
+
+port_install() {
+  make -j"$JOBS" install
+  rm -f "$PIZFIX/opt/openssl1.1/lib/libcurl.la"
+  mkdir -p "$PIZFIX/lib/pkgconfig"
+
+  "${HOST_RUBY:-ruby}" - "$PIZFIX" "$VERSION" <<'RB'
+pizfix, fallback_ver = ARGV
+opt_pc = File.join(pizfix, "opt/openssl1.1/lib/pkgconfig/libcurl.pc")
+top_pc = File.join(pizfix, "lib/pkgconfig/libcurl11.pc")
+cfg_bin = File.join(pizfix, "opt/openssl1.1/bin/curl-config")
+
+raw = File.read(opt_pc, encoding: "UTF-8")
+ver = raw[/^Version:\s*(.+)$/, 1]&.strip || fallback_ver
+protos = raw[/^supported_protocols="([^"]*)"/, 1] || ""
+feats = raw[/^supported_features="([^"]*)"/, 1] || ""
+
+libs_line = raw[/^Libs:\s*(.+)$/, 1].to_s
+priv_line = raw[/^Libs\.private:\s*(.+)$/, 1].to_s
+extra_lflags = (libs_line.split + priv_line.split).select { |t| t.start_with?("-l") && t != "-lcurl" }
+base_lflags = %w[-lssl -lcrypto -lnghttp2 -lz -lzstd -lbrotlidec -lbrotlicommon -lidn2]
+dep_lflags = (base_lflags + extra_lflags).uniq
+dep_libs_str = dep_lflags.join(" ")
+
+opt_pc_body = <<~PC
+  prefix=${pcfiledir}/../..
+  exec_prefix=${prefix}
+  libdir=${exec_prefix}/lib
+  includedir=${prefix}/include
+  pizfix=${prefix}/../..
+  supported_protocols="#{protos}"
+  supported_features="#{feats}"
+
+  Name: libcurl
+  URL: https://curl.se/
+  Description: Library to transfer files with HTTP, FTP, etc. (static, OpenSSL 1.1.1)
+  Version: #{ver}
+  Libs: -L${libdir} -lcurl -L${pizfix}/lib #{dep_libs_str}
+  Libs.private: -L${libdir} -L${pizfix}/lib #{dep_libs_str}
+  Cflags: -I${includedir}
+PC
+
+top_pc_body = <<~PC
+  prefix=${pcfiledir}/../..
+  exec_prefix=${prefix}/opt/openssl1.1
+  libdir=${exec_prefix}/lib
+  includedir=${exec_prefix}/include
+  supported_protocols="#{protos}"
+  supported_features="#{feats}"
+
+  Name: libcurl11
+  URL: https://curl.se/
+  Description: Library to transfer files with HTTP, FTP, etc. (static, OpenSSL 1.1.1)
+  Version: #{ver}
+  Libs: -L${libdir} -lcurl -L${prefix}/lib #{dep_libs_str}
+  Libs.private: -L${libdir} -L${prefix}/lib #{dep_libs_str}
+  Cflags: -I${includedir}
+PC
+
+File.write(opt_pc, opt_pc_body, encoding: "UTF-8")
+File.write(top_pc, top_pc_body, encoding: "UTF-8")
+
+ver_parts = ver.split(".").map(&:to_i)
+vernum = format("%02x%02x%02x", ver_parts[0] || 0, ver_parts[1] || 0, ver_parts[2] || 0)
+sh_esc = lambda { |s| s.gsub("'", %q('"'"')) }
+
+cfg_body = <<~SH
+  #!/bin/sh
+  set -eu
+  prefix="$(cd "$(dirname "$0")/.." && pwd -P)"
+  pizfix="$(cd "$prefix/../.." && pwd -P)"
+  version='#{sh_esc.call(ver)}'
+  vernum='#{vernum}'
+  protocols='#{sh_esc.call(protos)}'
+  features='#{sh_esc.call(feats)}'
+  dep_libs='#{sh_esc.call(dep_libs_str)}'
+
+  if [ "$#" -eq 0 ]; then
+    echo "Usage: curl-config [--version|--vernum|--prefix|--cflags|--libs|--static-libs|--feature|--features|--protocols|--ssl-backends|--built-shared|--ca|--checkfor VER]" >&2
+    exit 1
+  fi
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --prefix)
+        printf '%s\\n' "$prefix"
+        ;;
+      --version)
+        printf 'libcurl %s\\n' "$version"
+        ;;
+      --vernum)
+        printf '%s\\n' "$vernum"
+        ;;
+      --cflags)
+        printf '%s\\n' "-I$prefix/include"
+        ;;
+      --libs)
+        printf '%s\\n' "-L$prefix/lib -lcurl -L$pizfix/lib $dep_libs"
+        ;;
+      --static-libs)
+        printf '%s\\n' "$prefix/lib/libcurl.a -L$prefix/lib -L$pizfix/lib $dep_libs"
+        ;;
+      --feature|--features)
+        for f in $features; do
+          printf '%s\\n' "$f"
+        done
+        ;;
+      --protocols)
+        for p in $protocols; do
+          printf '%s\\n' "$p"
+        done
+        ;;
+      --ssl-backends)
+        printf '%s\\n' "OpenSSL"
+        ;;
+      --built-shared)
+        printf '%s\\n' "no"
+        ;;
+      --ca)
+        printf '%s\\n' "/etc/ssl/certs/ca-certificates.crt"
+        ;;
+      --checkfor)
+        shift
+        req="$1"
+        req_num="$(printf '%s\\n' "$req" | awk -F. '{ printf "%d", ($1 * 1000 + $2) * 1000 + $3 }')"
+        cur_num="$(printf '%s\\n' "$version" | awk -F. '{ printf "%d", ($1 * 1000 + $2) * 1000 + $3 }')"
+        if [ "$cur_num" -lt "$req_num" ]; then
+          echo "requested version $req is newer than existing $version" >&2
+          exit 1
+        fi
+        ;;
+      *)
+        echo "unknown option: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+SH
+
+File.write(cfg_bin, cfg_body, encoding: "UTF-8")
+File.chmod(0o755, cfg_bin)
+RB
+}
+
+port_test() {
+  local curl_bin cfg_bin ver td
+  curl_bin="$PIZFIX/opt/openssl1.1/bin/curl"
+  cfg_bin="$PIZFIX/opt/openssl1.1/bin/curl-config"
+
+  test -f "$PIZFIX/opt/openssl1.1/lib/libcurl.a"
+  if ls "$PIZFIX/opt/openssl1.1/lib"/libcurl.so* >/dev/null 2>&1; then
+    echo "error: unexpected shared libcurl.so installed under opt/openssl1.1/lib" >&2
+    return 1
+  fi
+
+  ver="$("$curl_bin" --version)"
+  printf '%s\n' "$ver"
+  printf '%s\n' "$ver" | grep -q 'OpenSSL/1\.1\.1w'
+  printf '%s\n' "$ver" | grep -q 'HTTP2'
+  printf '%s\n' "$ver" | grep -q 'zstd'
+  printf '%s\n' "$ver" | grep -q 'brotli'
+
+  "$cfg_bin" --feature | grep -qx 'SSL'
+  "$cfg_bin" --built-shared | grep -qx 'no'
+  "$cfg_bin" --libs | grep -Fq -- '-lcurl'
+  PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" "$PIZFIX/bin/pkg-config" --define-prefix --libs libcurl11 | grep -Fq 'opt/openssl1.1/lib'
+  PKG_CONFIG_PATH="$PIZFIX/opt/openssl1.1/lib/pkgconfig" "$PIZFIX/bin/pkg-config" --define-prefix --variable=supported_features libcurl | grep -qw 'SSL'
+
+  "${HOST_PYTHON3:-/usr/bin/python3}" - "$PIZFIX" "$curl_bin" <<'PY'
+import os, struct, sys
+
+pizfix, bin_path = sys.argv[1], sys.argv[2]
+search_dirs = [os.path.join(pizfix, "lib"), os.path.join(pizfix, "opt/openssl1.1/lib")]
+
+def read_needed(path):
+    with open(path, "rb") as f:
+        data = f.read()
+    assert data[:4] == b"\x7fELF" and data[4] == 2, f"not ELF64: {path}"
+    e_phoff = struct.unpack_from("<Q", data, 32)[0]
+    e_phentsize, e_phnum = struct.unpack_from("<HH", data, 54)
+    loads = []
+    dyn = None
+    for i in range(e_phnum):
+        off = e_phoff + i * e_phentsize
+        p_type, _p_flags, p_offset, p_vaddr, _p_paddr, p_filesz, _p_memsz, _p_align = struct.unpack_from("<IIQQQQQQ", data, off)
+        if p_type == 1:
+            loads.append((p_vaddr, p_filesz, p_offset))
+        elif p_type == 2:
+            dyn = (p_offset, p_filesz)
+    if not dyn:
+        return []
+    dyn_off, dyn_sz = dyn
+    needed_offs = []
+    strtab_va = None
+    for pos in range(dyn_off, dyn_off + dyn_sz, 16):
+        d_tag, d_val = struct.unpack_from("<qQ", data, pos)
+        if d_tag == 0:
+            break
+        elif d_tag == 1:
+            needed_offs.append(d_val)
+        elif d_tag == 5:
+            strtab_va = d_val
+    if strtab_va is None:
+        return []
+    strtab_off = None
+    for vaddr, filesz, offset in loads:
+        if vaddr <= strtab_va < vaddr + filesz:
+            strtab_off = offset + (strtab_va - vaddr)
+            break
+    assert strtab_off is not None, f"DT_STRTAB not mapped in {path}"
+    out = []
+    for noff in needed_offs:
+        start = strtab_off + noff
+        end = data.index(b"\x00", start)
+        out.append(data[start:end].decode("ascii", "replace"))
+    return out
+
+seen_libs = set()
+queue = [bin_path]
+visited_paths = set()
+while queue:
+    cur = queue.pop(0)
+    real = os.path.realpath(cur)
+    if real in visited_paths:
+        continue
+    visited_paths.add(real)
+    for lib in read_needed(real):
+        seen_libs.add(lib)
+        for d in search_dirs:
+            cand = os.path.join(d, lib)
+            if os.path.isfile(cand):
+                queue.append(cand)
+                break
+
+print("curl-openssl1.1 transitive DT_NEEDED:", sorted(seen_libs))
+assert "libssl.so.1.1" in seen_libs, f"missing libssl.so.1.1: {seen_libs}"
+assert "libcrypto.so.1.1" in seen_libs, f"missing libcrypto.so.1.1: {seen_libs}"
+assert "libssl.so.3" not in seen_libs, f"forbidden libssl.so.3 in DT_NEEDED tree: {seen_libs}"
+assert "libcrypto.so.3" not in seen_libs, f"forbidden libcrypto.so.3 in DT_NEEDED tree: {seen_libs}"
+assert "libcurl.so.4" not in seen_libs, f"unexpected shared libcurl.so.4: {seen_libs}"
+PY
+
+  td="$(mktemp -d)"
+  printf 'filc-curl11-ok\n' > "$td/hello.txt"
+  "$curl_bin" -fsS "file://$td/hello.txt" | grep -qx 'filc-curl11-ok'
+
+  cat > "$td/openssl.cnf" <<'CNF'
+[req]
+distinguished_name = dn
+x509_extensions = v3_req
+prompt = no
+
+[dn]
+CN = 127.0.0.1
+
+[v3_req]
+basicConstraints = critical, CA:TRUE
+keyUsage = digitalSignature, keyEncipherment, keyCertSign
+extendedKeyUsage = serverAuth
+subjectAltName = IP:127.0.0.1
+CNF
+  "$PIZFIX/bin/openssl11" req -x509 -newkey rsa:2048 -nodes \
+    -config "$td/openssl.cnf" -extensions v3_req \
+    -keyout "$td/key.pem" -out "$td/cert.pem" -days 1 >/dev/null 2>&1
+
+  "${HOST_PYTHON3:-/usr/bin/python3}" - "$curl_bin" "$td/cert.pem" "$td/key.pem" <<'PY'
+import ssl, subprocess, sys, threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+curl_bin, cert_file, key_file = sys.argv[1], sys.argv[2], sys.argv[3]
+
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = b"filc-curl11-https-ok\n"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        pass
+
+srv = HTTPServer(("127.0.0.1", 0), H)
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.load_cert_chain(certfile=cert_file, keyfile=key_file)
+srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+t = threading.Thread(target=srv.serve_forever, daemon=True)
+t.start()
+try:
+    out = subprocess.check_output(
+        [curl_bin, "-fsS", "--cacert", cert_file, f"https://127.0.0.1:{srv.server_port}/test"],
+        text=True, timeout=15,
+    )
+    assert out.strip() == "filc-curl11-https-ok", out
+finally:
+    srv.shutdown()
+    srv.server_close()
+PY
+  rm -rf "$td"
+}
+
+port_package_smoke() {
+  local curl_bin cfg_bin ver td
+  curl_bin="$PKG_PREFIX/opt/openssl1.1/bin/curl"
+  cfg_bin="$PKG_PREFIX/opt/openssl1.1/bin/curl-config"
+
+  test -f "$PKG_PREFIX/opt/openssl1.1/lib/libcurl.a"
+  test -f "$PKG_PREFIX/opt/openssl1.1/lib/pkgconfig/libcurl.pc"
+  test -f "$PKG_PREFIX/lib/pkgconfig/libcurl11.pc"
+  if ls "$PKG_PREFIX/opt/openssl1.1/lib"/libcurl.so* >/dev/null 2>&1; then
+    echo "error: unexpected shared libcurl.so in packaged opt/openssl1.1/lib" >&2
+    return 1
+  fi
+
+  ver="$("$curl_bin" --version)"
+  printf '%s\n' "$ver" | grep -q 'OpenSSL/1\.1\.1w'
+  printf '%s\n' "$ver" | grep -q 'HTTP2'
+  "$cfg_bin" --prefix | grep -Fxq "$(cd "$PKG_PREFIX/opt/openssl1.1" && pwd -P)"
+  "$cfg_bin" --feature | grep -qx 'SSL'
+  "$cfg_bin" --libs | grep -Fq "$(cd "$PKG_PREFIX/opt/openssl1.1" && pwd -P)/lib"
+
+  "${HOST_PYTHON3:-/usr/bin/python3}" - "$PKG_PREFIX" "$curl_bin" <<'PY'
+import os, struct, sys
+
+prefix, bin_path = sys.argv[1], sys.argv[2]
+search_dirs = [os.path.join(prefix, "lib"), os.path.join(prefix, "opt/openssl1.1/lib")]
+
+def read_needed(path):
+    with open(path, "rb") as f:
+        data = f.read()
+    e_phoff = struct.unpack_from("<Q", data, 32)[0]
+    e_phentsize, e_phnum = struct.unpack_from("<HH", data, 54)
+    loads, dyn = [], None
+    for i in range(e_phnum):
+        off = e_phoff + i * e_phentsize
+        p_type, _, p_offset, p_vaddr, _, p_filesz, _, _ = struct.unpack_from("<IIQQQQQQ", data, off)
+        if p_type == 1:
+            loads.append((p_vaddr, p_filesz, p_offset))
+        elif p_type == 2:
+            dyn = (p_offset, p_filesz)
+    if not dyn:
+        return []
+    needed_offs, strtab_va = [], None
+    for pos in range(dyn[0], dyn[0] + dyn[1], 16):
+        d_tag, d_val = struct.unpack_from("<qQ", data, pos)
+        if d_tag == 0:
+            break
+        elif d_tag == 1:
+            needed_offs.append(d_val)
+        elif d_tag == 5:
+            strtab_va = d_val
+    strtab_off = next(o + (strtab_va - v) for v, s, o in loads if v <= strtab_va < v + s)
+    return [data[strtab_off + n:data.index(b"\x00", strtab_off + n)].decode("ascii", "replace") for n in needed_offs]
+
+seen_libs, queue, visited = set(), [bin_path], set()
+while queue:
+    real = os.path.realpath(queue.pop(0))
+    if real in visited:
+        continue
+    visited.add(real)
+    for lib in read_needed(real):
+        seen_libs.add(lib)
+        for d in search_dirs:
+            cand = os.path.join(d, lib)
+            if os.path.isfile(cand):
+                queue.append(cand)
+                break
+
+assert "libssl.so.1.1" in seen_libs and "libcrypto.so.1.1" in seen_libs, seen_libs
+assert "libssl.so.3" not in seen_libs and "libcrypto.so.3" not in seen_libs, seen_libs
+assert "libcurl.so.4" not in seen_libs, seen_libs
+PY
+
+  td="$(mktemp -d)"
+  printf 'filc-curl11-pkg-ok\n' > "$td/hello.txt"
+  "$curl_bin" -fsS "file://$td/hello.txt" | grep -qx 'filc-curl11-pkg-ok'
+  rm -rf "$td"
+}

@@ -14,14 +14,14 @@ DEBIAN_TARBALL_SHA256="ce38c3bfe543fd554c468eec10287dc07df45f7e672a7af6f5ae3fcab
 DEBIAN_SECURITY_PATCHES="0048-Fix-81740-PDO-quote-may-return-unquoted-string.patch 0049-NEWS.patch 0050-Fix-GH-10187-Segfault-in-stripslashes-with-arm64.patch 0051-crypt-Fix-validation-of-malformed-BCrypt-hashes.patch 0052-crypt-Fix-possible-buffer-overread-in-php_crypt.patch 0053-Fix-array-overrun-when-appending-slash-to-paths.patch 0054-NEWS.patch 0055-Fix-repeated-warning-for-file-uploads-limit-exceedin.patch 0056-Introduce-max_multipart_body_parts-INI.patch 0057-NEWS.patch 0058-fix-NEWS-not-FPM-specific.patch 0059-Fix-missing-randomness-check-and-insufficient-random.patch 0060-Fix-GH-11382-add-missing-hash-header-for-bin2hex.patch 0068-add-cve.patch 0069-Fix-buffer-mismanagement-in-phar_dir_read.patch 0070-Sanitize-libxml2-globals-before-parsing.patch 0071-NEWS.patch 0072-backport-zend_test-changes-zend_test_override_libxml.patch 0075-Fix-GHSA-wpj3-hf5j-x4v4-__Host-__Secure-cookie-bypas.patch 0076-NEWS.patch 0077-Fix-bug-GHSA-q6x7-frmf-grcw-password_verify-can-erro.patch 0078-NEWS.patch 0079-Add-proc_open-escaping-for-cmd-file-execution-Backpo.patch 0080-NEWS.patch CVE-2022-4900.patch CVE-2024-5458.patch CVE-2024-8925.patch CVE-2024-8927.patch CVE-2024-9026.patch CVE-2024-8932.patch CVE-2024-11233.patch CVE-2024-11234.patch CVE-2024-11236/01-7742f79.patch CVE-2024-11236/02-2dbe142.patch GHSA-4w77-75f9-2c8w.patch CVE-2024-8929/01-2f5aa9f.patch CVE-2024-8929/02-32f905f.patch CVE-2024-8929/03-c70b97d.patch CVE-2024-8929/04-51f5539.patch CVE-2024-8929/05-eb951b3.patch http-server-8.0.patch openssl-server-8.1.patch CVE-2025-1217/01-1c157d3fa2e.patch CVE-2025-1217/02-d20b4c97a9f.patch CVE-2025-1219.patch CVE-2025-1734.patch CVE-2025-1736.patch CVE-2025-1861.patch GHSA-wg4p-4hqh-c3g9.patch CVE-2025-1220.patch CVE-2025-1735.patch CVE-2025-6491.patch 0100-Fix-bug-75708-getimagesize-with-imageinfo-fails-on-S.patch CVE-2025-14177.patch CVE-2025-14180.patch CVE-2025-14178.patch GHSA-www2-q4fc-65wf.patch CVE-2026-6722.patch CVE-2026-7261.patch CVE-2026-7262.patch CVE-2026-6735.patch CVE-2026-7259.patch CVE-2026-7568.patch CVE-2026-7258.patch 0112-Fix-leak-on-double-DatePeriod-__construct-call.patch CVE-2026-9672.patch CVE-2026-17543.patch CVE-2026-7260.patch CVE-2026-14355.patch CVE-2026-92842.patch 0118-Backport-sapi-fpm-tests-logtool.inc-from-8.2.patch CVE-2026-91768.patch CVE-2026-91769.patch CVE-2026-91767.patch CVE-2025-1218.patch CVE-2026-91766_CVE-2026-93682/01-1ede3137c9a.patch CVE-2026-91766_CVE-2026-93682/02-5af9465ca89.patch CVE-2026-91765.patch CVE-2025-14181/01-b11bd1d9390.patch CVE-2025-14181/02-3aedde06bc3.patch CVE-2026-6103.patch GHSA-ch8v-r6jh-4vvr.patch 0130-http-Fix-out-of-bounds-read-on-empty-Location-header.patch 0131-ext-standard-Fix-1-char-relative-Location-redirects-.patch CVE-2026-109618_CVE-2026-109619.patch CVE-2026-15353.patch CVE-2026-128090.patch CVE-2026-129538.patch CVE-2026-129292.patch CVE-2026-129289.patch CVE-2026-129506.patch CVE-2026-129496.patch CVE-2026-126714.patch CVE-2026-115560.patch CVE-2026-128064.patch CVE-2026-127960.patch CVE-2026-129291.patch"
 EXTRACT_DIR="php-7.4.33"
 TIER=5
-DEPS="openssl1.1 zlib bzip2 curl sqlite libxml2 pcre2 icu libedit oniguruma libsodium pkgconf"
+DEPS="openssl1.1 curl-openssl1.1 zlib bzip2 sqlite libxml2 pcre2 icu libedit oniguruma libsodium pkgconf"
 BUILD_SYSTEM="autotools"
 CONFIGURE_ARGS="--without-pcre-jit --with-external-pcre --enable-fpm --with-openssl --with-zlib --with-curl --with-sqlite3 --with-pdo-sqlite --enable-intl --with-libedit --enable-mbstring --with-sodium --enable-bcmath --enable-calendar --enable-exif --enable-pcntl --enable-sockets"
 MAKE_ARGS=""
 INSTALL_ARGS=""
 TEST_CMD=""
 POLICY_CLASS="P4-Audit"
-POLICY_RATIONALE="EOL legacy PHP 7.4 built from Freexian Extended LTS bullseye (7.4.33-1+deb11u15, 97 ELTS security patches verified via signed InRelease -> Sources.gz) against OpenSSL 1.1.1w (openssl1.1) with 5 Fil-C/modern-lib patches: (01) USE_ZEND_ALLOC=0 default and strcase provenance fix, (02) portable C paths for inline assembly/asm-goto, (03) capability-preserving char * pointer arithmetic for zend_type and typed-property source lists, (04) MAP_PRIVATE opcache mapping, and (05) libxml2 2.12+ const xmlError/encoding.h and ICU 68+ boolean compatibility. Installed side-by-side with --program-suffix=7.4 and versioned directories."
+POLICY_RATIONALE="EOL legacy PHP 7.4 built from Freexian Extended LTS bullseye (7.4.33-1+deb11u15, 97 ELTS security patches verified via signed InRelease -> Sources.gz) against OpenSSL 1.1.1w (openssl1.1) and static curl-openssl1.1 (keeping OpenSSL 3 completely out of the musl process) with 5 Fil-C/modern-lib patches: (01) USE_ZEND_ALLOC=0 default and strcase provenance fix, (02) portable C paths for inline assembly/asm-goto, (03) capability-preserving char * pointer arithmetic for zend_type and typed-property source lists, (04) MAP_PRIVATE opcache mapping, and (05) libxml2 2.12+ const xmlError/encoding.h and ICU 68+ boolean compatibility. Installed side-by-side with --program-suffix=7.4 and versioned directories."
 FILC_ORIGIN_REF="8553fcd026b9:projects/php.projeny"
 
 port_configure() {
@@ -37,18 +37,22 @@ port_configure() {
     raise "ext/iconv /usr prefix fallback not found in configure (matches=#{matches})" unless matches == 1
     File.binwrite(p, s.sub(pat, "PHP_ICONV_PREFIX=\"$prefix\""))
   '
-  local ossl_cflags ossl_libs
+  local ossl_cflags ossl_libs curl_cflags curl_libs
   ossl_cflags="$(PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" "$PIZFIX/bin/pkg-config" --define-prefix --cflags openssl11)"
   ossl_libs="$(PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" "$PIZFIX/bin/pkg-config" --define-prefix --libs openssl11)"
+  curl_cflags="$(PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" "$PIZFIX/bin/pkg-config" --define-prefix --cflags libcurl11)"
+  curl_libs="$(PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" "$PIZFIX/bin/pkg-config" --define-prefix --libs libcurl11)"
   PATH="$PIZFIX/bin:$PATH" \
     CPPFLAGS="-I$PIZFIX/include -I$PIZFIX/include/ncursesw" \
     CXXFLAGS="${CXXFLAGS:-} -I$PIZFIX/include -std=c++17" \
-    LDFLAGS="-L$PIZFIX/lib -Wl,-rpath,$PIZFIX/lib -Wl,-Bsymbolic-functions" \
-    EXTRA_LDFLAGS="-L$PIZFIX/lib -Wl,-rpath,$PIZFIX/lib -Wl,-Bsymbolic-functions" \
+    LDFLAGS="-L$PIZFIX/opt/openssl1.1/lib -L$PIZFIX/lib -Wl,-rpath,$PIZFIX/lib -Wl,-Bsymbolic-functions" \
+    EXTRA_LDFLAGS="-L$PIZFIX/opt/openssl1.1/lib -L$PIZFIX/lib -Wl,-rpath,$PIZFIX/lib -Wl,-Bsymbolic-functions" \
     PKG_CONFIG="$PIZFIX/bin/pkg-config --define-prefix" \
-    PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" \
+    PKG_CONFIG_PATH="$PIZFIX/opt/openssl1.1/lib/pkgconfig:$PIZFIX/lib/pkgconfig" \
     OPENSSL_CFLAGS="$ossl_cflags" \
     OPENSSL_LIBS="$ossl_libs" \
+    CURL_CFLAGS="$curl_cflags" \
+    CURL_LIBS="$curl_libs" \
     EXTENSION_DIR="$PIZFIX/lib/php7.4/extensions" \
     PHP_UNAME="Linux" \
     PHP_BUILD_SYSTEM="Linux" \
@@ -94,6 +98,58 @@ port_test() {
   php_bin="$PIZFIX/bin/php7.4"
   fpm_bin="$PIZFIX/sbin/php-fpm7.4"
   ext_dir="$PIZFIX/lib/php7.4/extensions"
+
+  "${HOST_PYTHON3:-/usr/bin/python3}" - "$PIZFIX" "$php_bin" "$fpm_bin" <<'PY'
+import os, struct, sys
+
+prefix, bins = sys.argv[1], sys.argv[2:]
+search_dirs = [os.path.join(prefix, "lib"), os.path.join(prefix, "opt/openssl1.1/lib")]
+
+def read_needed(path):
+    with open(path, "rb") as f:
+        data = f.read()
+    e_phoff = struct.unpack_from("<Q", data, 32)[0]
+    e_phentsize, e_phnum = struct.unpack_from("<HH", data, 54)
+    loads, dyn = [], None
+    for i in range(e_phnum):
+        off = e_phoff + i * e_phentsize
+        p_type, _, p_offset, p_vaddr, _, p_filesz, _, _ = struct.unpack_from("<IIQQQQQQ", data, off)
+        if p_type == 1:
+            loads.append((p_vaddr, p_filesz, p_offset))
+        elif p_type == 2:
+            dyn = (p_offset, p_filesz)
+    if not dyn:
+        return []
+    needed_offs, strtab_va = [], None
+    for pos in range(dyn[0], dyn[0] + dyn[1], 16):
+        d_tag, d_val = struct.unpack_from("<qQ", data, pos)
+        if d_tag == 0:
+            break
+        elif d_tag == 1:
+            needed_offs.append(d_val)
+        elif d_tag == 5:
+            strtab_va = d_val
+    strtab_off = next(o + (strtab_va - v) for v, s, o in loads if v <= strtab_va < v + s)
+    return [data[strtab_off + n:data.index(b"\x00", strtab_off + n)].decode("ascii", "replace") for n in needed_offs]
+
+for bin_path in bins:
+    seen_libs, queue, visited = set(), [bin_path], set()
+    while queue:
+        real = os.path.realpath(queue.pop(0))
+        if real in visited:
+            continue
+        visited.add(real)
+        for lib in read_needed(real):
+            seen_libs.add(lib)
+            for d in search_dirs:
+                cand = os.path.join(d, lib)
+                if os.path.isfile(cand):
+                    queue.append(cand)
+                    break
+    assert "libssl.so.1.1" in seen_libs and "libcrypto.so.1.1" in seen_libs, f"{bin_path}: missing OpenSSL 1.1: {seen_libs}"
+    assert "libssl.so.3" not in seen_libs and "libcrypto.so.3" not in seen_libs, f"{bin_path}: forbidden OpenSSL 3 in DT_NEEDED tree: {seen_libs}"
+    assert "libcurl.so.4" not in seen_libs, f"{bin_path}: unexpected shared libcurl.so.4: {seen_libs}"
+PY
 
   out="$("$php_bin" -n -v)"
   ver="${out%%$'\n'*}"
@@ -178,7 +234,9 @@ assert(gzuncompress(gzcompress("filc-zlib-php74")) === "filc-zlib-php74");
 assert(bzdecompress(bzcompress("filc-bz2-php74")) === "filc-bz2-php74");
 assert(preg_match('/^([a-z]+)-(\d+)$/', 'filc-74', $matches) === 1 && $matches[2] === '74');
 assert(json_decode(json_encode(["ok" => [1, 2, 3]]), true)["ok"] === [1, 2, 3]);
-assert(is_array(curl_version()) && !empty(curl_version()["version"]));
+$cv = curl_version();
+assert(is_array($cv) && !empty($cv["version"]));
+assert(isset($cv["ssl_version"]) && strpos($cv["ssl_version"], "OpenSSL/1.1.1") === 0);
 assert(mb_strlen("hällo", "UTF-8") === 5);
 assert(iconv("UTF-8", "ISO-8859-1", "h\xc3\xa4llo") === "h\xe4llo");
 assert(is_array(scandir("/")) && count(scandir("/")) > 0);
@@ -196,15 +254,94 @@ $pdo = new PDO("sqlite::memory:");
 $pdo->exec("CREATE TABLE p (s TEXT); INSERT INTO p VALUES ('ok');");
 assert($pdo->query("SELECT s FROM p")->fetchColumn() === "ok");
 
-// 5. pcntl_fork() + pcntl_waitpid() runtime verification
+// 5. In-process HTTPS handshake (curl + OpenSSL 1.1.1) + pcntl_fork + OpenSSL crypto
+$td = sys_get_temp_dir() . "/filc-php74-tls-" . getmypid() . "-" . mt_rand(1000, 999999);
+assert(mkdir($td, 0700));
+$cnf_file = $td . "/openssl.cnf";
+$cert_file = $td . "/cert.pem";
+$key_file = $td . "/key.pem";
+file_put_contents($cnf_file, "[req]\ndistinguished_name = dn\nx509_extensions = v3_req\nprompt = no\n[dn]\nCN = 127.0.0.1\n[v3_req]\nbasicConstraints = critical, CA:TRUE\nkeyUsage = digitalSignature, keyEncipherment, keyCertSign\nextendedKeyUsage = serverAuth\nsubjectAltName = IP:127.0.0.1\n");
+$ssl_cfg = [
+    "config" => $cnf_file,
+    "private_key_bits" => 2048,
+    "private_key_type" => OPENSSL_KEYTYPE_RSA,
+    "digest_alg" => "sha256",
+    "x509_extensions" => "v3_req",
+];
+$pkey = openssl_pkey_new($ssl_cfg);
+assert($pkey !== false);
+$csr = openssl_csr_new(["commonName" => "127.0.0.1"], $pkey, $ssl_cfg);
+assert($csr !== false);
+$cert = openssl_csr_sign($csr, null, $pkey, 1, $ssl_cfg);
+assert($cert !== false);
+assert(openssl_pkey_export_to_file($pkey, $key_file, null, $ssl_cfg));
+assert(openssl_x509_export_to_file($cert, $cert_file));
+
+$srv_ctx = stream_context_create([
+    "ssl" => [
+        "local_cert" => $cert_file,
+        "local_pk" => $key_file,
+        "allow_self_signed" => true,
+        "verify_peer" => false,
+    ],
+]);
+$srv = stream_socket_server("tls://127.0.0.1:0", $errno, $errstr, STREAM_SERVER_BIND | STREAM_SERVER_LISTEN, $srv_ctx);
+assert($srv !== false, "stream_socket_server failed: $errno $errstr");
+$srv_name = stream_socket_get_name($srv, false);
+$srv_port = (int)substr(strrchr($srv_name, ":"), 1);
+assert($srv_port > 0);
+
 $pid = pcntl_fork();
 assert($pid >= 0);
 if ($pid === 0) {
+    $conn = @stream_socket_accept($srv, 10);
+    if ($conn === false) {
+        exit(2);
+    }
+    stream_set_timeout($conn, 5);
+    $req = "";
+    while (strpos($req, "\r\n\r\n") === false && !feof($conn)) {
+        $chunk = fread($conn, 4096);
+        if ($chunk === false || $chunk === "") {
+            break;
+        }
+        $req .= $chunk;
+    }
+    fwrite($conn, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 17\r\nConnection: close\r\n\r\nFILC_HTTPS_111_OK");
+    fflush($conn);
+    fclose($conn);
+    fclose($srv);
     exit(42);
 }
+fclose($srv);
+$ch = curl_init("https://127.0.0.1:" . $srv_port . "/ping");
+assert($ch !== false);
+curl_setopt_array($ch, [
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_CAINFO => $cert_file,
+    CURLOPT_SSL_VERIFYPEER => true,
+    CURLOPT_SSL_VERIFYHOST => 2,
+    CURLOPT_TIMEOUT => 10,
+    CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
+]);
+$body = curl_exec($ch);
+$curl_err = curl_error($ch);
+$http_code = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+curl_close($ch);
 $status = 0;
 assert(pcntl_waitpid($pid, $status) === $pid);
 assert(pcntl_wifexited($status) && pcntl_wexitstatus($status) === 42);
+assert($body === "FILC_HTTPS_111_OK", "curl HTTPS failed: code=$http_code err=$curl_err");
+assert($http_code === 200);
+
+$sig = "";
+assert(openssl_sign("filc-tls-coexist", $sig, $pkey, OPENSSL_ALGO_SHA256));
+assert(openssl_verify("filc-tls-coexist", $sig, $cert, OPENSSL_ALGO_SHA256) === 1);
+assert(openssl_digest("hello\n", "sha256") === "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03");
+unlink($cert_file);
+unlink($key_file);
+unlink($cnf_file);
+rmdir($td);
 
 echo "PHP74_FILC_SMOKE_OK\n";
 EOF
@@ -215,6 +352,58 @@ port_package_smoke() {
   php_bin="$PKG_PREFIX/bin/php7.4"
   fpm_bin="$PKG_PREFIX/sbin/php-fpm7.4"
   ext_dir="$PKG_PREFIX/lib/php7.4/extensions"
+
+  "${HOST_PYTHON3:-/usr/bin/python3}" - "$PKG_PREFIX" "$php_bin" "$fpm_bin" <<'PY'
+import os, struct, sys
+
+prefix, bins = sys.argv[1], sys.argv[2:]
+search_dirs = [os.path.join(prefix, "lib"), os.path.join(prefix, "opt/openssl1.1/lib")]
+
+def read_needed(path):
+    with open(path, "rb") as f:
+        data = f.read()
+    e_phoff = struct.unpack_from("<Q", data, 32)[0]
+    e_phentsize, e_phnum = struct.unpack_from("<HH", data, 54)
+    loads, dyn = [], None
+    for i in range(e_phnum):
+        off = e_phoff + i * e_phentsize
+        p_type, _, p_offset, p_vaddr, _, p_filesz, _, _ = struct.unpack_from("<IIQQQQQQ", data, off)
+        if p_type == 1:
+            loads.append((p_vaddr, p_filesz, p_offset))
+        elif p_type == 2:
+            dyn = (p_offset, p_filesz)
+    if not dyn:
+        return []
+    needed_offs, strtab_va = [], None
+    for pos in range(dyn[0], dyn[0] + dyn[1], 16):
+        d_tag, d_val = struct.unpack_from("<qQ", data, pos)
+        if d_tag == 0:
+            break
+        elif d_tag == 1:
+            needed_offs.append(d_val)
+        elif d_tag == 5:
+            strtab_va = d_val
+    strtab_off = next(o + (strtab_va - v) for v, s, o in loads if v <= strtab_va < v + s)
+    return [data[strtab_off + n:data.index(b"\x00", strtab_off + n)].decode("ascii", "replace") for n in needed_offs]
+
+for bin_path in bins:
+    seen_libs, queue, visited = set(), [bin_path], set()
+    while queue:
+        real = os.path.realpath(queue.pop(0))
+        if real in visited:
+            continue
+        visited.add(real)
+        for lib in read_needed(real):
+            seen_libs.add(lib)
+            for d in search_dirs:
+                cand = os.path.join(d, lib)
+                if os.path.isfile(cand):
+                    queue.append(cand)
+                    break
+    assert "libssl.so.1.1" in seen_libs and "libcrypto.so.1.1" in seen_libs, seen_libs
+    assert "libssl.so.3" not in seen_libs and "libcrypto.so.3" not in seen_libs, seen_libs
+    assert "libcurl.so.4" not in seen_libs, seen_libs
+PY
 
   out="$("$php_bin" -n -v)"
   ver="${out%%$'\n'*}"
@@ -235,6 +424,8 @@ port_package_smoke() {
 $prefix = realpath(getenv("PKG_PREFIX"));
 assert(is_string($prefix) && strpos(realpath(PHP_BINARY), $prefix . "/") === 0);
 assert(strpos(OPENSSL_VERSION_TEXT, "OpenSSL 1.1.1") === 0);
+$cv = curl_version();
+assert(is_array($cv) && isset($cv["ssl_version"]) && strpos($cv["ssl_version"], "OpenSSL/1.1.1") === 0);
 assert(opcache_get_status(false)["opcache_enabled"] === true);
 assert(openssl_digest("hello\n", "sha256") === "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03");
 assert(gzuncompress(gzcompress("filc-zlib-php74")) === "filc-zlib-php74");
@@ -243,6 +434,85 @@ assert((new Collator("en_US"))->compare("a", "b") < 0);
 $xml = new DOMDocument();
 $xml->loadXML('<root><child>ok</child></root>');
 assert(strpos($xml->C14N(), '<child>ok</child>') !== false);
+
+$td = sys_get_temp_dir() . "/filc-php74-pkg-tls-" . getmypid() . "-" . mt_rand(1000, 999999);
+assert(mkdir($td, 0700));
+$cnf_file = $td . "/openssl.cnf";
+$cert_file = $td . "/cert.pem";
+$key_file = $td . "/key.pem";
+file_put_contents($cnf_file, "[req]\ndistinguished_name = dn\nx509_extensions = v3_req\nprompt = no\n[dn]\nCN = 127.0.0.1\n[v3_req]\nbasicConstraints = critical, CA:TRUE\nkeyUsage = digitalSignature, keyEncipherment, keyCertSign\nextendedKeyUsage = serverAuth\nsubjectAltName = IP:127.0.0.1\n");
+$ssl_cfg = [
+    "config" => $cnf_file,
+    "private_key_bits" => 2048,
+    "private_key_type" => OPENSSL_KEYTYPE_RSA,
+    "digest_alg" => "sha256",
+    "x509_extensions" => "v3_req",
+];
+$pkey = openssl_pkey_new($ssl_cfg);
+assert($pkey !== false);
+$csr = openssl_csr_new(["commonName" => "127.0.0.1"], $pkey, $ssl_cfg);
+assert($csr !== false);
+$cert = openssl_csr_sign($csr, null, $pkey, 1, $ssl_cfg);
+assert($cert !== false);
+assert(openssl_pkey_export_to_file($pkey, $key_file, null, $ssl_cfg));
+assert(openssl_x509_export_to_file($cert, $cert_file));
+$srv_ctx = stream_context_create([
+    "ssl" => [
+        "local_cert" => $cert_file,
+        "local_pk" => $key_file,
+        "allow_self_signed" => true,
+        "verify_peer" => false,
+    ],
+]);
+$srv = stream_socket_server("tls://127.0.0.1:0", $errno, $errstr, STREAM_SERVER_BIND | STREAM_SERVER_LISTEN, $srv_ctx);
+assert($srv !== false);
+$srv_port = (int)substr(strrchr(stream_socket_get_name($srv, false), ":"), 1);
+$pid = pcntl_fork();
+assert($pid >= 0);
+if ($pid === 0) {
+    $conn = @stream_socket_accept($srv, 10);
+    if ($conn === false) {
+        exit(2);
+    }
+    stream_set_timeout($conn, 5);
+    $req = "";
+    while (strpos($req, "\r\n\r\n") === false && !feof($conn)) {
+        $chunk = fread($conn, 4096);
+        if ($chunk === false || $chunk === "") {
+            break;
+        }
+        $req .= $chunk;
+    }
+    fwrite($conn, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 17\r\nConnection: close\r\n\r\nFILC_HTTPS_111_OK");
+    fflush($conn);
+    fclose($conn);
+    fclose($srv);
+    exit(0);
+}
+fclose($srv);
+$ch = curl_init("https://127.0.0.1:" . $srv_port . "/ping");
+curl_setopt_array($ch, [
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_CAINFO => $cert_file,
+    CURLOPT_SSL_VERIFYPEER => true,
+    CURLOPT_SSL_VERIFYHOST => 2,
+    CURLOPT_TIMEOUT => 10,
+    CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
+]);
+$body = curl_exec($ch);
+$http_code = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+curl_close($ch);
+$st = 0;
+assert(pcntl_waitpid($pid, $st) === $pid && pcntl_wifexited($st) && pcntl_wexitstatus($st) === 0);
+assert($body === "FILC_HTTPS_111_OK" && $http_code === 200);
+$sig = "";
+assert(openssl_sign("filc-tls-coexist", $sig, $pkey, OPENSSL_ALGO_SHA256));
+assert(openssl_verify("filc-tls-coexist", $sig, $cert, OPENSSL_ALGO_SHA256) === 1);
+unlink($cert_file);
+unlink($key_file);
+unlink($cnf_file);
+rmdir($td);
+
 echo "PHP74_PKG_SMOKE_OK\n";
 EOF
 }

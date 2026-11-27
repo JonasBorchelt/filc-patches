@@ -61,8 +61,26 @@ module PortPackager
   ].freeze
 
   NEUTRAL_BUILD_DIR_RE = %r{\A/build/filc-ports(?:/[A-Za-z0-9._-]+)?\z}
+  DOCKER_REPO_RE = /\A[a-z0-9][a-z0-9._-]{0,63}\/[a-z0-9][a-z0-9._-]{0,63}\z/
+  DOCKER_TAG_RE = /\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\z/
+  DOCKER_VARIANT_RE = /\A[a-z0-9][a-z0-9._-]{0,31}\z/
+  DOCKER_HUB_URL_RE = %r{\Ahttps://hub\.docker\.com/r/[a-z0-9][a-z0-9._-]{0,63}/[a-z0-9][a-z0-9._-]{0,63}(?:/tags(?:\?name=[A-Za-z0-9._+-]{1,64})?)?\z}
+  MAX_DOCKER_VARIANTS = 8
 
   module_function
+
+  def parse_docker_image_meta(meta)
+    repo = meta.fetch("DOCKER_IMAGE_REPO", "").strip
+    tag = meta.fetch("DOCKER_IMAGE_TAG", "").strip
+    return nil unless DOCKER_REPO_RE.match?(repo) && DOCKER_TAG_RE.match?(tag)
+
+    out = { "repo" => repo, "tag" => tag }
+    variants = meta.fetch("DOCKER_IMAGE_VARIANTS", "").split(/[\s,]+/).select { |v| DOCKER_VARIANT_RE.match?(v) }.uniq.first(MAX_DOCKER_VARIANTS)
+    out["variants"] = variants unless variants.empty?
+    url = meta.fetch("DOCKER_IMAGE_URL", "").strip
+    out["url"] = url if DOCKER_HUB_URL_RE.match?(url)
+    out
+  end
 
   def parse_kv_file(path)
     vars = {}
@@ -158,7 +176,8 @@ module PortPackager
       next unless meta["NAME"] == name && PORT_NAME_RE.match?(name)
 
       deps = meta.fetch("DEPS", "").split.reject(&:empty?)
-      ports[name] = {
+      docker_img = parse_docker_image_meta(meta)
+      port_meta = {
         "name" => name,
         "version" => meta["VERSION"],
         "license" => meta["LICENSE"],
@@ -169,6 +188,8 @@ module PortPackager
         "upstream_sha256" => meta["UPSTREAM_SHA256"],
         "port_dir" => pdir
       }
+      port_meta["docker_image"] = docker_img if docker_img
+      ports[name] = port_meta
     end
     ports
   end
@@ -1849,6 +1870,7 @@ module PortPackager
           }
           pkg_entry["ci_run"] = opts[:ci_run] if opts[:ci_run]
           pkg_entry["repo_commit"] = repo_commit if repo_commit
+          pkg_entry["docker_image"] = meta["docker_image"] if meta["docker_image"]
           packages_index[name] = pkg_entry
           packaged_targets[name] = {
             meta: meta,

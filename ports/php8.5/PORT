@@ -18,6 +18,10 @@ TEST_CMD=""
 POLICY_CLASS="P4-Audit"
 POLICY_RATIONALE="Adopted from upstream Fil-C (8553fcd026b9:projects/php.projeny + build_php.sh), refreshed cleanly to latest PHP 8.5 security release 8.5.13 (23 files, +222/-38, 0 fuzz, 0 offset; lexbor relocated to ext/lexbor in PHP 8.5), and split into 4 thematic patches: (01) tracked system allocator default with peak tracking and strcase pointer-provenance fix, (02) portable C paths replacing inline assembly/asm-goto and omitting .debug_gdb_scripts, (03) capability-preserving typed-property/WeakRef pointer tagging plus weak zexact_ptrtable mappings for WeakMap keys, ext/lexbor dynamic IDs, and ext/dom namespace_compat node keys, and (04) fiber stack-limit calculation from __builtin_frame_address(0) plus MAP_PRIVATE opcache mapping. Uses --disable-fiber-asm (musl ucontext/zfiber_context), --without-pcre-jit, --disable-opcache-jit, --disable-huge-code-pages, ac_cv_have_decl_UFFDIO_WRITEPROTECT_MODE_WP=no, php_cv_have_fpu_inline_asm_x86=no, and php_cv_preserve_none=no (portable call VM instead of preserve_none tailcall VM); OPcache is statically built-in in PHP 8.5; installed with versioned suffix 8.5 and versioned lib/include/etc/share/var directories for side-by-side multi-version PHP coexistence."
 FILC_ORIGIN_REF="8553fcd026b9:projects/php.projeny"
+DOCKER_IMAGE_REPO="jonasborchelt/filc-php"
+DOCKER_IMAGE_TAG="8.5"
+DOCKER_IMAGE_VARIANTS="cli fpm"
+DOCKER_IMAGE_URL="https://hub.docker.com/r/jonasborchelt/filc-php"
 
 port_configure() {
   # Bind defined function symbols locally inside shared extensions so Fil-C's

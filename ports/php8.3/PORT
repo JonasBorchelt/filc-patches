@@ -18,6 +18,10 @@ TEST_CMD=""
 POLICY_CLASS="P4-Audit"
 POLICY_RATIONALE="Adopted from upstream Fil-C (8553fcd026b9:projects/php.projeny + build_php.sh) and ported cleanly to latest PHP 8.3 security release 8.3.37 (15 files, +127/-15, 0 fuzz, 0 offset; no Lexbor/HTML5 DOM or debug_gdb_scripts in 8.3), split into 4 thematic patches: (01) tracked system allocator default with peak tracking and strcase pointer-provenance fix, (02) portable C paths replacing inline assembly/asm-goto, (03) capability-preserving typed-property/WeakRef pointer tagging plus weak zexact_ptrtable mapping for WeakMap keys, and (04) PHP 8.4 backport of __builtin_frame_address(0) stack-growth detection in configure and zend_call_stack_position() in zend_call_stack.c (enabling ZEND_CHECK_STACK_LIMIT under Fil-C), fiber stack-limit calculation from __builtin_frame_address(0), and MAP_PRIVATE opcache mapping. Uses --disable-fiber-asm (musl ucontext/zfiber_context), --without-pcre-jit, --disable-opcache-jit, ac_cv_phpdbg_userfaultfd_writefault=no, and neutralized PHP_UNAME/PHP_BUILD_SYSTEM/PHP_BUILD_PROVIDER; installed with --with-layout=GNU, versioned suffix 8.3, and versioned lib/include/etc/share/var directories for side-by-side multi-version PHP coexistence."
 FILC_ORIGIN_REF="8553fcd026b9:projects/php.projeny"
+DOCKER_IMAGE_REPO="jonasborchelt/filc-php"
+DOCKER_IMAGE_TAG="8.3"
+DOCKER_IMAGE_VARIANTS="cli fpm"
+DOCKER_IMAGE_URL="https://hub.docker.com/r/jonasborchelt/filc-php"
 
 port_configure() {
   # Bind defined function symbols locally inside shared extensions so Fil-C's

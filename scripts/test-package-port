@@ -1761,6 +1761,74 @@ Dir.mktmpdir("filc-pkg-ca-") do |td|
          "new build archive SHA-256 must match index")
   assert(Dir.glob(File.join(ch_dir, "bin", ".tmp-*")).empty?, "no leftover .tmp-* files in bin/")
   assert(Dir.glob(File.join(ch_dir, "recipes", ".tmp-*")).empty?, "no leftover .tmp-* files in recipes/")
+  assert(!e1.key?("docker_image"), "port without DOCKER_IMAGE_* must not emit docker_image")
 end
 
-puts "TEST_PACKAGE_PORT: PASS (18/18)"
+# ---------------------------------------------------------------------------
+# 19. Optional DOCKER_IMAGE_* metadata in PORT is forwarded into index.json
+# ---------------------------------------------------------------------------
+Dir.mktmpdir("filc-test-pkg-docker-") do |td|
+  dm_repo = File.join(td, "repo")
+  dm_work = File.join(td, "work")
+  dm_pizfix = File.join(td, "pizfix")
+  dm_cache = File.join(td, "cache")
+  dm_out = File.join(td, "out")
+  dm_state = File.join(dm_work, "state")
+  FileUtils.mkdir_p([
+    File.join(dm_repo, "ports", "php8.5"),
+    File.join(dm_pizfix, "bin"),
+    dm_cache, dm_out, dm_state
+  ])
+  FileUtils.cp(File.join(REPO_ROOT, "UPSTREAM"), File.join(dm_repo, "UPSTREAM"))
+  src_tar = File.join(td, "php-8.5.13.tar.gz")
+  src_sha = make_tar_gz(src_tar, { "php-8.5.13/README" => "hello php\n" })
+  FileUtils.cp(src_tar, File.join(dm_cache, "php8.5-8.5.13-#{src_sha[0, 12]}-php-8.5.13.tar.gz"))
+  File.write(File.join(dm_repo, "ports", "php8.5", "PORT"), <<~PORT)
+    NAME=php8.5
+    VERSION=8.5.13
+    LICENSE=PHP-3.01
+    UPSTREAM_URL=https://example.invalid/php-8.5.13.tar.gz
+    UPSTREAM_SHA256=#{src_sha}
+    EXTRACT_DIR=php-8.5.13
+    TIER=5
+    DEPS=""
+    BUILD_SYSTEM=autotools
+    POLICY_CLASS=P4-Audit
+    DOCKER_IMAGE_REPO="jonasborchelt/filc-php"
+    DOCKER_IMAGE_TAG="8.5"
+    DOCKER_IMAGE_VARIANTS="cli fpm"
+    DOCKER_IMAGE_URL="https://hub.docker.com/r/jonasborchelt/filc-php"
+  PORT
+  File.write(File.join(dm_pizfix, "bin", "php8.5"), "#!/bin/sh\necho ok\n")
+  File.chmod(0o755, File.join(dm_pizfix, "bin", "php8.5"))
+  File.write(File.join(dm_state, "php8.5.manifest.json"), JSON.pretty_generate(
+    "port" => "php8.5",
+    "files" => ["bin/php8.5"]
+  ) + "\n")
+
+  o, e, st = Open3.capture3(
+    BASE_ENV,
+    "ruby", PACKAGE_SCRIPT,
+    "--repo-root", dm_repo,
+    "--work-dir", dm_work,
+    "--pizfix", dm_pizfix,
+    "--neutral-prefix", dm_pizfix,
+    "--ports-cache-dir", dm_cache,
+    "--out-dir", dm_out,
+    "--channel", "0.1.5",
+    "--arch", "x86_64-linux",
+    "--skip-package-smoke"
+  )
+  assert(st.success?, "docker_image package-port failed: #{o}\n#{e}")
+  idx = JSON.parse(File.read(File.join(dm_out, "0.1.5", "x86_64-linux", "index.json")))
+  expected = {
+    "repo" => "jonasborchelt/filc-php",
+    "tag" => "8.5",
+    "variants" => %w[cli fpm],
+    "url" => "https://hub.docker.com/r/jonasborchelt/filc-php"
+  }
+  assert(idx.dig("packages", "php8.5", "docker_image") == expected,
+         "unexpected docker_image in index.json: #{idx.dig('packages', 'php8.5', 'docker_image').inspect}")
+end
+
+puts "TEST_PACKAGE_PORT: PASS (19/19)"

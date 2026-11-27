@@ -18,6 +18,10 @@ TEST_CMD=""
 POLICY_CLASS="P4-Audit"
 POLICY_RATIONALE="Adopted from upstream Fil-C (8553fcd026b9:projects/php.projeny + build_php.sh) and ported cleanly to latest PHP 8.2 security release 8.2.36 (12 files, 0 fuzz, 0 offset; no Lexbor/HTML5 DOM, debug_gdb_scripts, or zend_call_stack in 8.2), split into 4 thematic patches: (01) tracked system allocator default with peak tracking and strcase pointer-provenance fix, (02) portable C paths replacing inline assembly/asm-goto, (03) capability-preserving typed-property/WeakRef pointer tagging plus weak zexact_ptrtable mapping for WeakMap keys, and (04) MAP_PRIVATE opcache mapping and skip MAP_32BIT huge-page remap. Uses --disable-fiber-asm (musl ucontext/zfiber_context), --without-pcre-jit, --disable-opcache-jit, ac_cv_phpdbg_userfaultfd_writefault=no, and neutralized PHP_UNAME/PHP_BUILD_SYSTEM/PHP_BUILD_PROVIDER; installed with --with-layout=GNU, versioned suffix 8.2, and versioned lib/include/etc/share/var directories for side-by-side multi-version PHP coexistence."
 FILC_ORIGIN_REF="8553fcd026b9:projects/php.projeny"
+DOCKER_IMAGE_REPO="jonasborchelt/filc-php"
+DOCKER_IMAGE_TAG="8.2"
+DOCKER_IMAGE_VARIANTS="cli fpm"
+DOCKER_IMAGE_URL="https://hub.docker.com/r/jonasborchelt/filc-php"
 
 port_configure() {
   # Bind defined function symbols locally inside shared extensions so Fil-C's

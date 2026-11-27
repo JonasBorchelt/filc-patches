@@ -940,6 +940,7 @@ module PublishPortsStream
         l.include?("SHA-256 mismatch") ||
         l.include?("filc safety error") ||
         l.include?("filc panic:") ||
+        l.include?("--- TIMEOUT DIAGNOSTICS (") ||
         l.match?(/\Anot ok\b/) ||
         l.match?(/\bFailed\s+\d+\/\d+\b/) ||
         l.match?(/\AResult:\s*FAIL\b/) ||
@@ -953,17 +954,19 @@ module PublishPortsStream
   end
 
   TEST_HARNESS_FAIL_RE = /(?:^\s*not ok\b|\bFailed\s+\d+\/\d+\b|^\s*Result:\s*FAIL\b|^\s*Test Summary Report\b|Dubious,\s+test returned|^\s*(?:FAIL|XPASS):\s|^The following tests FAILED:|filc safety error|filc panic:)/
-  FAILURE_ANCHOR_RE = /(?:STAGE_CMD_FAILED|SMOKE_CMD_FAILED|PACKAGE_SMOKE FAILED|LEAK_GATE FAILED|SIZE_LIMIT FAILED|filc safety error|filc panic:|LoadError|make(?:\[\d+\])?: \*\*\*|error:|ERROR:|FATAL:|^\s*not ok\b|\bFailed\s+\d+\/\d+\b|^\s*Result:\s*FAIL\b)/
+  FAILURE_ANCHOR_RE = /(?:STAGE_CMD_FAILED|SMOKE_CMD_FAILED|PACKAGE_SMOKE FAILED|LEAK_GATE FAILED|SIZE_LIMIT FAILED|--- TIMEOUT DIAGNOSTICS \(|filc safety error|filc panic:|LoadError|make(?:\[\d+\])?: \*\*\*|error:|ERROR:|FATAL:|^\s*not ok\b|\bFailed\s+\d+\/\d+\b|^\s*Result:\s*FAIL\b)/
 
   def select_failure_lines(lines, max_lines: 80, stage: nil)
     total = lines.length
     return lines if total <= max_lines
 
-    # When build-port dumped a Fil-C panic report at the end of the log, preserve
-    # the primary report completely unabridged together with the preceding failure lines.
+    # When build-port or package-port dumped a Fil-C panic report or timeout
+    # diagnostics block, preserve it unabridged together with the preceding lines.
     panic_start = lines.index { |ln| ln.start_with?("--- FIL-C PANIC REPORT (") }
-    if panic_start
-      win_start = [panic_start - 10, 0].max
+    diag_start = lines.index { |ln| ln.start_with?("--- TIMEOUT DIAGNOSTICS (") }
+    special_start = [panic_start, diag_start].compact.min
+    if special_start
+      win_start = [special_start - 15, 0].max
       slice = lines[win_start..]
       return slice.length <= 240 ? slice : (slice.first(220) + slice.last(20))
     end

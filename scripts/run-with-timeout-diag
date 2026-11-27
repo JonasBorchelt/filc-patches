@@ -1,0 +1,457 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Run a command with a wall-clock timeout. If the command exceeds the timeout,
+# collect live hang diagnostics (process tree, /proc/<pid>/{status,wchan,stack},
+# per-thread /proc/<pid>/task/*, and `gdb -p <pid> -batch -ex "thread apply all bt"`)
+# BEFORE terminating the entire process group with SIGTERM -> SIGKILL, then exit 124.
+#
+# Usage:
+#   scripts/run-with-timeout-diag --timeout SEC [--label NAME] [--kill-after SEC] [--gdb-timeout SEC] -- CMD [ARGS...]
+
+require "open3"
+require "optparse"
+
+Encoding.default_external = Encoding::UTF_8
+Encoding.default_internal = Encoding::UTF_8
+
+module TimeoutDiagRunner
+  STATUS_KEYS = %w[
+    Name State Pid PPid TracerPid Threads VmSize VmRSS
+    SigPnd ShdPnd SigBlk SigIgn SigCgt
+    voluntary_ctxt_switches nonvoluntary_ctxt_switches
+  ].freeze
+  SHELL_COMMS = %w[sh bash dash zsh ash].freeze
+
+  module_function
+
+  def monotonic_now
+    Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
+
+  def read_text_safe(path, max_bytes: 32_768)
+    File.open(path, "rb") { |f| f.read(max_bytes).to_s }
+        .force_encoding("UTF-8")
+        .encode("UTF-8", invalid: :replace, undef: :replace)
+  rescue Errno::ENOENT
+    nil
+  rescue Errno::EACCES, Errno::EPERM
+    "<permission denied>"
+  rescue StandardError => e
+    "<read error: #{e.class}: #{e.message}>"
+  end
+
+  def read_cmdline(pid)
+    if File.directory?("/proc/#{pid}")
+      raw = File.binread("/proc/#{pid}/cmdline") rescue nil
+      if raw && !raw.empty?
+        return raw.split("\x00").reject(&:empty?).join(" ")
+      end
+      comm = read_text_safe("/proc/#{pid}/comm", max_bytes: 256)
+      return "[#{comm.strip}]" if comm && !comm.strip.empty?
+    end
+    out, st = Open3.capture2("ps", "-o", "command=", "-p", pid.to_s) rescue ["", nil]
+    return out.strip if st&.success? && !out.strip.empty?
+
+    "<unknown>"
+  end
+
+  def scan_linux_proc
+    procs = {}
+    Dir.children("/proc").each do |entry|
+      next unless /\A\d+\z/.match?(entry)
+
+      pid = entry.to_i
+      stat = read_text_safe("/proc/#{pid}/stat", max_bytes: 4096)
+      next unless stat && !stat.start_with?("<")
+
+      lparen = stat.index("(")
+      rparen = stat.rindex(")")
+      next unless lparen && rparen && rparen > lparen
+
+      comm = stat[(lparen + 1)...rparen]
+      rest = stat[(rparen + 2)..].to_s.split
+      next if rest.length < 3
+
+      procs[pid] = {
+        pid: pid,
+        comm: comm,
+        state: rest[0],
+        ppid: rest[1].to_i,
+        pgid: rest[2].to_i
+      }
+    end
+    procs
+  rescue StandardError
+    {}
+  end
+
+  def scan_ps_fallback
+    procs = {}
+    out, st = Open3.capture2("ps", "-eo", "pid=,ppid=,pgid=,stat=,comm=")
+    return procs unless st.success?
+
+    out.each_line do |line|
+      parts = line.strip.split(/\s+/, 5)
+      next if parts.length < 5
+
+      pid = parts[0].to_i
+      next if pid <= 0
+
+      procs[pid] = {
+        pid: pid,
+        ppid: parts[1].to_i,
+        pgid: parts[2].to_i,
+        state: parts[3],
+        comm: File.basename(parts[4].strip)
+      }
+    end
+    procs
+  rescue StandardError
+    {}
+  end
+
+  def collect_target_processes(root_pid)
+    all = File.directory?("/proc") ? scan_linux_proc : scan_ps_fallback
+    self_pid = Process.pid
+
+    # Build children map
+    children = Hash.new { |h, k| h[k] = [] }
+    all.each_value { |info| children[info[:ppid]] << info[:pid] }
+
+    # BFS from root_pid to compute depth
+    depths = {}
+    queue = [[root_pid, 0]]
+    while !queue.empty?
+      cur, d = queue.shift
+      next if depths.key?(cur) || cur == self_pid
+
+      depths[cur] = d
+      children[cur].each { |c| queue << [c, d + 1] }
+    end
+
+    # Also include any process sharing pgid == root_pid
+    selected = {}
+    depths.each do |pid, d|
+      info = all[pid] || { pid: pid, ppid: 0, pgid: root_pid, state: "?", comm: "?" }
+      selected[pid] = info.merge(depth: d)
+    end
+    all.each do |pid, info|
+      next if pid == self_pid || selected.key?(pid)
+      next unless info[:pgid] == root_pid
+
+      selected[pid] = info.merge(depth: 1)
+    end
+
+    selected.each_value { |info| info[:cmdline] = read_cmdline(info[:pid]) }
+
+    # Leaf-first order, preferring non-shell worker binaries over wrapper shells at equal depth.
+    selected.values.sort_by do |info|
+      is_shell = SHELL_COMMS.include?(info[:comm].to_s) ? 1 : 0
+      [-info[:depth], is_shell, -info[:pid]]
+    end
+  end
+
+  def find_gdb_bin
+    override = ENV["FILC_TIMEOUT_GDB_BIN"].to_s.strip
+    return override if !override.empty? && File.executable?(override)
+
+    search_dirs = ENV.fetch("PATH", "").split(File::PATH_SEPARATOR)
+    search_dirs << "/usr/bin" unless search_dirs.include?("/usr/bin")
+    search_dirs.each do |dir|
+      cand = File.join(dir, "gdb")
+      return cand if File.file?(cand) && File.executable?(cand)
+    end
+    nil
+  end
+
+  def run_gdb_backtrace(gdb_bin, pid, gdb_timeout)
+    r_io, w_io = IO.pipe
+    gpid = nil
+    begin
+      gpid = Process.spawn(
+        gdb_bin, "-n", "-batch", "-p", pid.to_s, "-ex", "thread apply all bt",
+        in: File::NULL, out: w_io, err: w_io, pgroup: true
+      )
+      w_io.close
+      w_io = nil
+
+      buf = +""
+      deadline = monotonic_now + gdb_timeout
+      timed_out = false
+      loop do
+        rem = deadline - monotonic_now
+        if rem <= 0
+          timed_out = true
+          break
+        end
+        ready = IO.select([r_io], nil, nil, [rem, 0.2].min)
+        if ready
+          begin
+            chunk = r_io.read_nonblock(8192)
+            buf << chunk if buf.bytesize < 262_144
+          rescue IO::WaitReadable
+            # keep polling
+          rescue EOFError
+            break
+          end
+        end
+        break if Process.waitpid2(gpid, Process::WNOHANG)
+      end
+
+      if timed_out
+        begin
+          Process.kill("KILL", -gpid)
+        rescue Errno::ESRCH, Errno::EPERM
+          nil
+        end
+        begin
+          Process.waitpid(gpid)
+        rescue Errno::ECHILD
+          nil
+        end
+        buf << "\n<gdb timed out after #{gdb_timeout}s>\n"
+      else
+        # Drain remaining buffered bytes after child exited
+        loop do
+          begin
+            chunk = r_io.read_nonblock(8192)
+            buf << chunk if buf.bytesize < 262_144
+          rescue IO::WaitReadable, EOFError
+            break
+          end
+        end
+        begin
+          Process.waitpid(gpid, Process::WNOHANG)
+        rescue Errno::ECHILD
+          nil
+        end
+      end
+      buf.force_encoding("UTF-8").encode("UTF-8", invalid: :replace, undef: :replace)
+    rescue StandardError => e
+      "<gdb invocation failed: #{e.class}: #{e.message}>"
+    ensure
+      w_io&.close
+      r_io&.close
+    end
+  end
+
+  def dump_linux_proc_details(pid, io)
+    return unless File.directory?("/proc/#{pid}")
+
+    status = read_text_safe("/proc/#{pid}/status")
+    if status
+      io.puts("/proc/#{pid}/status:")
+      status.each_line do |ln|
+        key = ln.split(":", 2).first.to_s.strip
+        io.puts("  #{ln.chomp}") if STATUS_KEYS.include?(key)
+      end
+    end
+
+    wchan = read_text_safe("/proc/#{pid}/wchan", max_bytes: 512)
+    io.puts("/proc/#{pid}/wchan: #{wchan.strip}") if wchan
+
+    stack = read_text_safe("/proc/#{pid}/stack", max_bytes: 16_384)
+    if stack && !stack.strip.empty?
+      io.puts("/proc/#{pid}/stack:")
+      stack.lines.first(25).each { |ln| io.puts("  #{ln.chomp}") }
+    end
+
+    task_dir = "/proc/#{pid}/task"
+    if File.directory?(task_dir)
+      tids = (Dir.children(task_dir).select { |t| /\A\d+\z/.match?(t) }.map(&:to_i).sort rescue [])
+      if tids.length > 1
+        io.puts("/proc/#{pid}/task (count=#{tids.length}, showing up to 16):")
+        tids.first(16).each do |tid|
+          t_comm = (read_text_safe("#{task_dir}/#{tid}/comm", max_bytes: 256) || "?").strip
+          t_wchan = (read_text_safe("#{task_dir}/#{tid}/wchan", max_bytes: 256) || "?").strip
+          t_status = read_text_safe("#{task_dir}/#{tid}/status") || ""
+          t_state = t_status.lines.find { |l| l.start_with?("State:") }&.sub(/\AState:\s*/, "")&.strip || "?"
+          io.puts("  tid=#{tid} comm=#{t_comm} state=#{t_state} wchan=#{t_wchan}")
+          t_stack = read_text_safe("#{task_dir}/#{tid}/stack", max_bytes: 4096)
+          if t_stack && !t_stack.strip.empty? && !t_stack.start_with?("<")
+            t_stack.lines.first(6).each { |ln| io.puts("    #{ln.chomp}") }
+          end
+        end
+      end
+    end
+  end
+
+  def collect_diagnostics(root_pid:, label:, timeout_sec:, gdb_timeout:, io: $stderr)
+    io.puts("--- TIMEOUT DIAGNOSTICS (label=#{label}, timeout=#{timeout_sec}s, root_pid=#{root_pid}, pgid=#{root_pid}) ---")
+    targets = collect_target_processes(root_pid)
+
+    io.puts("PROCESS_TREE (count=#{targets.length}):")
+    if targets.empty?
+      io.puts("  <no live processes found for root_pid=#{root_pid}>")
+    else
+      targets.first(16).each do |info|
+        io.puts("  pid=#{info[:pid]} ppid=#{info[:ppid]} pgid=#{info[:pgid]} state=#{info[:state]} cmd=#{info[:cmdline]}")
+      end
+    end
+
+    gdb_bin = find_gdb_bin
+    targets.first(4).each do |info|
+      p = info[:pid]
+      io.puts("=== PROCESS pid=#{p} comm=#{info[:comm]} state=#{info[:state]} cmdline=#{info[:cmdline]} ===")
+      if File.directory?("/proc/#{p}")
+        dump_linux_proc_details(p, io)
+      else
+        io.puts("/proc/#{p}: unavailable on this platform")
+      end
+
+      if gdb_bin
+        io.puts("gdb -p #{p} -batch -ex \"thread apply all bt\":")
+        bt = run_gdb_backtrace(gdb_bin, p, gdb_timeout)
+        bt_lines = bt.lines
+        if bt_lines.empty?
+          io.puts("  <empty gdb output>")
+        else
+          bt_lines.first(120).each { |ln| io.puts("  #{ln.chomp}") }
+          if bt_lines.length > 120
+            io.puts("  ... (#{bt_lines.length - 120} more gdb lines omitted)")
+          end
+        end
+      else
+        io.puts("gdb: not installed on PATH")
+      end
+    end
+
+    io.puts("--- END TIMEOUT DIAGNOSTICS (label=#{label}) ---")
+    io.flush
+    targets.map { |t| t[:pid] }
+  end
+
+  def terminate_tree(root_pid, extra_pids, kill_after)
+    kill_targets = lambda do |sig|
+      begin
+        Process.kill(sig, -root_pid)
+      rescue Errno::ESRCH, Errno::EPERM
+        nil
+      end
+      extra_pids.each do |p|
+        next if p <= 0 || p == Process.pid
+
+        begin
+          Process.kill(sig, p)
+        rescue Errno::ESRCH, Errno::EPERM
+          nil
+        end
+      end
+    end
+
+    kill_targets.call("TERM")
+    grace_deadline = monotonic_now + kill_after
+    while monotonic_now < grace_deadline
+      begin
+        return if Process.waitpid2(root_pid, Process::WNOHANG)
+      rescue Errno::ECHILD
+        return
+      end
+      sleep 0.1
+    end
+
+    kill_targets.call("KILL")
+    reap_deadline = monotonic_now + 2.0
+    while monotonic_now < reap_deadline
+      begin
+        return if Process.waitpid2(root_pid, Process::WNOHANG)
+      rescue Errno::ECHILD
+        return
+      end
+      sleep 0.05
+    end
+  end
+
+  def run(argv)
+    opts = {
+      timeout: nil,
+      label: "command",
+      kill_after: 5,
+      gdb_timeout: 15,
+      child_path: nil
+    }
+
+    sep_idx = argv.index("--")
+    if sep_idx
+      opt_args = argv[0...sep_idx]
+      cmd = argv[(sep_idx + 1)..]
+    else
+      opt_args = argv.dup
+      cmd = []
+    end
+
+    parser = OptionParser.new do |o|
+      o.banner = "Usage: run-with-timeout-diag --timeout SEC [--label NAME] [--kill-after SEC] [--gdb-timeout SEC] [--child-path PATH] -- CMD [ARGS...]"
+      o.on("--timeout SEC", Float, "Timeout in seconds") { |v| opts[:timeout] = v }
+      o.on("--label NAME", String, "Diagnostic label") { |v| opts[:label] = v }
+      o.on("--kill-after SEC", Float, "Grace period after SIGTERM before SIGKILL (default: 5)") { |v| opts[:kill_after] = v }
+      o.on("--gdb-timeout SEC", Float, "Per-process gdb timeout in seconds (default: 15)") { |v| opts[:gdb_timeout] = v }
+      o.on("--child-path PATH", String, "Exact PATH to restore for the spawned command") { |v| opts[:child_path] = v }
+    end
+
+    if sep_idx
+      parser.parse!(opt_args)
+    else
+      parser.order!(opt_args)
+      cmd = opt_args
+    end
+
+    if opts[:timeout].nil? || opts[:timeout] <= 0 || cmd.empty?
+      $stderr.puts(parser.banner)
+      return 2
+    end
+
+    spawn_env = opts[:child_path] ? { "PATH" => opts[:child_path] } : {}
+    begin
+      child_pid = Process.spawn(spawn_env, *cmd, pgroup: true)
+    rescue Errno::ENOENT => e
+      $stderr.puts("run-with-timeout-diag: failed to run command '#{cmd.first}': #{e.message}")
+      return 127
+    rescue Errno::EACCES => e
+      $stderr.puts("run-with-timeout-diag: permission denied running '#{cmd.first}': #{e.message}")
+      return 126
+    end
+
+    forward_sig = lambda do |sig_name, sig_num|
+      begin
+        Process.kill(sig_name, -child_pid)
+      rescue Errno::ESRCH, Errno::EPERM
+        nil
+      end
+      exit(128 + sig_num)
+    end
+    Signal.trap("TERM") { forward_sig.call("TERM", 15) }
+    Signal.trap("INT")  { forward_sig.call("INT", 2) }
+
+    deadline = monotonic_now + opts[:timeout]
+    sleep_step = 0.05
+    loop do
+      res = Process.waitpid2(child_pid, Process::WNOHANG)
+      if res
+        st = res[1]
+        return st.exitstatus if st.exited?
+        return 128 + st.termsig if st.signaled?
+
+        return 1
+      end
+
+      rem = deadline - monotonic_now
+      if rem <= 0
+        pids = collect_diagnostics(
+          root_pid: child_pid,
+          label: opts[:label],
+          timeout_sec: opts[:timeout],
+          gdb_timeout: opts[:gdb_timeout]
+        )
+        terminate_tree(child_pid, pids, opts[:kill_after])
+        return 124
+      end
+
+      sleep([rem, sleep_step].min)
+      sleep_step = 0.2 if sleep_step < 0.2
+    end
+  end
+end
+
+exit(TimeoutDiagRunner.run(ARGV)) if $PROGRAM_NAME == __FILE__

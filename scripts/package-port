@@ -14,6 +14,7 @@ require "json"
 require "open3"
 require "optparse"
 require "pathname"
+require "rbconfig"
 require "securerandom"
 require "set"
 require "time"
@@ -1144,7 +1145,13 @@ module PortPackager
           "HOME" => smoke_tmp
         }
         bash_bin = ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).map { |d| File.join(d, "bash") }.find { |p| File.file?(p) && File.executable?(p) } || "/bin/bash"
-        timeout_bin = ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).map { |d| File.join(d, "timeout") }.find { |p| File.file?(p) && File.executable?(p) }
+        timeout_helper = File.join(__dir__, "run-with-timeout-diag")
+        smoke_timeout = begin
+          v = Integer(ENV.fetch("FILC_PACKAGE_SMOKE_TIMEOUT", "120"), 10)
+          v > 0 ? v : 120
+        rescue ArgumentError
+          120
+        end
         smoke_script = <<~'SH'.chomp
           export PS4='+ [port_package_smoke:${LINENO}] '
           trap 'rc=$?; echo "SMOKE_CMD_FAILED line=${LINENO} rc=$rc cmd=${BASH_COMMAND}" >&2' ERR
@@ -1154,7 +1161,12 @@ module PortPackager
           port_package_smoke
         SH
         bash_cmd = [bash_bin, "-eEuo", "pipefail", "-c", smoke_script]
-        bash_cmd = [timeout_bin, "120", *bash_cmd] if timeout_bin
+        if File.file?(timeout_helper)
+          bash_cmd = [RbConfig.ruby, timeout_helper, "--timeout", smoke_timeout.to_s, "--label", "port=#{name} stage=package_smoke", "--", *bash_cmd]
+        else
+          timeout_bin = ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).map { |d| File.join(d, "timeout") }.find { |p| File.file?(p) && File.executable?(p) }
+          bash_cmd = [timeout_bin, smoke_timeout.to_s, *bash_cmd] if timeout_bin
+        end
         panics_dir = ENV.fetch("FILC_PANICS_DIR", "/var/filc/panics")
         begin
           FileUtils.mkdir_p(panics_dir)
@@ -1164,7 +1176,16 @@ module PortPackager
         panics_before = File.directory?(panics_dir) ? Dir.children(panics_dir).each_with_object({}) { |n, h| h[n] = true } : {}
         out_err, st = Open3.capture2e(smoke_env, *bash_cmd)
         unless st.success?
-          tail = out_err.lines.last(80).join.strip
+          out_lines = out_err.lines
+          diag_idx = out_lines.index { |ln| ln.start_with?("--- TIMEOUT DIAGNOSTICS (") }
+          tail_lines = if diag_idx
+                         win_start = [diag_idx - 15, 0].max
+                         slice = out_lines[win_start..]
+                         slice.length <= 240 ? slice : (slice.first(220) + slice.last(20))
+                       else
+                         out_lines.last(80)
+                       end
+          tail = tail_lines.join.strip
           panic_blocks = []
           if File.directory?(panics_dir)
             new_panics = Dir.children(panics_dir).reject { |n| panics_before[n] || n.start_with?(".") }

@@ -492,8 +492,16 @@ on_exit() {
 }
 trap on_exit EXIT
 
+TIMEOUT_DIAG_HELPER="$REPO_ROOT/scripts/run-with-timeout-diag"
+
 run_with_timeout() {
-  if command -v timeout >/dev/null 2>&1; then
+  if [[ -f "$TIMEOUT_DIAG_HELPER" ]]; then
+    "$HOST_RUBY" "$TIMEOUT_DIAG_HELPER" \
+      --timeout "$TIMEOUT_SEC" \
+      --label "port=$PORT_NAME stage=$CURRENT_STAGE" \
+      --child-path "$PATH" \
+      -- "$@"
+  elif command -v timeout >/dev/null 2>&1; then
     timeout --foreground "$TIMEOUT_SEC" "$@"
   else
     "$@"
@@ -572,7 +580,13 @@ run_install_with_manifest() {
 }
 
 run_install_cmd() {
-  if command -v timeout >/dev/null 2>&1; then
+  if [[ -f "$TIMEOUT_DIAG_HELPER" ]]; then
+    run_install_with_manifest "$HOST_RUBY" "$TIMEOUT_DIAG_HELPER" \
+      --timeout "$TIMEOUT_SEC" \
+      --label "port=$PORT_NAME stage=$CURRENT_STAGE" \
+      --child-path "$PATH" \
+      -- "$@"
+  elif command -v timeout >/dev/null 2>&1; then
     run_install_with_manifest timeout --foreground "$TIMEOUT_SEC" "$@"
   else
     run_install_with_manifest "$@"
@@ -590,10 +604,8 @@ run_stage_fn() {
   export PORT_NAME CURRENT_STAGE PORT_FILE SRC_DIR PIZFIX CC CXX AR RANLIB NM lt_cv_sys_global_symbol_pipe PREFIX PKG_CONFIG_PATH PATH CFLAGS CXXFLAGS LDFLAGS JOBS
   if [[ "$use_lock" == "1" ]]; then
     run_install_cmd bash -c "$stage_script"
-  elif command -v timeout >/dev/null 2>&1; then
-    timeout --foreground "$TIMEOUT_SEC" bash -c "$stage_script"
   else
-    bash -c "$stage_script"
+    run_with_timeout bash -c "$stage_script"
   fi
 }
 

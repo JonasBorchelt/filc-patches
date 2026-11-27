@@ -1442,6 +1442,42 @@ Dir.mktmpdir("filc-pkg-test-") do |td|
   assert(!smb_st.success?, "broken relative symlink must fail package-port smoke check")
   assert(smb_e.include?("PACKAGE_SMOKE FAILED") && smb_e.include?("broken relative symlink"),
          "expected broken relative symlink error, got: #{smb_e}")
+
+  # 15d. Hanging port_package_smoke() must dump timeout diagnostics (gdb + process info) before kill and exit 124
+  FileUtils.rm_f(File.join(sm_pizfix, "libexec", "smtool-core", "smtool-broken"))
+  File.write(File.join(sm_state, "smtool.manifest.json"), JSON.pretty_generate(
+    "port" => "smtool",
+    "files" => [
+      "bin/smtool",
+      "bin/smtool-alias",
+      "libexec/smtool-core/smtool-status"
+    ]
+  ) + "\n")
+  mock_gdb = File.join(td, "mock-gdb-smoke")
+  File.write(mock_gdb, "#!/usr/bin/env bash\necho \"MOCK_SMOKE_GDB args=$*\"\necho \"#0 in smoke_hang_frame ()\"\n")
+  File.chmod(0o755, mock_gdb)
+  File.write(smtool_port, File.read(smtool_port).sub('grep -Fxq "smtool 2.0"', 'sleep 30'))
+  sm_out_to = File.join(td, "sm-out-timeout")
+  smt_env = BASE_ENV.merge("FILC_PACKAGE_SMOKE_TIMEOUT" => "1", "FILC_TIMEOUT_GDB_BIN" => mock_gdb)
+  smt_o, smt_e, smt_st = Open3.capture3(
+    smt_env,
+    "ruby", PACKAGE_SCRIPT,
+    "--repo-root", sm_repo,
+    "--work-dir", sm_work,
+    "--pizfix", sm_pizfix,
+    "--neutral-prefix", sm_pizfix,
+    "--ports-cache-dir", sm_cache,
+    "--out-dir", sm_out_to,
+    "--channel", "0.1.4",
+    "--arch", "x86_64-linux"
+  )
+  assert(!smt_st.success?, "hanging port_package_smoke must fail package-port")
+  assert(smt_e.include?("PACKAGE_SMOKE FAILED") && smt_e.include?("exit=124"),
+         "expected PACKAGE_SMOKE FAILED with exit=124, got: #{smt_e}")
+  assert(smt_e.include?("--- TIMEOUT DIAGNOSTICS (label=port=smtool stage=package_smoke,"),
+         "expected timeout diagnostics header in smoke error, got: #{smt_e}")
+  assert(smt_e.include?("MOCK_SMOKE_GDB args=-n -batch -p ") && smt_e.include?("smoke_hang_frame"),
+         "expected gdb backtrace in smoke timeout error, got: #{smt_e}")
 end
 
 # 16. Dotfiles (e.g. perl's .packlist) inside prefix must be normalized from slot view

@@ -1164,5 +1164,150 @@ Dir.mktmpdir("filc-stream-test-") do |tmp|
   assert(noff_by_name.dig("libc", "status") == "tested", "independent port libc must still complete when fail-fast=0")
   puts "FAIL_FAST_GUARD: PASS (ff_elapsed=#{ff_elapsed.round(2)}s, result=#{ff_summary['result']}, aborted=#{ff_summary['aborted_ports'].length}, default_isolation=OK)"
 
+  puts "=== [14/14] Guard 5: Upload-only resume after Stage-3 upload failure (0 rebuilds, full upload gates) ==="
+  resume_cache_manifest = File.join(tmp, "resume-cache-manifest.json")
+  resume_local_cache = File.join(tmp, "resume-local-artifacts")
+  resume_build_log = File.join(tmp, "resume-build-invocations.log")
+  resume_upload_log = File.join(tmp, "resume-upload-ops.log")
+
+  recording_bp = File.join(tmp, "recording-build-port")
+  File.write(recording_bp, <<~SH)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "$1" >> "${RESUME_BUILD_LOG}"
+    exec "#{fix[:mock_bp]}" "$@"
+  SH
+  File.chmod(0o755, recording_bp)
+
+  resume_upload_bin = File.join(tmp, "mock-upload-resume")
+  File.write(resume_upload_bin, <<~'RB')
+    #!/usr/bin/env ruby
+    require "json"
+    log_path = ENV.fetch("RESUME_UPLOAD_LOG")
+    mode = nil
+    meta = nil
+    ARGV.each_with_index do |a, i|
+      if a == "--stage-port-meta"
+        mode = "stage"
+        meta = ARGV[i + 1]
+      elsif a == "--head-verify-meta"
+        mode = "head"
+        meta = ARGV[i + 1]
+      end
+    end
+    rec = JSON.parse(File.read(meta, encoding: "UTF-8"))
+    pname = rec["name"]
+    File.open(log_path, "a") { |f| f.puts("#{mode} #{pname}") }
+    if mode == "stage" && ENV["FAIL_STAGE_PORT"] == pname
+      $stderr.puts("simulated transient upload failure for #{pname}")
+      exit 1
+    end
+    if mode == "head" && ENV["MISS_HEAD_PORT"] == pname
+      $stdout.puts("UPLOAD_PORTS_HEAD_VERIFY: MISS port=#{pname} channel=#{rec['channel']} arch=#{rec['arch']} reason=http=404")
+      exit 1
+    end
+    if mode == "stage" && ENV["REAL_UPLOAD_GATE_CHECK"] == "1"
+      # Run real upload-ports --dry-run to prove full leak-gate + SHA-256 + size-limit gates execute on resumed upload
+      exec("ruby", ENV.fetch("REAL_UPLOAD_BIN"), *ARGV, "--dry-run")
+    end
+    exit 0
+  RB
+  File.chmod(0o755, resume_upload_bin)
+
+  # Run 1: libc passes build + verify, then fails Stage-3 upload; other 5 ports upload cleanly
+  work_r1 = File.join(tmp, "work-resume-1")
+  out_r1 = File.join(tmp, "out-resume-1")
+  File.write(resume_build_log, "", encoding: "UTF-8")
+  File.write(resume_upload_log, "", encoding: "UTF-8")
+  r1_out, r1_err, r1_st = Open3.capture3(
+    common_env.merge(
+      "RESUME_BUILD_LOG" => resume_build_log,
+      "RESUME_UPLOAD_LOG" => resume_upload_log,
+      "FAIL_STAGE_PORT" => "libc"
+    ),
+    "ruby", STREAM_BIN,
+    "--repo-root", REPO_ROOT,
+    "--ports-dir", fix[:ports_dir],
+    "--toolchain-root", fix[:tc_root],
+    "--work-dir", work_r1,
+    "--out-dir", out_r1,
+    "--ports-cache-dir", fix[:cache_dir],
+    "--channel", "0.1.6",
+    "--arch", "x86_64-linux",
+    "--parallel", "4",
+    "--total-jobs", "16",
+    "--no-pin-cpus",
+    "--isolated-prefix",
+    "--no-bootstrap-timings",
+    "--timings-file", "",
+    "--skip-package-smoke",
+    "--cache-manifest", resume_cache_manifest,
+    "--local-artifact-cache", resume_local_cache,
+    "--upload",
+    "--upload-url", "http://127.0.0.1:1",
+    "--build-port-bin", recording_bp,
+    "--upload-ports-bin", resume_upload_bin,
+    "--source-date-epoch", "1700000000"
+  )
+  assert(!r1_st.success?, "run 1 must fail when libc Stage-3 upload fails:\n#{r1_out}\n#{r1_err}")
+  r1_summary = JSON.parse(File.read(File.join(work_r1, "publish-summary.json"), encoding: "UTF-8"))
+  assert(r1_summary["commit_allowed"] == false, "run 1 commit_allowed must be false")
+  r1_manifest = JSON.parse(File.read(resume_cache_manifest, encoding: "UTF-8")).fetch("ports")
+  assert(r1_manifest.key?("libc") && r1_manifest["libc"]["uploaded"] == false,
+         "run 1 must persist verified libc entry with uploaded=false: #{r1_manifest['libc'].inspect}")
+
+  # Run 2: Restart resumes libc at Stage 3 ONLY (0 build-port invocations, real upload-ports gates executed, index finalized!)
+  work_r2 = File.join(tmp, "work-resume-2")
+  out_r2 = File.join(tmp, "out-resume-2")
+  File.write(resume_build_log, "", encoding: "UTF-8")
+  File.write(resume_upload_log, "", encoding: "UTF-8")
+  r2_out, r2_err, r2_st = Open3.capture3(
+    common_env.merge(
+      "RESUME_BUILD_LOG" => resume_build_log,
+      "RESUME_UPLOAD_LOG" => resume_upload_log,
+      "MISS_HEAD_PORT" => "libc",
+      "REAL_UPLOAD_GATE_CHECK" => "1",
+      "REAL_UPLOAD_BIN" => File.join(REPO_ROOT, "scripts", "upload-ports")
+    ),
+    "ruby", STREAM_BIN,
+    "--repo-root", REPO_ROOT,
+    "--ports-dir", fix[:ports_dir],
+    "--toolchain-root", fix[:tc_root],
+    "--work-dir", work_r2,
+    "--out-dir", out_r2,
+    "--ports-cache-dir", fix[:cache_dir],
+    "--channel", "0.1.6",
+    "--arch", "x86_64-linux",
+    "--parallel", "4",
+    "--total-jobs", "16",
+    "--no-pin-cpus",
+    "--isolated-prefix",
+    "--no-bootstrap-timings",
+    "--timings-file", "",
+    "--skip-package-smoke",
+    "--cache-manifest", resume_cache_manifest,
+    "--local-artifact-cache", resume_local_cache,
+    "--upload",
+    "--upload-url", "http://127.0.0.1:1",
+    "--build-port-bin", recording_bp,
+    "--upload-ports-bin", resume_upload_bin,
+    "--source-date-epoch", "1700000000"
+  )
+  assert(r2_st.success?, "run 2 upload-only resume must succeed:\n#{r2_out}\n#{r2_err}")
+  r2_builds = File.readlines(resume_build_log, chomp: true).reject(&:empty?)
+  r2_ops = File.readlines(resume_upload_log, chomp: true)
+  assert(r2_builds.empty?, "run 2 must invoke build-port ZERO times on upload-only resume, got: #{r2_builds.inspect}")
+  assert(r2_ops.select { |l| l.start_with?("stage ") } == ["stage libc"],
+         "run 2 must stage-upload ONLY libc, got: #{r2_ops.inspect}")
+  assert(r2_out.include?("CACHE_CHECK port=libc ") && r2_out.include?("reason=upload_resume("),
+         "run 2 must log upload_resume for libc:\n#{r2_out}")
+  r2_summary = JSON.parse(File.read(File.join(work_r2, "publish-summary.json"), encoding: "UTF-8"))
+  assert(r2_summary["commit_allowed"] == true, "run 2 commit_allowed must be true")
+  assert(r2_summary["cached_ports"].sort == %w[app liba libb mid1 mid2],
+         "run 2 must cache the 5 already-uploaded ports: #{r2_summary['cached_ports'].inspect}")
+  assert(File.file?(File.join(out_r2, "0.1.6", "x86_64-linux", "index.json")),
+         "run 2 must finalize index.json after upload-only resume")
+  puts "UPLOAD_RESUME_GUARD: PASS (0 rebuilds, 5 cached + 1 upload-only resume with real upload-ports gates, index finalized)"
+
   puts "ALL PUBLISH-PORTS-STREAM TESTS PASSED"
 end

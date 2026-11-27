@@ -1569,7 +1569,12 @@ module PublishPortsStream
 
           # Incremental cache check: skip build & upload when build_key matches AND
           # artifacts are verified present via HEAD + X-Content-SHA256 (zero GET/downloads).
+          # When build_key + local SHA-256 verified artifacts match but remote HEAD misses
+          # during an --upload run, resume directly at Stage 3 (upload-only) with all
+          # upload gates (leak-gate, SHA-256, size-limit, minisign commit) intact.
           cache_hit = false
+          resumed_upload = false
+          resumed_staged_rec = nil
           cache_head = "skip"
           cache_reason = nil
           cached_rec = (!forced && opts[:cache_manifest]) ? cache_entries[pname] : nil
@@ -1617,6 +1622,7 @@ module PublishPortsStream
                 cache_reason = "local_artifact_miss"
               else
                 remote_ok = true
+                hv_reason = nil
                 if do_remote_head
                   up_env = clean_env_without(%w[FILC_PORTS_MINISIGN_KEY FILC_PORTS_MINISIGN_PASSWORD FILC_LEAK_EXACT_TOKENS FILC_LIVE_TOKEN])
                   hv_cmd = [
@@ -1650,10 +1656,28 @@ module PublishPortsStream
                   tmp_probe = nil
                   cache_hit = true
                   cache_reason = do_remote_head ? "cached" : "cached_local"
+                elsif opts[:upload]
+                  bin_abs = File.join(channel_dir, cached_pkg.dig("binary", "path"))
+                  if opts[:isolated_prefix]
+                    cache_verified_package_tree!(
+                      bin_tar_xz: bin_abs,
+                      pkg_trees_dir: pkg_trees_dir,
+                      port_name: pname
+                    )
+                  end
+                  resumed_payload = staged_payload.merge("cached" => false, "resumed_upload" => true)
+                  File.write(tmp_probe, "#{JSON.pretty_generate(sort_json(resumed_payload))}\n", encoding: "UTF-8")
+                  File.rename(tmp_probe, staged_meta_path)
+                  tmp_probe = nil
+                  resumed_upload = true
+                  resumed_staged_rec = resumed_payload
+                  cache_reason = "upload_resume(#{hv_reason || 'head_miss'})"
                 end
               end
             rescue StandardError => e
               cache_hit = false
+              resumed_upload = false
+              resumed_staged_rec = nil
               cache_head = "miss" if do_remote_head
               cache_reason = "cache_error(#{e.class})"
             ensure
@@ -1713,26 +1737,34 @@ module PublishPortsStream
             estimated_duration: timings[pname]
           )
 
-          mu.synchronize do
-            $stdout.puts(
-              "STREAM_SLOT[#{slot_idx}] START #{pname} (cp=#{cp_map[pname]}s cores=#{slot_cores} timeout=#{port_timeout}s" \
-              "#{cpu_range ? " cpus=#{cpu_range}" : ''} deps=#{tdeps.length}#{forced ? ' forced=1' : ''})"
-            )
-            $stdout.puts("FILC_PORT #{pname} building policy=#{meta['policy_class']} stage=build")
-            $stdout.flush
-          end
-
-          build_ok = false
-          verify_ok = false
+          build_ok = resumed_upload
+          verify_ok = resumed_upload
           upload_ok = !opts[:upload]
           fail_stage = nil
           fail_kind = nil
           fail_reason = nil
           fail_details = []
           build_status = "tested"
-          staged_rec = nil
+          staged_rec = resumed_staged_rec
 
-          begin
+          if resumed_upload
+            mu.synchronize do
+              $stdout.puts("STREAM_SLOT[#{slot_idx}] RESUME_UPLOAD #{pname} (reusing locally verified artifacts, build_key=#{build_key[0, 12]})")
+              $stdout.flush
+            end
+          else
+            mu.synchronize do
+              $stdout.puts(
+                "STREAM_SLOT[#{slot_idx}] START #{pname} (cp=#{cp_map[pname]}s cores=#{slot_cores} timeout=#{port_timeout}s" \
+                "#{cpu_range ? " cpus=#{cpu_range}" : ''} deps=#{tdeps.length}#{forced ? ' forced=1' : ''})"
+              )
+              $stdout.puts("FILC_PORT #{pname} building policy=#{meta['policy_class']} stage=build")
+              $stdout.flush
+            end
+          end
+
+          unless resumed_upload
+            begin
             # Stage 1: Isolated per-port prefix view + build-port (ZERO secrets in scope)
             build_pizfix = neutral_prefix
             wrapper_dir = nil
@@ -1862,6 +1894,7 @@ module PublishPortsStream
           ensure
             FileUtils.rm_rf(view_info[:view_root]) if view_info && view_info[:view_root]
           end
+          end
 
           # Unlock downstream DAG dependents immediately once build + verify + tree cache succeeded!
           if verify_ok
@@ -1938,22 +1971,27 @@ module PublishPortsStream
           mu.synchronize do
             active_count -= 1
             done_count += 1
-            measured_durations[pname] = port_dur if build_ok
+            measured_durations[pname] = port_dur if build_ok && !resumed_upload
+
+            # Persist cache manifest entry as soon as build + verify succeeded (even if
+            # Stage 3 upload failed transiently), so a restart can resume upload-only
+            # from the verified local_artifact_cache without rebuilding.
+            if build_ok && verify_ok && staged_rec
+              updated_cache_entries[pname] = {
+                "build_key" => build_key,
+                "toolchain_id" => toolchain_id,
+                "channel" => opts[:channel],
+                "arch" => opts[:arch],
+                "package" => staged_rec["package"],
+                "sums" => staged_rec["sums"],
+                "provenance_allowed" => staged_rec["provenance_allowed"],
+                "size_record" => staged_rec["size_record"],
+                "smoke" => staged_rec["smoke"],
+                "uploaded" => upload_ok
+              }
+            end
 
             if build_ok && verify_ok && upload_ok
-              if staged_rec
-                updated_cache_entries[pname] = {
-                  "build_key" => build_key,
-                  "toolchain_id" => toolchain_id,
-                  "channel" => opts[:channel],
-                  "arch" => opts[:arch],
-                  "package" => staged_rec["package"],
-                  "sums" => staged_rec["sums"],
-                  "provenance_allowed" => staged_rec["provenance_allowed"],
-                  "size_record" => staged_rec["size_record"],
-                  "smoke" => staged_rec["smoke"]
-                }
-              end
               results[pname] = {
                 "name" => pname,
                 "version" => meta["version"],

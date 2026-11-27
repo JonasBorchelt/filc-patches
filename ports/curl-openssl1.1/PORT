@@ -1,42 +1,99 @@
 NAME="curl-openssl1.1"
-VERSION="8.23.0"
+VERSION="7.74.0+deb11u16"
 LICENSE="curl"
 SUPPORT_STATUS="eol"
 EOL_DATE="2023-09-11"
 SECURITY_SOURCE="freexian-elts"
-UPSTREAM_URL="https://github.com/curl/curl/releases/download/curl-8_23_0/curl-8.23.0.tar.xz"
-UPSTREAM_SHA256="8dadd7d2536a314f982ad05a651b713f426bf7d02cc2c76cffb9796f2218e6c5"
-UPSTREAM_SHA256_SOURCE="pgp:https://github.com/curl/curl/releases/download/curl-8_23_0/curl-8.23.0.tar.xz.asc key:ports/pgp-keys/curl-release-key.asc fpr:27EDEAF22F3ABCEB50DB9A125CC908FDB71E12C2"
-UPSTREAM_SIG_URL="https://github.com/curl/curl/releases/download/curl-8_23_0/curl-8.23.0.tar.xz.asc"
-UPSTREAM_PGP_KEY="ports/pgp-keys/curl-release-key.asc"
-UPSTREAM_PGP_FPR="27EDEAF22F3ABCEB50DB9A125CC908FDB71E12C2"
-EXTRACT_DIR="curl-8.23.0"
+UPSTREAM_URL="https://deb.freexian.com/extended-lts/pool/main/c/curl/curl_7.74.0.orig.tar.gz"
+UPSTREAM_SHA256="e56b3921eeb7a2951959c02db0912b5fcd5fdba5aca071da819e1accf338bbd7"
+DEBIAN_TARBALL_URL="https://deb.freexian.com/extended-lts/pool/main/c/curl/curl_7.74.0-1.3+deb11u16.debian.tar.xz"
+DEBIAN_TARBALL_SHA256="eb1c67ce096c696ad7e8346abfb9005f993d8f0d2062529eaf3ebdd72a210b0d"
+DEBIAN_DSC_SHA256="5fed534496027faffb3e607d5c24373d915f3d181287eb0d207c7d87bcd1ee01"
+UPSTREAM_SHA256_SOURCE="debian-elts:https://deb.freexian.com/extended-lts/dists/bullseye/InRelease pkg:curl ver:7.74.0-1.3+deb11u16 key:ports/pgp-keys/freexian-elts-archive-key.asc fpr:AB597C4F6F3380BD4B2BEBC2A07310D369055D5A"
+UPSTREAM_PGP_KEY="ports/pgp-keys/freexian-elts-archive-key.asc"
+UPSTREAM_PGP_FPR="AB597C4F6F3380BD4B2BEBC2A07310D369055D5A"
+# Applied all 45 security/bugfix patches from Debian bullseye ELTS 7.74.0-1.3+deb11u16
+# in exact debian/patches/series order (skipping Debian packaging/gnutls/nss patches):
+DEBIAN_SECURITY_PATCHES="14_transfer-strip-credentials-from-the-auto-referer-hea.patch 15_vtls-add-isproxy-argument-to-Curl_ssl_get-addsession.patch fix-regression-microseconds-instead-of-seconds.patch CVE-2021-22898.patch CVE-2021-22945.patch CVE-2021-22946.patch CVE-2021-22947.patch CVE-2021-22924.patch CVE-2022-22576.patch CVE-2022-27775.patch CVE-2022-27776.patch CVE-2022-27781.patch CVE-2022-27782_part1.patch CVE-2022-27782_part2.patch CVE-2022-32205.patch CVE-2022-32206.patch CVE-2022-32207.patch CVE-2022-32208.patch CVE-2022-27774_1_of_4.patch CVE-2022-27774_2_of_4.patch CVE-2022-27774_3_of_4.patch CVE-2022-27774_4_of_4.patch cookie-reject-cookies-with-control-bytes.patch test8-verify-that-ctrl-byte-cookies-are-ignored.patch CVE-2022-32221.patch CVE-2022-43552.patch CVE-2023-23916.patch CVE-2023-27533.patch CVE-2023-27534.patch CVE-2023-27538.patch add_Curl_timestrcmp.patch CVE-2023-27535.patch CVE-2023-27536.patch CVE-2023-28321.patch CVE-2023-28322.patch CVE-2023-38545.patch CVE-2023-38546.patch CVE-2023-46218.patch CVE-2024-2398.patch CVE-2024-7264-0.patch CVE-2024-7264-1.patch CVE-2024-8096.patch CVE-2025-9086.patch fix-CVE-2023-27534-regression-1.patch fix-CVE-2023-27534-regression-2.patch"
+EXTRACT_DIR="curl-7.74.0"
 TIER=4
 DEPS="openssl1.1 nghttp2 zlib zstd brotli libidn2 pkgconf"
 BUILD_SYSTEM="autotools"
-CONFIGURE_ARGS="--disable-shared --enable-static --with-openssl --with-nghttp2 --with-zlib --with-zstd --with-brotli --with-libidn2 --without-libpsl --enable-websockets"
+CONFIGURE_ARGS="--disable-shared --enable-static --with-ssl --with-nghttp2 --with-zlib --with-zstd --with-brotli --with-libidn2 --without-libpsl --without-librtmp --without-libssh2 --disable-ldap --disable-ldaps"
 MAKE_ARGS=""
 INSTALL_ARGS=""
 TEST_CMD=""
 POLICY_CLASS="P3-BuildOpt"
-POLICY_RATIONALE="Static libcurl.a variant of curl 8.23.0 (0 patches) built against openssl1.1 and installed side-by-side under opt/openssl1.1/ so legacy PHP 7.x/5.6 ports link exclusively against OpenSSL 1.1.1w without loading OpenSSL 3 into the same musl process (musl ignores ELF symbol versioning)."
+POLICY_RATIONALE="EOL legacy curl 7.74.0 from Freexian Extended LTS bullseye (7.74.0-1.3+deb11u16, 45 ELTS security patches verified via signed InRelease -> Sources.gz, 0 Fil-C patches) matching our bullseye openssl1.1 (1.1.1w+deb11u8), built static-only (--disable-shared --enable-static) under opt/openssl1.1/ so legacy PHP 7.x/5.6 ports link exclusively against OpenSSL 1.1.1w without loading OpenSSL 3 into the same musl process (musl ignores ELF symbol versioning)."
 FILC_ORIGIN_REF="cede3de02b42:projects/curl.projeny"
 
 port_configure() {
-  CPPFLAGS="-I$PIZFIX/opt/openssl1.1/include -I$PIZFIX/include" \
+  # CVE-2022-32207.patch adds lib/fopen.c to lib/Makefile.inc and fchmod to
+  # configure.ac. Mirror fopen.c into the pre-generated lib/Makefile.in and
+  # pass -DHAVE_FCHMOD=1 so we build cleanly without requiring autoreconf.
+  "${HOST_RUBY:-ruby}" -e '
+    p = "lib/Makefile.in"
+    s = File.binread(p)
+    rep = lambda do |pat, repl, label|
+      n = s.scan(pat).length
+      raise "expected 1 match for #{label}, got #{n}" unless n == 1
+      s = s.sub(pat, repl)
+    end
+    rep.call(/libcurl_la-file\.lo libcurl_la-fileinfo\.lo \\/,
+             "libcurl_la-file.lo libcurl_la-fileinfo.lo libcurl_la-fopen.lo \\\\",
+             "libcurl_la objects")
+    rep.call(/libcurlu_la-fileinfo\.lo libcurlu_la-formdata\.lo \\/,
+             "libcurlu_la-fileinfo.lo libcurlu_la-fopen.lo libcurlu_la-formdata.lo \\\\",
+             "libcurlu_la objects")
+    rep.call(%r{\./\$\(DEPDIR\)/libcurl_la-fileinfo\.Plo \\},
+             "./$(DEPDIR)/libcurl_la-fileinfo.Plo \\\n\t./$(DEPDIR)/libcurl_la-fopen.Plo \\",
+             "libcurl_la depfiles")
+    rep.call(%r{\./\$\(DEPDIR\)/libcurlu_la-fileinfo\.Plo \\},
+             "./$(DEPDIR)/libcurlu_la-fileinfo.Plo \\\n\t./$(DEPDIR)/libcurlu_la-fopen.Plo \\",
+             "libcurlu_la depfiles")
+    rep.call(/  file\.c fileinfo\.c formdata\.c /,
+             "  file.c fileinfo.c fopen.c formdata.c ",
+             "LIB_CFILES")
+    rep.call(/  dotdot\.h easyif\.h escape\.h file\.h fileinfo\.h formdata\.h /,
+             "  dotdot.h easyif.h escape.h file.h fileinfo.h fopen.h formdata.h ",
+             "LIB_HFILES")
+    rep.call(%r{^@AMDEP_TRUE@@am__include@ @am__quote@\./\$\(DEPDIR\)/libcurl_la-fileinfo\.Plo@am__quote@ # am--include-marker$},
+             "\\0\n@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libcurl_la-fopen.Plo@am__quote@ # am--include-marker",
+             "libcurl_la am__include")
+    rep.call(%r{^@AMDEP_TRUE@@am__include@ @am__quote@\./\$\(DEPDIR\)/libcurlu_la-fileinfo\.Plo@am__quote@ # am--include-marker$},
+             "\\0\n@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libcurlu_la-fopen.Plo@am__quote@ # am--include-marker",
+             "libcurlu_la am__include")
+    %w[libcurl_la libcurlu_la].each do |tgt|
+      rule_re = /^#{tgt}-fileinfo\.lo: fileinfo\.c\n(?:.+\n){5}/
+      m = s.match(rule_re)
+      raise "compile rule for #{tgt}-fileinfo.lo not found" unless m
+      fopen_rule = m[0].gsub("fileinfo", "fopen")
+      s = s.sub(rule_re, "#{m[0]}\n#{fopen_rule}")
+    end
+    File.binwrite(p, s)
+  '
+  touch aclocal.m4 configure lib/curl_config.h.in Makefile.in lib/Makefile.in src/Makefile.in
+  for mf in tests/Makefile.in tests/data/Makefile.in tests/unit/Makefile.in; do
+    test -f "$mf" && touch "$mf"
+  done
+
+  CPPFLAGS="-DHAVE_FCHMOD=1 -I$PIZFIX/opt/openssl1.1/include -I$PIZFIX/include" \
     LDFLAGS="-L$PIZFIX/opt/openssl1.1/lib -L$PIZFIX/lib -Wl,-rpath,$PIZFIX/lib" \
     PKG_CONFIG_PATH="$PIZFIX/opt/openssl1.1/lib/pkgconfig:$PIZFIX/lib/pkgconfig" \
     ./configure --prefix="$PIZFIX/opt/openssl1.1" \
       --disable-shared \
       --enable-static \
-      --with-openssl="$PIZFIX/opt/openssl1.1" \
+      --with-ssl="$PIZFIX/opt/openssl1.1" \
       --with-nghttp2="$PIZFIX" \
       --with-zlib="$PIZFIX" \
       --with-zstd="$PIZFIX" \
       --with-brotli="$PIZFIX" \
       --with-libidn2="$PIZFIX" \
       --without-libpsl \
-      --enable-websockets \
+      --without-librtmp \
+      --without-libssh2 \
+      --disable-ldap \
+      --disable-ldaps \
       --with-ca-bundle=/etc/ssl/certs/ca-certificates.crt \
       --with-ca-path=/etc/ssl/certs
 }
@@ -46,7 +103,7 @@ port_install() {
   rm -f "$PIZFIX/opt/openssl1.1/lib/libcurl.la"
   mkdir -p "$PIZFIX/lib/pkgconfig"
 
-  "${HOST_RUBY:-ruby}" - "$PIZFIX" "$VERSION" <<'RB'
+  "${HOST_RUBY:-ruby}" - "$PIZFIX" "7.74.0" <<'RB'
 pizfix, fallback_ver = ARGV
 opt_pc = File.join(pizfix, "opt/openssl1.1/lib/pkgconfig/libcurl.pc")
 top_pc = File.join(pizfix, "lib/pkgconfig/libcurl11.pc")
@@ -198,6 +255,7 @@ port_test() {
 
   ver="$("$curl_bin" --version)"
   printf '%s\n' "$ver"
+  printf '%s\n' "$ver" | grep -q 'curl 7\.74\.0 '
   printf '%s\n' "$ver" | grep -q 'OpenSSL/1\.1\.1w'
   printf '%s\n' "$ver" | grep -q 'HTTP2'
   printf '%s\n' "$ver" | grep -q 'zstd'
@@ -355,6 +413,7 @@ port_package_smoke() {
   fi
 
   ver="$("$curl_bin" --version)"
+  printf '%s\n' "$ver" | grep -q 'curl 7\.74\.0 '
   printf '%s\n' "$ver" | grep -q 'OpenSSL/1\.1\.1w'
   printf '%s\n' "$ver" | grep -q 'HTTP2'
   "$cfg_bin" --prefix | grep -Fxq "$(cd "$PKG_PREFIX/opt/openssl1.1" && pwd -P)"

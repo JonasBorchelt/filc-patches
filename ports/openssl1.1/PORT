@@ -84,7 +84,7 @@ port_install() {
 }
 
 port_test() {
-  local ver modver cflags dgst_out
+  local ver modver cflags dgst_out verify_out
   ver="$("$PIZFIX/bin/openssl11" version)"
   grep -q 'OpenSSL 1\.1\.1w' <<<"$ver"
   modver="$(pkg-config --modversion openssl11)"
@@ -98,14 +98,24 @@ port_test() {
   local td
   td="$(mktemp -d)"
   printf 'filc-openssl11-check\n' > "$td/in.txt"
+  printf 'filc-openssl11-tampered\n' > "$td/tampered.txt"
   dgst_out="$("$PIZFIX/bin/openssl11" dgst -sha256 "$td/in.txt")"
   grep -q 'SHA256' <<<"$dgst_out"
   "$PIZFIX/bin/openssl11" enc -aes-256-cbc -pbkdf2 -pass pass:filc-test -in "$td/in.txt" -out "$td/out.enc"
   "$PIZFIX/bin/openssl11" enc -d -aes-256-cbc -pbkdf2 -pass pass:filc-test -in "$td/out.enc" -out "$td/out.txt"
   cmp -s "$td/in.txt" "$td/out.txt"
-  "$PIZFIX/bin/openssl11" genpkey -algorithm ED25519 -out "$td/ed.key"
-  "$PIZFIX/bin/openssl11" pkeyutl -sign -inkey "$td/ed.key" -rawin -in "$td/in.txt" -out "$td/in.sig"
-  "$PIZFIX/bin/openssl11" pkeyutl -verify -inkey "$td/ed.key" -rawin -in "$td/in.txt" -sigfile "$td/in.sig"
+  "$PIZFIX/bin/openssl11" genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$td/ec.key"
+  "$PIZFIX/bin/openssl11" pkey -in "$td/ec.key" -pubout -out "$td/ec.pub"
+  "$PIZFIX/bin/openssl11" dgst -sha256 -sign "$td/ec.key" -out "$td/ec.sig" "$td/in.txt"
+  verify_out="$("$PIZFIX/bin/openssl11" dgst -sha256 -verify "$td/ec.pub" -signature "$td/ec.sig" "$td/in.txt")"
+  grep -Fq 'Verified OK' <<<"$verify_out"
+  ! "$PIZFIX/bin/openssl11" dgst -sha256 -verify "$td/ec.pub" -signature "$td/ec.sig" "$td/tampered.txt" >/dev/null 2>&1
+  "$PIZFIX/bin/openssl11" genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$td/rsa.key"
+  "$PIZFIX/bin/openssl11" pkey -in "$td/rsa.key" -pubout -out "$td/rsa.pub"
+  "$PIZFIX/bin/openssl11" dgst -sha256 -sign "$td/rsa.key" -out "$td/rsa.sig" "$td/in.txt"
+  verify_out="$("$PIZFIX/bin/openssl11" dgst -sha256 -verify "$td/rsa.pub" -signature "$td/rsa.sig" "$td/in.txt")"
+  grep -Fq 'Verified OK' <<<"$verify_out"
+  ! "$PIZFIX/bin/openssl11" dgst -sha256 -verify "$td/rsa.pub" -signature "$td/rsa.sig" "$td/tampered.txt" >/dev/null 2>&1
   rm -rf "$td"
 }
 

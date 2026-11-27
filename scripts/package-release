@@ -556,6 +556,7 @@ Verified by the toolchain end-to-end self-test and full userland port sweep:
 - \`semctl(GETALL/SETALL)\` roundtrip and out-of-bounds memory-safety trap
 - \`prctl(PR_SET_NAME)\` TGID leader \`/proc/self/comm\` synchronization
 - \`<ucontext.h>\` multi-fiber GC stress test and fiber stack-overflow memory-safety trap
+- \`RTLD_GLOBAL\` duplicate-export \`FunctionObject\` isolation (\`TEST (l)\`: independent \`.so\` plugins without \`-Wl,-Bsymbolic-functions\`, zero exported or preemptible \`pizlonatedFIP\` symbols)
 - Full userland port sweep across the repository port set, including \`perl 5.40.5\` with zero platform exclusions
 
 ## Known limitations

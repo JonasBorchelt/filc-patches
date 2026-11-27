@@ -278,6 +278,21 @@ if [[ "$PKG_PATCH_SHA" != "$STREAM_PATCH_SHA" ]]; then
 fi
 echo "VERSIONED RELEASE NOTES 0.1.5 & PATCH_SERIES_SHA256 PARITY OK ($PKG_PATCH_SHA)"
 
+OUT_016="$TMP_DIR/out-016"
+FILC_RELEASE_PUBLIC_COMMIT="$MOCK_PUBLIC_SHA" \
+  "$REPO_ROOT/scripts/package-release" "$MOCK_WORK" "$OUT_016" "0.1.6"
+grep -Fq "09-filc-hidden-fip-symbols.patch" "$OUT_016/RELEASE_NOTES.md"
+grep -Fq "pizlonatedFIP" "$OUT_016/RELEASE_NOTES.md"
+grep -Fq "RTLD_GLOBAL" "$OUT_016/RELEASE_NOTES.md"
+grep -Fq -- "-Wl,-Bsymbolic-functions" "$OUT_016/RELEASE_NOTES.md"
+grep -Fq "PR #375" "$OUT_016/RELEASE_NOTES.md"
+PKG_PATCH_SHA_016="$(awk -F= '$1=="PATCH_SERIES_SHA256"{print $2}' "$OUT_016/PROVENANCE")"
+if [[ "$PKG_PATCH_SHA_016" != "$STREAM_PATCH_SHA" ]]; then
+  echo "FAIL: 0.1.6 PATCH_SERIES_SHA256 mismatch between package-release ($PKG_PATCH_SHA_016) and publish-ports-stream ($STREAM_PATCH_SHA)" >&2
+  exit 1
+fi
+echo "VERSIONED RELEASE NOTES 0.1.6 & PATCH_SERIES_SHA256 PARITY OK ($PKG_PATCH_SHA_016)"
+
 echo "=== [3/4] Leak-Gate negative test ==="
 LEAK_WORK="$TMP_DIR/leak-tc"
 LEAK_OUT="$TMP_DIR/leak-out"

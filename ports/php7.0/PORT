@@ -43,6 +43,10 @@ port_configure() {
     rd_matches = s.scan(rd_pat).length
     raise "PHP_READDIR_R_TYPE probe not found in configure (matches=#{rd_matches})" unless rd_matches == 1
     s = s.sub(rd_pat, "#include <stdlib.h>\n\\1int main(void) {\\2closedir(dir);\\3closedir(dir);")
+    sp_old = "main() {char buf[20];exit(sprintf(buf,\"testing 123\")!=11); }"
+    sp_matches = s.scan(sp_old).length
+    raise "AC_ZEND_BROKEN_SPRINTF probe not found in configure (matches=#{sp_matches})" unless sp_matches == 1
+    s = s.sub(sp_old, "#include <stdio.h>\n#include <stdlib.h>\nint main(void) {char buf[20];exit(sprintf(buf,\"testing 123\")!=11); }")
     File.binwrite(p, s)
   '
   local shim_dir="$SRC_DIR/.filc-tools"
@@ -81,7 +85,7 @@ SHIM
   chmod +x "$shim_dir/bin/xml2-config" "$shim_dir/bin/icu-config"
   PATH="$shim_dir/bin:$PIZFIX/bin:$PATH" \
     CPPFLAGS="-I$PIZFIX/include -I$PIZFIX/include/ncursesw" \
-    CXXFLAGS="${CXXFLAGS:-} -I$PIZFIX/include -std=c++17" \
+    CXXFLAGS="${CXXFLAGS:-} -I$PIZFIX/include -std=c++17 -DU_USING_ICU_NAMESPACE=1" \
     LDFLAGS="-L$PIZFIX/lib -Wl,-rpath,$PIZFIX/lib -Wl,-Bsymbolic-functions" \
     EXTRA_LDFLAGS="-L$PIZFIX/lib -Wl,-rpath,$PIZFIX/lib -Wl,-Bsymbolic-functions" \
     PKG_CONFIG="$PIZFIX/bin/pkg-config --define-prefix" \

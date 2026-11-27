@@ -288,4 +288,75 @@ Origin-Project: php/php-src
 +	UBool		uret = 0;
  
  	intl_error_reset( NULL );
+--- a/main/snprintf.h
++++ b/main/snprintf.h
+@@ -86,7 +86,7 @@
+ PHPAPI int ap_php_asprintf(char **buf, const char *format, ...);
+ PHPAPI int php_sprintf (char* s, const char* format, ...) PHP_ATTRIBUTE_FORMAT(printf, 2, 3);
+ PHPAPI char * php_gcvt(double value, int ndigit, char dec_point, char exponent, char *buf);
+-PHPAPI char * php_conv_fp(register char format, register double num,
++PHPAPI char * php_conv_fp(char format, double num,
+ 		 boolean_e add_dp, int precision, char dec_point, bool_int * is_negative, char *buf, size_t *len);
+ 
+ END_EXTERN_C()
+@@ -153,11 +153,11 @@
+ typedef WIDE_INT wide_int;
+ typedef unsigned WIDE_INT u_wide_int;
+ 
+-PHPAPI char * ap_php_conv_10(register wide_int num, register bool_int is_unsigned,
+-	   register bool_int * is_negative, char *buf_end, register size_t *len);
++PHPAPI char * ap_php_conv_10(wide_int num, bool_int is_unsigned,
++	   bool_int * is_negative, char *buf_end, size_t *len);
+ 
+-PHPAPI char * ap_php_conv_p2(register u_wide_int num, register int nbits,
+-		 char format, char *buf_end, register size_t *len);
++PHPAPI char * ap_php_conv_p2(u_wide_int num, int nbits,
++		 char format, char *buf_end, size_t *len);
+ 
+ /* The maximum precision that's allowed for float conversion. Does not include
+  * decimal separator, exponent, sign, terminator. Currently does not affect
+--- a/main/php.h
++++ b/main/php.h
+@@ -324,7 +324,7 @@
+ BEGIN_EXTERN_C()
+ PHPAPI extern int (*php_register_internal_extensions_func)(void);
+ PHPAPI int php_register_internal_extensions(void);
+-PHPAPI int php_mergesort(void *base, size_t nmemb, register size_t size, int (*cmp)(const void *, const void *));
++PHPAPI int php_mergesort(void *base, size_t nmemb, size_t size, int (*cmp)(const void *, const void *));
+ PHPAPI void php_register_pre_request_shutdown(void (*func)(void *), void *userdata);
+ PHPAPI void php_com_initialize(void);
+ PHPAPI char *php_get_current_user(void);
+--- a/Zend/zend_operators.h
++++ b/Zend/zend_operators.h
+@@ -185,7 +185,7 @@
+ 
+ static zend_always_inline const void *zend_memrchr(const void *s, int c, size_t n)
+ {
+-	register const unsigned char *e;
++	const unsigned char *e;
+ 	if (n <= 0) {
+ 		return NULL;
+ 	}
+--- a/Zend/zend_hash.h
++++ b/Zend/zend_hash.h
+@@ -248,7 +248,7 @@
+ 
+ static zend_always_inline int _zend_handle_numeric_str(const char *key, size_t length, zend_ulong *idx)
+ {
+-	register const char *tmp = key;
++	const char *tmp = key;
+ 
+ 	if (*tmp > '9') {
+ 		return 0;
+--- a/Zend/zend_string.h
++++ b/Zend/zend_string.h
+@@ -323,7 +323,7 @@
+ 
+ static zend_always_inline zend_ulong zend_inline_hash_func(const char *str, size_t len)
+ {
+-	register zend_ulong hash = Z_UL(5381);
++	zend_ulong hash = Z_UL(5381);
+ 
+ 	/* variant with the hash unrolled eight times */
+ 	for (; len >= 8; len -= 8) {
  

@@ -44,3 +44,23 @@ Origin-URL: https://github.com/pizlonator/fil-c/commit/18e0199cef6c30fc815442c0d
  			while (p < end) {
  				*r = zend_tolower_ascii(*p);
  				p++;
+--- a/ext/standard/string.c
++++ b/ext/standard/string.c
+@@ -1417,7 +1417,7 @@
+ 			if (c != (unsigned char*)ZSTR_VAL(s)) {
+ 				memcpy(ZSTR_VAL(res), ZSTR_VAL(s), c - (unsigned char*)ZSTR_VAL(s));
+ 			}
+-			r = c + (ZSTR_VAL(res) - ZSTR_VAL(s));
++			r = (unsigned char*)ZSTR_VAL(res) + (c - (unsigned char*)ZSTR_VAL(s));
+ 			while (c < e) {
+ 				*r = toupper(*c);
+ 				r++;
+@@ -1480,7 +1480,7 @@
+ 			if (c != (unsigned char*)ZSTR_VAL(s)) {
+ 				memcpy(ZSTR_VAL(res), ZSTR_VAL(s), c - (unsigned char*)ZSTR_VAL(s));
+ 			}
+-			r = c + (ZSTR_VAL(res) - ZSTR_VAL(s));
++			r = (unsigned char*)ZSTR_VAL(res) + (c - (unsigned char*)ZSTR_VAL(s));
+ 			while (c < e) {
+ 				*r = tolower(*c);
+ 				r++;

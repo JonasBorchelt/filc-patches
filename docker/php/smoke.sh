@@ -25,6 +25,7 @@ docker run --rm "${IMAGE}" sh -eux -c '
   test -x /usr/local/bin/docker-php-source
   test "$PHP_INI_DIR" = "/usr/local/etc/php"
   test "$PHP_SERIES" = "'"${PHP_SERIES}"'"
+  case "$PHP_LDFLAGS" in *-Wl,-Bsymbolic-functions*) ;; *) exit 1 ;; esac
   test -f /usr/local/etc/php/php.ini-development
   test -f /usr/local/etc/php/php.ini-production
   test -d /usr/local/etc/php/conf.d
@@ -118,10 +119,14 @@ if printf '%s\n' "$SHARED_OUT" | grep -Eq 'Warning:|Cannot load'; then
   exit 1
 fi
 
-# 3. Verify unknown extension fails clearly with Fil-C hint
+# 3. Verify unknown extension and PECL source dir fail clearly with Fil-C + -Wl,-Bsymbolic-functions hint
 ERR_OUT="$(docker run --rm "${IMAGE}" sh -c 'docker-php-ext-install nonexistent_ext_filc 2>&1; echo "RC=$?"')"
 printf '%s\n' "$ERR_OUT" | grep -Fq "RC=1"
 printf '%s\n' "$ERR_OUT" | grep -Fqi "fil-c"
+printf '%s\n' "$ERR_OUT" | grep -Fq -- "-Wl,-Bsymbolic-functions"
+PECL_ERR_OUT="$(docker run --rm "${IMAGE}" sh -c 'mkdir -p /tmp/fake-pecl && : > /tmp/fake-pecl/config.m4 && docker-php-ext-install /tmp/fake-pecl 2>&1; echo "RC=$?"')"
+printf '%s\n' "$PECL_ERR_OUT" | grep -Fq "RC=1"
+printf '%s\n' "$PECL_ERR_OUT" | grep -Fq -- "-Wl,-Bsymbolic-functions"
 
 # 4. Drop-in acceptance test (build a realistic downstream Dockerfile by only swapping FROM)
 TMP_CTX="$(mktemp -d)"

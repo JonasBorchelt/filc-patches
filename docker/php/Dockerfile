@@ -42,11 +42,15 @@ ARG SUPPORT_TIER=active
 ENV DEBIAN_FRONTEND=noninteractive \
     FILC_CHANNEL="${FILC_CHANNEL}" \
     PHP_SERIES="${PHP_VERSION}"
+# Until Fil-C 0.1.6 marks pizlonatedFIP<sig>_* hidden in FilPizlonator,
+# out-of-tree/PECL shared extensions built against Fil-C 0.1.5 need
+# -Wl,-Bsymbolic-functions so get_module is not interposed across RTLD_GLOBAL
+# extensions on musl.
 ENV PHP_VERSION="${PHP_FULL_VERSION}" \
     PHP_INI_DIR="/usr/local/etc/php" \
     PHP_CFLAGS="-O2" \
     PHP_CPPFLAGS="-O2" \
-    PHP_LDFLAGS="" \
+    PHP_LDFLAGS="-Wl,-Bsymbolic-functions" \
     SSL_CERT_FILE="/etc/ssl/certs/ca-certificates.crt" \
     SSL_CERT_DIR="/etc/ssl/certs" \
     PATH="/usr/local/sbin:/usr/local/bin:/opt/filc/${FILC_CHANNEL}/pizfix/bin:/usr/sbin:/usr/bin:/sbin:/bin"

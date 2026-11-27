@@ -1,20 +1,50 @@
 #!/bin/sh
 # Drop-in replacement for docker-php-ext-install in Unofficial Fil-C PHP images.
-# Activates prebuilt Fil-C shared extensions or confirms statically built-in
-# extensions; reports a clear Fil-C guidance error for unavailable extensions.
+# Activates prebuilt Fil-C shared extensions, confirms statically built-in
+# extensions, or builds local PECL/source extension directories with
+# -Wl,-Bsymbolic-functions when phpize and a Fil-C compiler are available.
 set -eu
 
 ini_name=""
+jobs="1"
 exts=""
+
+append_flag() {
+  cur="$1"
+  flag="$2"
+  case " ${cur} " in
+    *" ${flag} "*) printf '%s' "$cur" ;;
+    *) printf '%s' "${cur:+${cur} }${flag}" ;;
+  esac
+}
+
+# Workaround for Fil-C 0.1.5 (until 0.1.6 hides pizlonatedFIP<sig>_*):
+# bind defined function symbols locally in PECL/out-of-tree shared extensions
+# so pizlonatedFO_get_module cannot be interposed across RTLD_GLOBAL DSOs.
+PHP_LDFLAGS="$(append_flag "${PHP_LDFLAGS:-}" "-Wl,-Bsymbolic-functions")"
+LDFLAGS="$(append_flag "${LDFLAGS:-}" "-Wl,-Bsymbolic-functions")"
+EXTRA_LDFLAGS="$(append_flag "${EXTRA_LDFLAGS:-}" "-Wl,-Bsymbolic-functions")"
+export PHP_LDFLAGS LDFLAGS EXTRA_LDFLAGS
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    -j*|--jobs=*)
-      # Accepted for compatibility with official php Dockerfiles (e.g. -j$(nproc)).
-      ;;
-    -j|--jobs)
+    -j)
       shift
       [ "$#" -gt 0 ] || { echo "error: -j requires an argument" >&2; exit 1; }
+      jobs="$1"
+      ;;
+    --jobs)
+      shift
+      [ "$#" -gt 0 ] || { echo "error: --jobs requires an argument" >&2; exit 1; }
+      jobs="$1"
+      ;;
+    -j*)
+      jobs="${1#-j}"
+      [ -n "$jobs" ] || jobs="1"
+      ;;
+    --jobs=*)
+      jobs="${1#--jobs=}"
+      [ -n "$jobs" ] || jobs="1"
       ;;
     --ini-name)
       shift
@@ -25,7 +55,7 @@ while [ "$#" -gt 0 ]; do
       ini_name="${1#--ini-name=}"
       ;;
     --help|-h)
-      echo "usage: $0 [-jN] [--ini-name FILE] ext-name [ext-name ...]"
+      echo "usage: $0 [-jN] [--ini-name FILE] ext-name-or-dir [ext-name-or-dir ...]"
       exit 0
       ;;
     --)
@@ -48,7 +78,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ -z "$exts" ]; then
-  echo "usage: $0 [-jN] [--ini-name FILE] ext-name [ext-name ...]" >&2
+  echo "usage: $0 [-jN] [--ini-name FILE] ext-name-or-dir [ext-name-or-dir ...]" >&2
   exit 1
 fi
 
@@ -64,17 +94,82 @@ is_loaded() {
   php -m 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -Fxq "$target"
 }
 
+find_filc_cc() {
+  if [ -n "${CC:-}" ] && command -v "$CC" >/dev/null 2>&1; then
+    printf '%s' "$CC"
+    return 0
+  fi
+  for cand in /opt/filc/*/build/bin/clang; do
+    if [ -x "$cand" ]; then
+      printf '%s' "$cand"
+      return 0
+    fi
+  done
+  return 1
+}
+
+build_pecl_source_dir() {
+  src_dir="$1"
+  phpize_bin=""
+  for cand in /usr/local/bin/phpize /opt/filc/*/pizfix/bin/phpize*; do
+    if [ -x "$cand" ]; then
+      phpize_bin="$cand"
+      break
+    fi
+  done
+  if [ -z "$phpize_bin" ] && command -v phpize >/dev/null 2>&1; then
+    phpize_bin="$(command -v phpize)"
+  fi
+  filc_cc="$(find_filc_cc || true)"
+  if [ -z "$phpize_bin" ] || [ -z "$filc_cc" ]; then
+    echo "error: cannot build PECL/source extension '${src_dir}' in this runtime image (missing phpize or Fil-C compiler)." >&2
+    echo "Build out-of-tree/PECL extensions with the Fil-C toolchain and link with -Wl,-Bsymbolic-functions (exported via PHP_LDFLAGS)." >&2
+    echo "See https://filc.connected.link for the Fil-C toolchain and ports." >&2
+    exit 1
+  fi
+  (
+    cd "$src_dir"
+    CC="$filc_cc" \
+      CFLAGS="${PHP_CFLAGS:--O2} ${CFLAGS:-}" \
+      CPPFLAGS="${PHP_CPPFLAGS:--O2} ${CPPFLAGS:-}" \
+      LDFLAGS="$LDFLAGS" \
+      EXTRA_LDFLAGS="$EXTRA_LDFLAGS" \
+      "$phpize_bin"
+    CC="$filc_cc" \
+      CFLAGS="${PHP_CFLAGS:--O2} ${CFLAGS:-}" \
+      CPPFLAGS="${PHP_CPPFLAGS:--O2} ${CPPFLAGS:-}" \
+      LDFLAGS="$LDFLAGS" \
+      EXTRA_LDFLAGS="$EXTRA_LDFLAGS" \
+      ./configure
+    make -j"$jobs" LDFLAGS="$LDFLAGS" EXTRA_LDFLAGS="$EXTRA_LDFLAGS"
+    make install
+  )
+  built_any=0
+  for built_so in "$src_dir"/modules/*.so; do
+    [ -f "$built_so" ] || continue
+    built_mod="$(basename "$built_so" .so)"
+    to_enable="${to_enable} ${built_mod}"
+    built_any=1
+  done
+  if [ "$built_any" -eq 0 ]; then
+    echo "error: PECL build in '${src_dir}' produced no .so module in modules/" >&2
+    exit 1
+  fi
+}
+
 to_enable=""
 for ext in $exts; do
   # Normalize common official Dockerfile extension aliases
   mod="$ext"
-  if [ -f "${ext_dir}/${mod}.so" ]; then
+  if [ -d "$ext" ] && { [ -f "${ext}/config.m4" ] || [ -f "${ext}/config0.m4" ]; }; then
+    build_pecl_source_dir "$ext"
+  elif [ -f "${ext_dir}/${mod}.so" ]; then
     to_enable="${to_enable} ${mod}"
   elif is_loaded "$mod"; then
     echo "filc-php: extension '${mod}' is already built into PHP ${PHP_VERSION:-} (no compilation needed)"
   else
     echo "error: extension '${ext}' is not available in this Unofficial Fil-C PHP runtime image." >&2
-    echo "Fil-C compiles PHP with a memory-safe capability ABI, so extensions must be compiled with the Fil-C toolchain rather than standard gcc/clang." >&2
+    echo "Fil-C compiles PHP with a memory-safe capability ABI, so extensions must be compiled with the Fil-C toolchain (using LDFLAGS=-Wl,-Bsymbolic-functions on Fil-C 0.1.5) rather than standard gcc/clang." >&2
     echo "Built-in extensions: $(php -m 2>/dev/null | awk 'NF && !/^\[/ { printf "%s ", tolower($0) }')" >&2
     if [ -d "$ext_dir" ]; then
       shared_list=""

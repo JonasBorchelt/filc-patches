@@ -1,6 +1,6 @@
 Subject: Preserve pointer capabilities for zend_type under Fil-C
 Policy-Class: P4-Audit
-Rationale: Fil-C drops pointer capabilities across integer round-trips. In PHP 7.3 zend_type packs class name strings and zend_class_entry pointers with low tag bits inside uintptr_t; represent zend_type as char * with pointer arithmetic under __FILC__ so capabilities survive.
+Rationale: Fil-C drops pointer capabilities across integer round-trips. In PHP 7.3 zend_type packs class name strings and zend_class_entry pointers with low tag bits inside uintptr_t; represent zend_type as char * with pointer arithmetic under __FILC__ so capabilities survive, and cast serialized on-disk zend_type offsets in ext/opcache/zend_file_cache.c through uintptr_t (using sizeof(uintptr_t) rather than sizeof(zend_type), which is 16 bytes for capability pointers) before UNSERIALIZE_STR + ZEND_TYPE_ENCODE_CLASS restore capability-bearing pointers.
 Upstream-Status: Fil-C-Specific
 Fil-C-Origin-Commits: fd1f26a649078e4e12cb01026cf43199b6e6d160
 Origin-Kind: filc-upstream
@@ -57,3 +57,33 @@ Origin-URL: https://github.com/pizlonator/fil-c/commit/fd1f26a649078e4e12cb01026
  
  #define ZEND_TYPE_ENCODE_CLASS_CONST_0(class_name) \
  	((zend_type) class_name)
+--- a/ext/opcache/zend_file_cache.c
++++ b/ext/opcache/zend_file_cache.c
+@@ -503,10 +503,10 @@
+ 					zend_string *type_name = ZEND_TYPE_NAME(p->type);
+ 
+ 					SERIALIZE_STR(type_name);
+-					p->type =
+-						(Z_UL(1) << (sizeof(zend_type)*8-1)) | /* type is class */
+-						(allow_null ? (Z_UL(1) << (sizeof(zend_type)*8-2)) : Z_UL(0)) | /* type allow null */
+-						(zend_type)type_name;
++					p->type = (zend_type)(uintptr_t)(
++						(Z_UL(1) << (sizeof(uintptr_t)*8-1)) | /* type is class */
++						(allow_null ? (Z_UL(1) << (sizeof(uintptr_t)*8-2)) : Z_UL(0)) | /* type allow null */
++						(uintptr_t)type_name);
+ 				}
+ 				p++;
+ 			}
+@@ -1127,9 +1127,9 @@
+ 				if (!IS_UNSERIALIZED(p->name)) {
+ 					UNSERIALIZE_STR(p->name);
+ 				}
+-				if (p->type & (Z_UL(1) << (sizeof(zend_type)*8-1))) { /* type is class */
+-					zend_bool allow_null = (p->type & (Z_UL(1) << (sizeof(zend_type)*8-2))) != 0; /* type allow null */
+-					zend_string *type_name = (zend_string*)(p->type & ~(((Z_UL(1) << (sizeof(zend_type)*8-1))) | ((Z_UL(1) << (sizeof(zend_type)*8-2)))));
++				if ((uintptr_t)p->type & (Z_UL(1) << (sizeof(uintptr_t)*8-1))) { /* type is class */
++					zend_bool allow_null = ((uintptr_t)p->type & (Z_UL(1) << (sizeof(uintptr_t)*8-2))) != 0; /* type allow null */
++					zend_string *type_name = (zend_string*)((uintptr_t)p->type & ~(((Z_UL(1) << (sizeof(uintptr_t)*8-1))) | ((Z_UL(1) << (sizeof(uintptr_t)*8-2)))));
+ 
+ 					UNSERIALIZE_STR(type_name);
+ 					p->type = ZEND_TYPE_ENCODE_CLASS(type_name, allow_null);

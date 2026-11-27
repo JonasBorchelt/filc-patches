@@ -1,0 +1,121 @@
+Subject: Backport PHP 7.4 shutdown stream use-after-free fix (bug #78396)
+Policy-Class: P2-Package
+Rationale: During request shutdown, zend_close_rsrc_list(&EG(regular_list)) frees stream resources before zend_objects_store_free_object_storage() runs object destructors such as phar_spl_foreign_dtor() -> phar_destroy_phar_data() -> php_stream_close(phar->fp). Under Fil-C, dereferencing the already-freed php_stream triggers a deterministic use-after-free panic (observed during phar.phar generation). Backport upstream PHP 7.4 commits 6bebe833a2fd65c4d42e3870317a4c6b4c7299ad and a18ad194c470156f03a5ea2cb9174cc26bc5e618 (PHP bug #78396) to guard _php_stream_free() with EG_FLAGS_IN_RESOURCE_SHUTDOWN and pass PHP_STREAM_FREE_RSRC_DTOR from stream_cookie_closer() and mysqlnd close_stream().
+Upstream-Status: Backport (php/php-src commits 6bebe833a2fd65c4d42e3870317a4c6b4c7299ad and a18ad194c470156f03a5ea2cb9174cc26bc5e618, PHP bug #78396)
+Fil-C-Origin-Commits: none
+Origin-Kind: backport
+Origin-Project: php/php-src
+Origin-Commit: 6bebe833a2fd65c4d42e3870317a4c6b4c7299ad
+Origin-URL: https://github.com/php/php-src/commit/6bebe833a2fd65c4d42e3870317a4c6b4c7299ad
+
+--- a/Zend/zend_globals.h
++++ b/Zend/zend_globals.h
+@@ -209,6 +209,7 @@
+ 	struct _zend_module_entry *current_module;
+ 
+ 	zend_bool active;
+ 	zend_bool valid_symbol_table;
++	zend_uchar flags;
+ 
+ 	zend_long assertions;
+@@ -227,6 +228,9 @@
+ 	zend_op       call_trampoline_op;
+ 
+ 	void *reserved[ZEND_MAX_RESERVED_RESOURCES];
+ };
++
++#define EG_FLAGS_INITIAL				(0)
++#define EG_FLAGS_IN_RESOURCE_SHUTDOWN	(1<<2)
+ 
+ struct _zend_ini_scanner_globals {
+--- a/Zend/zend_execute_API.c
++++ b/Zend/zend_execute_API.c
+@@ -146,6 +146,7 @@
+ 	EG(in_autoload) = NULL;
+ 	EG(autoload_func) = NULL;
+ 	EG(error_handling) = EH_NORMAL;
++	EG(flags) = EG_FLAGS_INITIAL;
+ 
+ 	zend_vm_stack_init();
+ 
+@@ -351,6 +352,7 @@
+ 		clean_non_persistent_constants();
+     } zend_end_try();
+ 
++	EG(flags) |= EG_FLAGS_IN_RESOURCE_SHUTDOWN;
+ 	zend_try {
+ 		zend_close_rsrc_list(&EG(regular_list));
+ 	} zend_end_try();
+--- a/main/streams/streams.c
++++ b/main/streams/streams.c
+@@ -365,6 +365,18 @@
+ 	int release_cast = 1;
+ 	php_stream_context *context = NULL;
+ 
++	/* During shutdown resources may be released before other resources still holding them.
++	 * When only resources are referenced this is not a problem, because they are refcounted
++	 * and will only be fully freed once the refcount drops to zero. However, if php_stream*
++	 * is held directly, we don't have this guarantee. To avoid use-after-free we ignore all
++	 * stream free operations in shutdown unless they come from the resource list destruction,
++	 * or by freeing an enclosed stream (in which case resource list destruction will not have
++	 * freed it). */
++	if ((EG(flags) & EG_FLAGS_IN_RESOURCE_SHUTDOWN) &&
++			!(close_options & (PHP_STREAM_FREE_RSRC_DTOR|PHP_STREAM_FREE_IGNORE_ENCLOSING))) {
++		return 1;
++	}
++
+ 	/* on an resource list destruction, the context, another resource, may have
+ 	 * already been freed (if it was created after the stream resource), so
+ 	 * don't reference it */
+--- a/main/streams/cast.c
++++ b/main/streams/cast.c
+@@ -86,7 +86,8 @@
+ 
+ 	/* prevent recursion */
+ 	stream->fclose_stdiocast = PHP_STREAM_FCLOSE_NONE;
+-	return php_stream_free(stream, PHP_STREAM_FREE_CLOSE | PHP_STREAM_FREE_KEEP_RSRC);
++	return php_stream_free(stream,
++		PHP_STREAM_FREE_CLOSE | PHP_STREAM_FREE_KEEP_RSRC | PHP_STREAM_FREE_RSRC_DTOR);
+ }
+ #elif defined(HAVE_FOPENCOOKIE)
+ static ssize_t stream_cookie_reader(void *cookie, char *buffer, size_t size)
+@@ -124,7 +125,8 @@
+ 
+ 	/* prevent recursion */
+ 	stream->fclose_stdiocast = PHP_STREAM_FCLOSE_NONE;
+-	return php_stream_free(stream, PHP_STREAM_FREE_CLOSE | PHP_STREAM_FREE_KEEP_RSRC);
++	return php_stream_free(stream,
++		PHP_STREAM_FREE_CLOSE | PHP_STREAM_FREE_KEEP_RSRC | PHP_STREAM_FREE_RSRC_DTOR);
+ }
+ #endif /* elif defined(HAVE_FOPENCOOKIE) */
+ 
+--- a/ext/mysqlnd/mysqlnd_net.c
++++ b/ext/mysqlnd/mysqlnd_net.c
+@@ -1087,18 +1087,16 @@
+ 	if (net && (net_stream = net->data->m.get_stream(net))) {
+ 		zend_bool pers = net->persistent;
+ 		DBG_INF_FMT("Freeing stream. abstract=%p", net_stream->abstract);
+-		if (pers) {
+-			if (EG(active)) {
+-				php_stream_free(net_stream, PHP_STREAM_FREE_CLOSE_PERSISTENT | PHP_STREAM_FREE_RSRC_DTOR);
+-			} else {
+-				/*
+-				  otherwise we will crash because the EG(persistent_list) has been freed already,
+-				  before the modules are shut down
+-				*/
+-				php_stream_free(net_stream, PHP_STREAM_FREE_CLOSE | PHP_STREAM_FREE_RSRC_DTOR);
+-			}
++		/* We removed the resource from the stream, so pass FREE_RSRC_DTOR now to force
++		 * destruction to occur during shutdown, because it won't happen through the resource. */
++		if (pers && EG(active)) {
++			php_stream_free(net_stream, PHP_STREAM_FREE_CLOSE_PERSISTENT | PHP_STREAM_FREE_RSRC_DTOR);
+ 		} else {
+-			php_stream_free(net_stream, PHP_STREAM_FREE_CLOSE);
++			/*
++			  otherwise we will crash because the EG(persistent_list) has been freed already,
++			  before the modules are shut down
++			*/
++			php_stream_free(net_stream, PHP_STREAM_FREE_CLOSE | PHP_STREAM_FREE_RSRC_DTOR);
+ 		}
+ 		(void) net->data->m.set_stream(net, NULL);
+ 	}

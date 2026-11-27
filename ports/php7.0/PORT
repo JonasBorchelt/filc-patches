@@ -21,7 +21,7 @@ MAKE_ARGS=""
 INSTALL_ARGS=""
 TEST_CMD=""
 POLICY_CLASS="P4-Audit"
-POLICY_RATIONALE="EOL legacy PHP 7.0 built from Freexian Extended LTS stretch (7.0.33-0+deb9u27, 179 ELTS security patches verified via signed InRelease -> Sources.gz) against OpenSSL 1.1.1w (openssl1.1) and static curl-openssl1.1 (keeping OpenSSL 3 completely out of the musl process) with 5 Fil-C/modern-lib patches: (01) USE_ZEND_ALLOC=0 default and strcase provenance fix, (02) portable C paths for inline assembly, (03) MAP_PRIVATE opcache mapping, (04) libxml2 2.12+ const xmlError/encoding.h and ICU 70+ BreakIterator/boolean compatibility, and (05) musl fopencookie compatibility. Uses bundled PCRE1 (--without-pcre-jit) and bundled Oniguruma, pkg-config shims for xml2-config/icu-config, and installs side-by-side with --program-suffix=7.0."
+POLICY_RATIONALE="EOL legacy PHP 7.0 built from Freexian Extended LTS stretch (7.0.33-0+deb9u27, 179 ELTS security patches verified via signed InRelease -> Sources.gz) against OpenSSL 1.1.1w (openssl1.1) and static curl-openssl1.1 (keeping OpenSSL 3 completely out of the musl process) with 6 Fil-C/modern-lib/backport patches: (01) USE_ZEND_ALLOC=0 default and strcase provenance fix, (02) portable C paths for inline assembly, (03) MAP_PRIVATE opcache mapping, (04) libxml2 2.12+ const xmlError/encoding.h and ICU 70+ BreakIterator/boolean compatibility, (05) musl fopencookie compatibility, and (06) PHP 7.4 shutdown stream use-after-free backport (bug #78396). Uses bundled PCRE1 (--without-pcre-jit) and bundled Oniguruma, pkg-config shims for xml2-config/icu-config, and installs side-by-side with --program-suffix=7.0 (including versioned phar7.0)."
 FILC_ORIGIN_REF="8553fcd026b9:projects/php.projeny"
 
 port_configure() {
@@ -48,6 +48,32 @@ port_configure() {
     raise "AC_ZEND_BROKEN_SPRINTF probe not found in configure (matches=#{sp_matches})" unless sp_matches == 1
     s = s.sub(sp_old, "#include <stdio.h>\n#include <stdlib.h>\nint main(void) {char buf[20];exit(sprintf(buf,\"testing 123\")!=11); }")
     File.binwrite(p, s)
+    # Match PHP 7.4 ext/phar/Makefile.frag so phar installs versioned as phar7.0/phar7.0.phar
+    # instead of colliding with unversioned bin/phar from PHP 8.x.
+    pf = "ext/phar/Makefile.frag"
+    ps = File.binread(pf)
+    phar_old = <<~FRAG
+      install-pharcmd: pharcmd
+      \t-@$(mkinstalldirs) $(INSTALL_ROOT)$(bindir)
+      \t$(INSTALL) $(builddir)/phar.phar $(INSTALL_ROOT)$(bindir)
+      \t-@rm -f $(INSTALL_ROOT)$(bindir)/phar
+      \t$(LN_S) -f phar.phar $(INSTALL_ROOT)$(bindir)/phar
+      \t@$(mkinstalldirs) $(INSTALL_ROOT)$(mandir)/man1
+      \t@$(INSTALL_DATA) $(builddir)/phar.1 $(INSTALL_ROOT)$(mandir)/man1/phar.1
+      \t@$(INSTALL_DATA) $(builddir)/phar.phar.1 $(INSTALL_ROOT)$(mandir)/man1/phar.phar.1
+    FRAG
+    phar_new = <<~FRAG
+      install-pharcmd: pharcmd
+      \t-@$(mkinstalldirs) $(INSTALL_ROOT)$(bindir)
+      \t$(INSTALL) $(builddir)/phar.phar $(INSTALL_ROOT)$(bindir)/$(program_prefix)phar$(program_suffix).phar
+      \t-@rm -f $(INSTALL_ROOT)$(bindir)/$(program_prefix)phar$(program_suffix)
+      \t$(LN_S) -f $(program_prefix)phar$(program_suffix).phar $(INSTALL_ROOT)$(bindir)/$(program_prefix)phar$(program_suffix)
+      \t@$(mkinstalldirs) $(INSTALL_ROOT)$(mandir)/man1
+      \t@$(INSTALL_DATA) $(builddir)/phar.1 $(INSTALL_ROOT)$(mandir)/man1/$(program_prefix)phar$(program_suffix).1
+      \t@$(INSTALL_DATA) $(builddir)/phar.phar.1 $(INSTALL_ROOT)$(mandir)/man1/$(program_prefix)phar$(program_suffix).phar.1
+    FRAG
+    raise "install-pharcmd block not found in #{pf}" unless ps.include?(phar_old)
+    File.binwrite(pf, ps.sub(phar_old, phar_new))
   '
   local shim_dir="$SRC_DIR/.filc-tools"
   rm -rf "$shim_dir"
@@ -130,62 +156,6 @@ SHIM
   fi
 }
 
-port_build() {
-  local rc=0
-  make -j"$JOBS" || rc=$?
-  if [[ "$rc" -ne 0 && -x sapi/cli/php ]]; then
-    echo "=== PHP70 PHAR DIAGNOSTIC (make rc=$rc) ===" >&2
-    local diag_php
-    diag_php="$(mktemp /tmp/php70-phar-diag-XXXXXX.php)"
-    cat > "$diag_php" <<'PHP'
-<?php
-$err = fopen('php://stderr', 'w');
-$f = sys_get_temp_dir() . '/diag-' . getmypid() . '.phar';
-@unlink($f);
-fwrite($err, "step 1: new Phar\n"); fflush($err);
-$p = new Phar($f, 0, 'diag');
-fwrite($err, "step 2: startBuffering\n"); fflush($err);
-$p->startBuffering();
-fwrite($err, "step 3: addFromString\n"); fflush($err);
-$p->addFromString('a.txt', 'hello');
-fwrite($err, "step 4: addFile phar.inc\n"); fflush($err);
-if (file_exists('ext/phar/phar/phar.inc')) {
-    $p->addFile('ext/phar/phar/phar.inc', 'phar.inc');
-}
-fwrite($err, "step 5: decompressFiles\n"); fflush($err);
-$p->decompressFiles();
-fwrite($err, "step 6: setSignatureAlgorithm SHA1\n"); fflush($err);
-$p->setSignatureAlgorithm(Phar::SHA1);
-fwrite($err, "step 7: stopBuffering\n"); fflush($err);
-$p->stopBuffering();
-fwrite($err, "step 8: done\n"); fflush($err);
-@unlink($f);
-PHP
-    echo "--- step-by-step phar file probe ---" >&2
-    local probe_rc=0
-    ./sapi/cli/php -n -d phar.readonly=0 -d display_errors=1 -d error_reporting=E_ALL "$diag_php" 2>&1 || probe_rc=$?
-    echo "--- step-by-step probe rc=$probe_rc ---" >&2
-    rm -f "$diag_php"
-
-    if ! command -v gdb >/dev/null 2>&1; then
-      DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
-      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends gdb >/dev/null 2>&1 || true
-    fi
-    if command -v gdb >/dev/null 2>&1; then
-      echo "--- gdb backtrace (phar.phar pack) ---" >&2
-      rm -f ext/phar/phar.phar
-      gdb -batch -ex 'set pagination off' -ex run -ex 'bt 30' -ex 'info registers rip' -ex 'x/4i $pc' --args \
-        ./sapi/cli/php -n -d open_basedir= -d output_buffering=0 -d memory_limit=-1 -d phar.readonly=0 -d safe_mode=0 \
-        ext/phar/phar.php pack -f ext/phar/phar.phar -a pharcommand -c auto -x '\\.svn' -p 0 \
-        -s ext/phar/phar/phar.php -h sha1 -b "$PIZFIX/bin/php7.0" ext/phar/phar/ 2>&1 || true
-    else
-      echo "--- gdb unavailable ---" >&2
-    fi
-    return "$rc"
-  fi
-  return "$rc"
-}
-
 port_test() {
   local php_bin fpm_bin ext_dir out ver fpm_ver
   php_bin="$PIZFIX/bin/php7.0"
@@ -253,6 +223,31 @@ PY
   fpm_ver="${out%%$'\n'*}"
   echo "php-fpm7.0 version: $fpm_ver"
   printf '%s\n' "$fpm_ver" | grep -q '^PHP 7\.0\.33 '
+
+  test -x "$PIZFIX/bin/phar7.0.phar"
+  test -L "$PIZFIX/bin/phar7.0"
+  "$php_bin" -n -d phar.readonly=0 -d zend.assertions=1 -d assert.exception=1 <<'EOF' | grep -Fxq 'PHP70_PHAR_SHUTDOWN_OK'
+<?php
+$f = sys_get_temp_dir() . '/filc-php70-phar-' . getmypid() . '-' . mt_rand(1000, 999999) . '.phar';
+$lock = $f . '.lock';
+@unlink($f);
+@unlink($lock);
+$p = new Phar($f, 0, 'filc70diag');
+$p->startBuffering();
+$p->addFromString('hello.txt', 'filc-php70');
+$p->setSignatureAlgorithm(Phar::SHA1);
+$p->stopBuffering();
+assert(file_get_contents('phar://' . $f . '/hello.txt') === 'filc-php70');
+// Regression check for PHP bug #78396: streams in shutdown functions must still close/unlock cleanly.
+register_shutdown_function(function () use ($f, $lock) {
+    assert(file_put_contents($lock, '1', FILE_APPEND | LOCK_EX) === 1);
+    assert(file_put_contents($lock, '2', FILE_APPEND | LOCK_EX) === 1);
+    assert(file_get_contents($lock) === '12');
+    @unlink($lock);
+    @unlink($f);
+    echo "PHP70_PHAR_SHUTDOWN_OK\n";
+});
+EOF
 
   "$php_bin" -n \
     -d extension_dir="$ext_dir" \
@@ -482,6 +477,33 @@ PY
   out="$("$fpm_bin" -n -v)"
   fpm_ver="${out%%$'\n'*}"
   printf '%s\n' "$fpm_ver" | grep -q '^PHP 7\.0\.33 '
+
+  test -x "$PKG_PREFIX/bin/phar7.0.phar"
+  test -L "$PKG_PREFIX/bin/phar7.0"
+  test ! -e "$PKG_PREFIX/bin/phar"
+  test ! -e "$PKG_PREFIX/bin/phar.phar"
+  "$php_bin" -n -d phar.readonly=0 -d zend.assertions=1 -d assert.exception=1 <<'EOF' | grep -Fxq 'PHP70_PHAR_SHUTDOWN_OK'
+<?php
+$f = sys_get_temp_dir() . '/filc-php70-phar-' . getmypid() . '-' . mt_rand(1000, 999999) . '.phar';
+$lock = $f . '.lock';
+@unlink($f);
+@unlink($lock);
+$p = new Phar($f, 0, 'filc70diag');
+$p->startBuffering();
+$p->addFromString('hello.txt', 'filc-php70');
+$p->setSignatureAlgorithm(Phar::SHA1);
+$p->stopBuffering();
+assert(file_get_contents('phar://' . $f . '/hello.txt') === 'filc-php70');
+// Regression check for PHP bug #78396: streams in shutdown functions must still close/unlock cleanly.
+register_shutdown_function(function () use ($f, $lock) {
+    assert(file_put_contents($lock, '1', FILE_APPEND | LOCK_EX) === 1);
+    assert(file_put_contents($lock, '2', FILE_APPEND | LOCK_EX) === 1);
+    assert(file_get_contents($lock) === '12');
+    @unlink($lock);
+    @unlink($f);
+    echo "PHP70_PHAR_SHUTDOWN_OK\n";
+});
+EOF
 
   "$php_bin" -n \
     -d extension_dir="$ext_dir" \

@@ -3,3 +3,4 @@
 03-php-filc-opcache-private-mmap.patch
 04-php70-libxml2-icu-compat.patch
 05-php70-musl-fopencookie.patch
+06-php70-shutdown-stream-uaf.patch

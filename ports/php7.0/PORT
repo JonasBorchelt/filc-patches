@@ -47,6 +47,10 @@ port_configure() {
     sp_matches = s.scan(sp_old).length
     raise "AC_ZEND_BROKEN_SPRINTF probe not found in configure (matches=#{sp_matches})" unless sp_matches == 1
     s = s.sub(sp_old, "#include <stdio.h>\n#include <stdlib.h>\nint main(void) {char buf[20];exit(sprintf(buf,\"testing 123\")!=11); }")
+    uname_old = "PHP_UNAME=`uname -a | xargs`"
+    uname_matches = s.scan(uname_old).length
+    raise "PHP_UNAME assignment not found in configure (matches=#{uname_matches})" unless uname_matches == 1
+    s = s.sub(uname_old, "PHP_UNAME=\"${PHP_UNAME:-`uname -a | xargs`}\"")
     File.binwrite(p, s)
     # Match PHP 7.4 ext/phar/Makefile.frag so phar installs versioned as phar7.0/phar7.0.phar
     # instead of colliding with unversioned bin/phar from PHP 8.x.
@@ -152,6 +156,11 @@ SHIM
       --enable-sockets
   if grep -En -- '(^|[[:space:]"'"'"'])(-I["'"'"']?/usr/(local/)?include|-L["'"'"']?/usr/(local/)?lib(64)?)([[:space:]"'"'"'/]|$)' Makefile config.status >&2; then
     echo "error: host /usr include or lib path leaked into php7.0 Makefile/config.status" >&2
+    return 1
+  fi
+  if ! grep -Fxq '#define PHP_UNAME "Linux"' main/php_config.h; then
+    echo "error: PHP_UNAME was not neutralized in main/php_config.h" >&2
+    grep -n 'PHP_UNAME' main/php_config.h >&2 || true
     return 1
   fi
 }

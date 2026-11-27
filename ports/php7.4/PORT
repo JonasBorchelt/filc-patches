@@ -91,6 +91,11 @@ port_configure() {
     echo "error: host /usr include or lib path leaked into php7.4 Makefile/config.status" >&2
     return 1
   fi
+  if ! grep -Fxq '#define PHP_UNAME "Linux"' main/php_config.h; then
+    echo "error: PHP_UNAME was not neutralized in main/php_config.h" >&2
+    grep -n 'PHP_UNAME' main/php_config.h >&2 || true
+    return 1
+  fi
 }
 
 port_test() {

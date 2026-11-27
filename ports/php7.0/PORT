@@ -135,45 +135,51 @@ port_build() {
   make -j"$JOBS" || rc=$?
   if [[ "$rc" -ne 0 && -x sapi/cli/php ]]; then
     echo "=== PHP70 PHAR DIAGNOSTIC (make rc=$rc) ===" >&2
-    ./sapi/cli/php -n -v 2>&1 || true
-    echo "--- direct phar.phar pack command (stderr merged) ---" >&2
-    rm -f ext/phar/phar.phar
-    local phar_rc=0
-    ./sapi/cli/php -n -d open_basedir= -d output_buffering=0 -d memory_limit=-1 -d phar.readonly=0 -d safe_mode=0 \
-      ext/phar/phar.php pack -f ext/phar/phar.phar -a pharcommand -c auto -x '\\.svn' -p 0 \
-      -s ext/phar/phar/phar.php -h sha1 -b "$PIZFIX/bin/php7.0" ext/phar/phar/ 2>&1 || phar_rc=$?
-    echo "--- direct phar.phar rc=$phar_rc ---" >&2
-    echo "--- step-by-step phar probe ---" >&2
-    ./sapi/cli/php -n -d phar.readonly=0 -d display_errors=1 -d error_reporting=E_ALL <<'PHP' 2>&1 || true
+    local diag_php
+    diag_php="$(mktemp /tmp/php70-phar-diag-XXXXXX.php)"
+    cat > "$diag_php" <<'PHP'
 <?php
+$err = fopen('php://stderr', 'w');
 $f = sys_get_temp_dir() . '/diag-' . getmypid() . '.phar';
 @unlink($f);
-fwrite(STDERR, "step 1: new Phar\n");
+fwrite($err, "step 1: new Phar\n"); fflush($err);
 $p = new Phar($f, 0, 'diag');
-fwrite(STDERR, "step 2: startBuffering\n");
+fwrite($err, "step 2: startBuffering\n"); fflush($err);
 $p->startBuffering();
-fwrite(STDERR, "step 3: addFromString\n");
+fwrite($err, "step 3: addFromString\n"); fflush($err);
 $p->addFromString('a.txt', 'hello');
-fwrite(STDERR, "step 4: addFile phar.inc\n");
+fwrite($err, "step 4: addFile phar.inc\n"); fflush($err);
 if (file_exists('ext/phar/phar/phar.inc')) {
     $p->addFile('ext/phar/phar/phar.inc', 'phar.inc');
 }
-fwrite(STDERR, "step 5: decompressFiles\n");
+fwrite($err, "step 5: decompressFiles\n"); fflush($err);
 $p->decompressFiles();
-fwrite(STDERR, "step 6: setSignatureAlgorithm SHA1\n");
+fwrite($err, "step 6: setSignatureAlgorithm SHA1\n"); fflush($err);
 $p->setSignatureAlgorithm(Phar::SHA1);
-fwrite(STDERR, "step 7: stopBuffering\n");
+fwrite($err, "step 7: stopBuffering\n"); fflush($err);
 $p->stopBuffering();
-fwrite(STDERR, "step 8: done\n");
+fwrite($err, "step 8: done\n"); fflush($err);
 @unlink($f);
 PHP
+    echo "--- step-by-step phar file probe ---" >&2
+    local probe_rc=0
+    ./sapi/cli/php -n -d phar.readonly=0 -d display_errors=1 -d error_reporting=E_ALL "$diag_php" 2>&1 || probe_rc=$?
+    echo "--- step-by-step probe rc=$probe_rc ---" >&2
+    rm -f "$diag_php"
+
+    if ! command -v gdb >/dev/null 2>&1; then
+      DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends gdb >/dev/null 2>&1 || true
+    fi
     if command -v gdb >/dev/null 2>&1; then
-      echo "--- gdb backtrace ---" >&2
+      echo "--- gdb backtrace (phar.phar pack) ---" >&2
       rm -f ext/phar/phar.phar
-      gdb -batch -ex run -ex bt -ex 'x/4i $pc' --args \
+      gdb -batch -ex 'set pagination off' -ex run -ex 'bt 30' -ex 'info registers rip' -ex 'x/4i $pc' --args \
         ./sapi/cli/php -n -d open_basedir= -d output_buffering=0 -d memory_limit=-1 -d phar.readonly=0 -d safe_mode=0 \
         ext/phar/phar.php pack -f ext/phar/phar.phar -a pharcommand -c auto -x '\\.svn' -p 0 \
         -s ext/phar/phar/phar.php -h sha1 -b "$PIZFIX/bin/php7.0" ext/phar/phar/ 2>&1 || true
+    else
+      echo "--- gdb unavailable ---" >&2
     fi
     return "$rc"
   fi

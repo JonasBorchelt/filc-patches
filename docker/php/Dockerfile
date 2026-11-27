@@ -5,7 +5,7 @@ ARG DEBIAN_IMAGE=debian:trixie-slim
 FROM ${DEBIAN_IMAGE} AS builder
 
 ARG PHP_VERSION=8.5
-ARG FILC_CHANNEL=0.1.5
+ARG FILC_CHANNEL=0.1.6
 ARG FILC_BASE_URL=https://filc.connected.link
 ARG FILC_GITHUB_RELEASE_URL=
 ARG FILC_PORTS_PUBKEY=RWT2dYx3VZcu1VQHTUZVtNBb3pczC9wO94+zUWYQt2gE0+I8KuF3PGy/
@@ -36,16 +36,15 @@ FROM ${DEBIAN_IMAGE} AS base
 
 ARG PHP_VERSION=8.5
 ARG PHP_FULL_VERSION=8.5.13
-ARG FILC_CHANNEL=0.1.5
+ARG FILC_CHANNEL=0.1.6
 ARG SUPPORT_TIER=active
 
 ENV DEBIAN_FRONTEND=noninteractive \
     FILC_CHANNEL="${FILC_CHANNEL}" \
     PHP_SERIES="${PHP_VERSION}"
-# Until Fil-C 0.1.6 marks pizlonatedFIP<sig>_* hidden in FilPizlonator,
-# out-of-tree/PECL shared extensions built against Fil-C 0.1.5 need
-# -Wl,-Bsymbolic-functions so get_module is not interposed across RTLD_GLOBAL
-# extensions on musl.
+# Fil-C 0.1.6 marks pizlonatedFIP<sig>_* hidden in FilPizlonator; keep
+# -Wl,-Bsymbolic-functions as a harmless compatibility safety net for older
+# channels or custom PECL builds.
 ENV PHP_VERSION="${PHP_FULL_VERSION}" \
     PHP_INI_DIR="/usr/local/etc/php" \
     PHP_CFLAGS="-O2" \

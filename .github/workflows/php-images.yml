@@ -6,7 +6,7 @@ on:
       filc_channel:
         description: "Fil-C ports channel version"
         required: false
-        default: "0.1.5"
+        default: "0.1.6"
         type: string
       push:
         description: "Push verified images to Docker Hub"
@@ -78,7 +78,7 @@ jobs:
 
     env:
       IMAGE_NAME: jonasborchelt/filc-php
-      FILC_CHANNEL: ${{ inputs.filc_channel || '0.1.5' }}
+      FILC_CHANNEL: ${{ inputs.filc_channel || '0.1.6' }}
 
     steps:
       - name: Checkout repository

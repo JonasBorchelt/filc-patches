@@ -253,7 +253,7 @@ EOF
     -d extension_dir="$ext_dir" \
     -d zend.assertions=1 \
     -d assert.exception=1 \
-    -d zend_extension=opcache \
+    -d zend_extension=opcache.so \
     -d opcache.enable_cli=1 \
     <<'EOF' | grep -Fxq 'PHP70_FILC_SMOKE_OK'
 <?php
@@ -509,7 +509,7 @@ EOF
     -d extension_dir="$ext_dir" \
     -d zend.assertions=1 \
     -d assert.exception=1 \
-    -d zend_extension=opcache \
+    -d zend_extension=opcache.so \
     -d opcache.enable_cli=1 \
     <<'EOF' | grep -Fxq 'PHP70_PKG_SMOKE_OK'
 <?php

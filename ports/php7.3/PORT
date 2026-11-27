@@ -29,13 +29,21 @@ port_configure() {
   # prepends -I$PHP_ICONV_PREFIX/include and -L$PHP_ICONV_PREFIX/lib to CFLAGS
   # and LDFLAGS whenever libc provides iconv() (leaving ICONV_DIR empty). Under
   # Fil-C that poisons subsequent configure probes with host glibc headers.
+  # Also fix PHP 7.3's PHP_READDIR_R_TYPE probe which called close(dir) on a
+  # DIR * (rejected by Clang 20 -Wint-conversion), causing configure to fall
+  # back to AC_PREPROC_IFELSE and misdetect HAVE_OLD_READDIR_R instead of POSIX.
   "${HOST_RUBY:-ruby}" -e '
     p = "configure"
     s = File.binread(p)
     pat = %r{for i in /usr/local /usr; do\s*\n\s*if test -f "\$i/include/iconv\.h" \|\| test -f "\$i/include/giconv\.h"; then\s*\n\s*PHP_ICONV_PREFIX="\$i"\s*\n\s*break\s*\n\s*fi\s*\n\s*done\s*\n\s*if test -z "\$PHP_ICONV_PREFIX"; then\s*\n\s*PHP_ICONV_PREFIX="/usr"\s*\n\s*fi}
     matches = s.scan(pat).length
     raise "ext/iconv /usr prefix fallback not found in configure (matches=#{matches})" unless matches == 1
-    File.binwrite(p, s.sub(pat, "PHP_ICONV_PREFIX=\"$prefix\""))
+    s = s.sub(pat, "PHP_ICONV_PREFIX=\"$prefix\"")
+    rd_pat = %r{(if \(readdir_r\(dir, \(struct dirent \*\) entry, &pentry\) == 0\) \{\s*\n\s*)close\(dir\);(\s*\n\s*return 0;\s*\n\s*\}\s*\n\s*)close\(dir\);}
+    rd_matches = s.scan(rd_pat).length
+    raise "PHP_READDIR_R_TYPE close(dir) bug not found in configure (matches=#{rd_matches})" unless rd_matches == 1
+    s = s.sub(rd_pat, "\\1closedir(dir);\\2closedir(dir);")
+    File.binwrite(p, s)
   '
   local shim_dir="$SRC_DIR/.filc-tools"
   rm -rf "$shim_dir"
@@ -196,6 +204,7 @@ assert(json_decode(json_encode(["ok" => [1, 2, 3]]), true)["ok"] === [1, 2, 3]);
 assert(is_array(curl_version()) && !empty(curl_version()["version"]));
 assert(mb_strlen("hällo", "UTF-8") === 5);
 assert(iconv("UTF-8", "ISO-8859-1", "h\xc3\xa4llo") === "h\xe4llo");
+assert(is_array(scandir("/")) && count(scandir("/")) > 0);
 assert(mb_ereg_replace("([0-9]+)", "[\\1]", "v73") === "v[73]");
 assert((new Collator("en_US"))->compare("a", "b") < 0);
 assert(strlen(sodium_crypto_generichash("filc-sodium")) === SODIUM_CRYPTO_GENERICHASH_BYTES);

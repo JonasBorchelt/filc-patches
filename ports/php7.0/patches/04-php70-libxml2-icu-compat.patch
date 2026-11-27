@@ -77,6 +77,20 @@ Origin-Project: php/php-src
  #ifdef LIBXML_SCHEMAS_ENABLED
  #include <libxml/relaxng.h>
  #include <libxml/xmlschemas.h>
+--- a/ext/dom/dom_iterators.c
++++ b/ext/dom/dom_iterators.c
+@@ -42,7 +42,11 @@
+ 	xmlNotation *notation;
+ };
+ 
++#if LIBXML_VERSION >= 20908
++static void itemHashScanner (void *payload, void *data, const xmlChar *name) /* {{{ */
++#else
+ static void itemHashScanner (void *payload, void *data, xmlChar *name) /* {{{ */
++#endif
+ {
+ 	nodeIterator *priv = (nodeIterator *)data;
+ 
 --- a/ext/xmlwriter/php_xmlwriter.c
 +++ b/ext/xmlwriter/php_xmlwriter.c
 @@ -1803,7 +1803,8 @@

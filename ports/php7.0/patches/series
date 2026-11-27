@@ -2,3 +2,4 @@
 02-php-filc-portable-asm.patch
 03-php-filc-opcache-private-mmap.patch
 04-php70-libxml2-icu-compat.patch
+05-php70-musl-fopencookie.patch

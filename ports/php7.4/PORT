@@ -181,6 +181,7 @@ assert(json_decode(json_encode(["ok" => [1, 2, 3]]), true)["ok"] === [1, 2, 3]);
 assert(is_array(curl_version()) && !empty(curl_version()["version"]));
 assert(mb_strlen("hällo", "UTF-8") === 5);
 assert(iconv("UTF-8", "ISO-8859-1", "h\xc3\xa4llo") === "h\xe4llo");
+assert(is_array(scandir("/")) && count(scandir("/")) > 0);
 assert(mb_ereg_replace("([0-9]+)", "[\\1]", "v74") === "v[74]");
 assert((new Collator("en_US"))->compare("a", "b") < 0);
 assert(strlen(sodium_crypto_generichash("filc-sodium")) === SODIUM_CRYPTO_GENERICHASH_BYTES);

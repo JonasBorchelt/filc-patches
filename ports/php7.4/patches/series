@@ -3,3 +3,4 @@
 03-php-filc-capability-tagged-pointers.patch
 04-php-filc-opcache-private-mmap.patch
 05-php74-libxml2-icu-compat.patch
+06-php74-musl-fopencookie.patch

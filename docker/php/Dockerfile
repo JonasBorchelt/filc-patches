@@ -126,7 +126,11 @@ RUN ln -sfn "/opt/filc/${FILC_CHANNEL}/pizfix/sbin/php-fpm${PHP_SERIES}" /usr/lo
     mv /tmp/filc-php-fpm.conf "/opt/filc/${FILC_CHANNEL}/pizfix/etc/php${PHP_SERIES}/php-fpm.conf" && \
     mv /tmp/filc-php-www.conf "/opt/filc/${FILC_CHANNEL}/pizfix/etc/php${PHP_SERIES}/php-fpm.d/www.conf" && \
     mv /tmp/filc-php-docker.conf "/opt/filc/${FILC_CHANNEL}/pizfix/etc/php${PHP_SERIES}/php-fpm.d/docker.conf" && \
-    mv /tmp/filc-php-zz-docker.conf "/opt/filc/${FILC_CHANNEL}/pizfix/etc/php${PHP_SERIES}/php-fpm.d/zz-docker.conf"
+    mv /tmp/filc-php-zz-docker.conf "/opt/filc/${FILC_CHANNEL}/pizfix/etc/php${PHP_SERIES}/php-fpm.d/zz-docker.conf" && \
+    if [ "${PHP_SERIES}" = "7.0" ] || [ "${PHP_SERIES}" = "5.6" ]; then \
+      sed -i '/^log_limit =/d; /^decorate_workers_output =/d' \
+        "/opt/filc/${FILC_CHANNEL}/pizfix/etc/php${PHP_SERIES}/php-fpm.d/docker.conf"; \
+    fi
 
 WORKDIR /var/www/html
 STOPSIGNAL SIGQUIT

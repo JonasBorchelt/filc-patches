@@ -101,10 +101,10 @@ for raw in $exts; do
 
   case "$mod" in
     opcache|xdebug)
-      line="zend_extension=${mod}"
+      line="zend_extension=${mod}.so"
       ;;
     *)
-      line="extension=${mod}"
+      line="extension=${mod}.so"
       ;;
   esac
 

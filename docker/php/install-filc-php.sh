@@ -150,10 +150,21 @@ if [[ -d "${SRC_PIZFIX}/etc/ssl" ]]; then
   mkdir -p "${DST_PIZFIX}/etc"
   cp -a "${SRC_PIZFIX}/etc/ssl" "${DST_PIZFIX}/etc/"
 fi
+# Copy OpenSSL 1.1 runtime ssl/engines directories when installed for legacy PHP 5.6/7.x.
+if [[ -d "${SRC_PIZFIX}/opt/openssl1.1/ssl" ]]; then
+  mkdir -p "${DST_PIZFIX}/opt/openssl1.1"
+  cp -a "${SRC_PIZFIX}/opt/openssl1.1/ssl" "${DST_PIZFIX}/opt/openssl1.1/"
+fi
+if [[ -d "${SRC_PIZFIX}/opt/openssl1.1/lib/engines-1.1" ]]; then
+  mkdir -p "${DST_PIZFIX}/opt/openssl1.1/lib"
+  cp -a "${SRC_PIZFIX}/opt/openssl1.1/lib/engines-1.1" "${DST_PIZFIX}/opt/openssl1.1/lib/"
+fi
 
-# Enable loadable OPcache extension on PHP 8.2-8.4 (PHP 8.5 has OPcache built-in).
-if [[ -f "${DST_PIZFIX}/lib/php${PHP_VERSION}/extensions/opcache.so" ]]; then
-  printf 'zend_extension=opcache\n' > "${DST_PIZFIX}/etc/php${PHP_VERSION}/conf.d/10-opcache.ini"
+# Enable loadable OPcache extension on PHP 7.0-8.4 (PHP 8.5 has OPcache built-in;
+# OPcache for 5.6 is disabled until a use-after-free in its persistence path is fixed).
+# Use explicit .so suffix for uniform compatibility across PHP 7.0 (pre-7.2) and 7.3+.
+if [[ "${PHP_VERSION}" != "5.6" && -f "${DST_PIZFIX}/lib/php${PHP_VERSION}/extensions/opcache.so" ]]; then
+  printf 'zend_extension=opcache.so\n' > "${DST_PIZFIX}/etc/php${PHP_VERSION}/conf.d/10-opcache.ini"
 fi
 
 echo "Staged minimal Fil-C PHP ${PHP_VERSION} runtime into ${DST_ROOT}"

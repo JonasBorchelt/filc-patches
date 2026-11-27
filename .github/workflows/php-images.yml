@@ -13,6 +13,11 @@ on:
         required: false
         default: true
         type: boolean
+      include_legacy_php:
+        description: "Include legacy Freexian ELTS PHP 7.4, 7.3, 7.0, and 5.6 images"
+        required: false
+        default: true
+        type: boolean
   push:
     branches:
       - main
@@ -27,54 +32,69 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  ENABLE_LEGACY_PHP: "true"
+
 jobs:
+  plan:
+    name: Resolve PHP image matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build-matrix.outputs.matrix }}
+    steps:
+      - name: Build PHP image matrix
+        id: build-matrix
+        shell: bash
+        env:
+          INPUT_INCLUDE_LEGACY_PHP: ${{ inputs.include_legacy_php }}
+        run: |
+          set -euo pipefail
+          matrix_json="$(python3 - <<'PY'
+          import json, os
+
+          include = [
+              {"php_series": "8.5", "php_full": "8.5.13", "variant": "cli", "is_latest": True,  "support": "active"},
+              {"php_series": "8.5", "php_full": "8.5.13", "variant": "fpm", "is_latest": False, "support": "active"},
+              {"php_series": "8.4", "php_full": "8.4.28", "variant": "cli", "is_latest": False, "support": "active"},
+              {"php_series": "8.4", "php_full": "8.4.28", "variant": "fpm", "is_latest": False, "support": "active"},
+              {"php_series": "8.3", "php_full": "8.3.37", "variant": "cli", "is_latest": False, "support": "active"},
+              {"php_series": "8.3", "php_full": "8.3.37", "variant": "fpm", "is_latest": False, "support": "active"},
+              {"php_series": "8.2", "php_full": "8.2.36", "variant": "cli", "is_latest": False, "support": "active"},
+              {"php_series": "8.2", "php_full": "8.2.36", "variant": "fpm", "is_latest": False, "support": "active"},
+          ]
+
+          legacy_php = [
+              {"php_series": "7.4", "php_full": "7.4.33", "variant": "cli", "is_latest": False, "support": "eol"},
+              {"php_series": "7.4", "php_full": "7.4.33", "variant": "fpm", "is_latest": False, "support": "eol"},
+              {"php_series": "7.3", "php_full": "7.3.31", "variant": "cli", "is_latest": False, "support": "eol"},
+              {"php_series": "7.3", "php_full": "7.3.31", "variant": "fpm", "is_latest": False, "support": "eol"},
+              {"php_series": "7.0", "php_full": "7.0.33", "variant": "cli", "is_latest": False, "support": "eol"},
+              {"php_series": "7.0", "php_full": "7.0.33", "variant": "fpm", "is_latest": False, "support": "eol"},
+              {"php_series": "5.6", "php_full": "5.6.40", "variant": "cli", "is_latest": False, "support": "eol"},
+              {"php_series": "5.6", "php_full": "5.6.40", "variant": "fpm", "is_latest": False, "support": "eol"},
+          ]
+
+          input_val = os.environ.get("INPUT_INCLUDE_LEGACY_PHP", "").strip().lower()
+          if input_val in ("true", "false"):
+              enable_legacy = input_val == "true"
+          else:
+              enable_legacy = os.environ.get("ENABLE_LEGACY_PHP", "true").strip().lower() == "true"
+          if enable_legacy:
+              include.extend(legacy_php)
+
+          print(json.dumps({"include": include}, separators=(",", ":")))
+          PY
+          )"
+          echo "Selected matrix: ${matrix_json}"
+          echo "matrix=${matrix_json}" >> "$GITHUB_OUTPUT"
+
   build:
     name: php-${{ matrix.php_series }}-${{ matrix.variant }}
+    needs: plan
     runs-on: ubuntu-latest
     strategy:
       fail-fast: true
-      matrix:
-        include:
-          - php_series: "8.5"
-            php_full: "8.5.13"
-            variant: "cli"
-            is_latest: true
-            support: "active"
-          - php_series: "8.5"
-            php_full: "8.5.13"
-            variant: "fpm"
-            is_latest: false
-            support: "active"
-          - php_series: "8.4"
-            php_full: "8.4.28"
-            variant: "cli"
-            is_latest: false
-            support: "active"
-          - php_series: "8.4"
-            php_full: "8.4.28"
-            variant: "fpm"
-            is_latest: false
-            support: "active"
-          - php_series: "8.3"
-            php_full: "8.3.37"
-            variant: "cli"
-            is_latest: false
-            support: "active"
-          - php_series: "8.3"
-            php_full: "8.3.37"
-            variant: "fpm"
-            is_latest: false
-            support: "active"
-          - php_series: "8.2"
-            php_full: "8.2.36"
-            variant: "cli"
-            is_latest: false
-            support: "active"
-          - php_series: "8.2"
-            php_full: "8.2.36"
-            variant: "fpm"
-            is_latest: false
-            support: "active"
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
 
     env:
       IMAGE_NAME: jonasborchelt/filc-php

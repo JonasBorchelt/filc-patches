@@ -1455,6 +1455,75 @@ else
   FAILURES=$((FAILURES + 1))
 fi
 
+echo "=== Running (m) Memory-Safety Panic With Closed Stderr (fd 2) Regression ==="
+cat > "$TEST_DIR/trap_closed_stderr.c" <<'EOF'
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+__attribute__((noinline))
+static int read_oob(int *arr, volatile int idx) {
+    return arr[idx];
+}
+
+int main(void) {
+    int *arr = (int *)malloc(4 * sizeof(int));
+    if (!arr)
+        return 2;
+    for (int i = 0; i < 4; ++i)
+        arr[i] = i + 1;
+    if (close(2) != 0)
+        return 3;
+    volatile int idx = 10;
+    int val = read_oob(arr, idx);
+    printf("UNEXPECTED_OOB_SURVIVED=%d\n", val);
+    return 0;
+}
+EOF
+
+"$CLANG" -O2 -g -Wall -Wextra -Werror "$TEST_DIR/trap_closed_stderr.c" -o "$TEST_DIR/trap_closed_stderr"
+CLOSED_STDERR_OK=1
+
+# Default mode: must terminate cleanly via pas_crash_with_info_impl (SIGTRAP = 133),
+# NOT via recursive panic __builtin_trap() (SIGILL = 132).
+run_and_capture trap_closed_stderr "$TEST_DIR/trap_closed_stderr"
+RC_CLOSED_STDERR="$(cat "$TEST_DIR/trap_closed_stderr.rc")"
+if [[ "$RC_CLOSED_STDERR" -ne 133 ]] || grep -q "UNEXPECTED_OOB_SURVIVED" "$TEST_DIR/trap_closed_stderr.stdout"; then
+  echo "error: trap_closed_stderr default mode expected rc=133 (SIGTRAP), got rc=$RC_CLOSED_STDERR" >&2
+  CLOSED_STDERR_OK=0
+fi
+
+# FILC_EXIT_ON_PANIC=1 mode: must exit cleanly with status 42 even when fd 2 is closed.
+run_and_capture trap_closed_stderr_exit env FILC_EXIT_ON_PANIC=1 "$TEST_DIR/trap_closed_stderr"
+RC_CLOSED_STDERR_EXIT="$(cat "$TEST_DIR/trap_closed_stderr_exit.rc")"
+if [[ "$RC_CLOSED_STDERR_EXIT" -ne 42 ]] || grep -q "UNEXPECTED_OOB_SURVIVED" "$TEST_DIR/trap_closed_stderr_exit.stdout"; then
+  echo "error: trap_closed_stderr FILC_EXIT_ON_PANIC=1 expected rc=42, got rc=$RC_CLOSED_STDERR_EXIT" >&2
+  CLOSED_STDERR_OK=0
+fi
+
+# FILC_LOG_TO_FILE=1 mode: must still write the full readable safety panic to filc-log-<pid>.txt
+# and terminate cleanly with SIGTRAP (133) after close(2).
+CLOSED_LOG_DIR="$TEST_DIR/closed_stderr_log"
+mkdir -p "$CLOSED_LOG_DIR"
+run_and_capture trap_closed_stderr_file bash -c 'cd "$1" && exec env FILC_LOG_TO_FILE=1 "$2"' _ "$CLOSED_LOG_DIR" "$TEST_DIR/trap_closed_stderr"
+RC_CLOSED_STDERR_FILE="$(cat "$TEST_DIR/trap_closed_stderr_file.rc")"
+CLOSED_LOG_FILE="$(find "$CLOSED_LOG_DIR" -maxdepth 1 -name 'filc-log-*.txt' | head -n 1)"
+if [[ "$RC_CLOSED_STDERR_FILE" -ne 133 ]] \
+  || [[ -z "$CLOSED_LOG_FILE" ]] \
+  || ! grep -qi "filc safety error" "$CLOSED_LOG_FILE" \
+  || ! grep -Fq "thwarted a futile attempt to violate memory safety." "$CLOSED_LOG_FILE"; then
+  echo "error: trap_closed_stderr FILC_LOG_TO_FILE=1 failed (rc=$RC_CLOSED_STDERR_FILE log=${CLOSED_LOG_FILE:-none})" >&2
+  [[ -n "$CLOSED_LOG_FILE" ]] && cat "$CLOSED_LOG_FILE" >&2 || true
+  CLOSED_STDERR_OK=0
+fi
+
+if [[ "$CLOSED_STDERR_OK" -eq 1 ]]; then
+  STATUS_CLOSED_STDERR="PASS"
+else
+  STATUS_CLOSED_STDERR="FAIL"
+  FAILURES=$((FAILURES + 1))
+fi
+
 OVERALL_STATUS="PASS"
 if (( FAILURES > 0 )); then
   OVERALL_STATUS="FAIL"
@@ -1585,6 +1654,13 @@ ARCH="$(uname -m)"
   if [[ -s "$TEST_DIR/rtld_global_main.stderr" ]]; then
     echo "STDERR:"
     sed 's/^/  | /' "$TEST_DIR/rtld_global_main.stderr"
+  fi
+  echo ""
+  echo "--- TEST (m) PANIC WITH CLOSED STDERR (FD 2) [$STATUS_CLOSED_STDERR] ---"
+  echo "DEFAULT_RC: $RC_CLOSED_STDERR  EXIT_ON_PANIC_RC: $RC_CLOSED_STDERR_EXIT  LOG_FILE_RC: $RC_CLOSED_STDERR_FILE"
+  if [[ -n "$CLOSED_LOG_FILE" && -s "$CLOSED_LOG_FILE" ]]; then
+    echo "LOG_FILE:"
+    sed 's/^/  | /' "$CLOSED_LOG_FILE"
   fi
   echo "================================================================================"
 } > "$REPORT_FILE"

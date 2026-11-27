@@ -1,2 +1,3 @@
 # Fil-C runtime compatibility patch series (applied on top of FILC_COMMIT)
 01-filc-runtime-fenv.patch
+02-filc-panic-tolerate-closed-log-fd.patch

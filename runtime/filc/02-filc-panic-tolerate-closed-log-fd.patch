@@ -1,0 +1,49 @@
+Subject: Tolerate unwritable/closed log fd during libpas and Fil-C panic logging
+Policy-Class: P1-Toolchain
+Rationale: When a program triggers a Fil-C memory safety panic after closing fd 2 (for example PHP 7.0 CLI closing STDERR during request shutdown before hitting a Phar stream UAF) or when stderr is a broken pipe, write_panic_context() returns false and filc_finish_panicking() trips PAS_ASSERT(write_panic_context(log_fd, context)), while pas_fd_stream_vprintf() trips PAS_ASSERT(errno == EINTR) on EBADF/EPIPE. That causes a recursive panic in pas_panic() and terminates with __builtin_trap() (SIGILL) instead of completing the safety panic cleanly (SIGTRAP via pas_crash_with_info_impl or exit 42 under FILC_EXIT_ON_PANIC). Give up writing on non-EINTR write errors or zero-byte writes in pas_fd_stream_vprintf(), and ignore write_panic_context() failure in filc_finish_panicking().
+Upstream-Status: Upstream-Candidate (pizlonator/fil-c)
+Fil-C-Origin-Commits: none
+Origin-Kind: local-fix
+
+diff --git a/libpas/src/libpas/pas_fd_stream.c b/libpas/src/libpas/pas_fd_stream.c
+index 1111111111..2222222222 100644
+--- a/libpas/src/libpas/pas_fd_stream.c
++++ b/libpas/src/libpas/pas_fd_stream.c
+@@ -79,11 +79,13 @@ void pas_fd_stream_vprintf(pas_fd_stream* stream, const char* format, va_list ar
+         result = write(stream->fd, ptr, bytes_left_to_write);
+ #endif
+         if (result < 0) {
+-            PAS_ASSERT(errno == EINTR);
+-            continue;
++            if (errno == EINTR)
++                continue;
++            return;
+         }
+ 
+-        PAS_ASSERT(result);
++        if (!result)
++            return;
+ 
+         ptr += result;
+         bytes_left_to_write -= (size_t)result;
+diff --git a/libpas/src/libpas/filc_runtime.c b/libpas/src/libpas/filc_runtime.c
+index 3333333333..4444444444 100644
+--- a/libpas/src/libpas/filc_runtime.c
++++ b/libpas/src/libpas/filc_runtime.c
+@@ -4484,7 +4484,7 @@ PAS_NO_RETURN void filc_finish_panicking(filc_panic_context* context, const char
+     
+     if (filc_exit_on_panic) {
+         if (!filc_quiet_panic) {
+-            PAS_ASSERT(write_panic_context(log_fd, context));
++            (void)write_panic_context(log_fd, context);
+             pas_log("[%d] filc panic: %s\n", pas_getpid(), kind_string);
+         }
+         _exit(42);
+@@ -4526,6 +4526,6 @@ PAS_NO_RETURN void filc_finish_panicking(filc_panic_context* context, const char
+         }
+     }
+ 
+-    PAS_ASSERT(write_panic_context(log_fd, context));
++    (void)write_panic_context(log_fd, context);
+     pas_panic("%s\n", kind_string);
+ }

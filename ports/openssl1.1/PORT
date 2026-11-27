@@ -71,26 +71,49 @@ port_install() {
   mv "$PIZFIX/opt/openssl1.1/bin/openssl" "$PIZFIX/bin/openssl11"
   ln -sf "../../../bin/openssl11" "$PIZFIX/opt/openssl1.1/bin/openssl"
 
-  # Install versioned pkg-config files pointing into $PIZFIX/opt/openssl1.1
-  sed -e 's|^Name: OpenSSL-libcrypto$|Name: OpenSSL11-libcrypto|' \
+  # Install versioned pkg-config files rooted at ${pcfiledir}/../.. ($PIZFIX)
+  # with /opt/openssl1.1 in exec_prefix/includedir so both package-port's
+  # prefix=${pcfiledir}/../.. relocation and `pkg-config --define-prefix`
+  # resolve headers and libraries inside opt/openssl1.1/.
+  sed -e 's|^prefix=.*$|prefix=${pcfiledir}/../..|' \
+      -e 's|^exec_prefix=\${prefix}$|exec_prefix=${prefix}/opt/openssl1.1|' \
+      -e 's|^includedir=\${prefix}/include$|includedir=${prefix}/opt/openssl1.1/include|' \
+      -e 's|^Name: OpenSSL-libcrypto$|Name: OpenSSL11-libcrypto|' \
       -e 's|^Requires\.private:.*|Requires.private: zlib|' \
       "$PIZFIX/opt/openssl1.1/lib/pkgconfig/libcrypto.pc" > "$PIZFIX/lib/pkgconfig/libcrypto11.pc"
-  sed -e 's|^Name: OpenSSL-libssl$|Name: OpenSSL11-libssl|' \
+  sed -e 's|^prefix=.*$|prefix=${pcfiledir}/../..|' \
+      -e 's|^exec_prefix=\${prefix}$|exec_prefix=${prefix}/opt/openssl1.1|' \
+      -e 's|^includedir=\${prefix}/include$|includedir=${prefix}/opt/openssl1.1/include|' \
+      -e 's|^Name: OpenSSL-libssl$|Name: OpenSSL11-libssl|' \
       -e 's|^Requires\.private: libcrypto$|Requires.private: libcrypto11|' \
       "$PIZFIX/opt/openssl1.1/lib/pkgconfig/libssl.pc" > "$PIZFIX/lib/pkgconfig/libssl11.pc"
-  sed -e 's|^Name: OpenSSL$|Name: OpenSSL11|' \
+  sed -e 's|^prefix=.*$|prefix=${pcfiledir}/../..|' \
+      -e 's|^exec_prefix=\${prefix}$|exec_prefix=${prefix}/opt/openssl1.1|' \
+      -e 's|^includedir=\${prefix}/include$|includedir=${prefix}/opt/openssl1.1/include|' \
+      -e 's|^Name: OpenSSL$|Name: OpenSSL11|' \
       -e 's|^Requires: libssl libcrypto$|Requires: libssl11 libcrypto11|' \
       "$PIZFIX/opt/openssl1.1/lib/pkgconfig/openssl.pc" > "$PIZFIX/lib/pkgconfig/openssl11.pc"
+
+  # Also make opt/openssl1.1/lib/pkgconfig/*.pc relocatable (package-port only
+  # rewrites top-level lib/pkgconfig/*.pc and share/pkgconfig/*.pc).
+  local pc
+  for pc in libcrypto.pc libssl.pc openssl.pc; do
+    sed -e 's|^prefix=.*$|prefix=${pcfiledir}/../..|' \
+      "$PIZFIX/opt/openssl1.1/lib/pkgconfig/$pc" > "$PIZFIX/opt/openssl1.1/lib/pkgconfig/$pc.tmp"
+    mv "$PIZFIX/opt/openssl1.1/lib/pkgconfig/$pc.tmp" "$PIZFIX/opt/openssl1.1/lib/pkgconfig/$pc"
+  done
 }
 
 port_test() {
-  local ver modver cflags dgst_out verify_out
+  local ver modver cflags libs dgst_out verify_out
   ver="$("$PIZFIX/bin/openssl11" version)"
   grep -q 'OpenSSL 1\.1\.1w' <<<"$ver"
-  modver="$(pkg-config --modversion openssl11)"
+  modver="$(PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" "$PIZFIX/bin/pkg-config" --modversion openssl11)"
   grep -q '^1\.1\.1w$' <<<"$modver"
-  cflags="$(pkg-config --cflags openssl11)"
+  cflags="$(PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" "$PIZFIX/bin/pkg-config" --define-prefix --cflags openssl11)"
   grep -Fq "opt/openssl1.1/include" <<<"$cflags"
+  libs="$(PKG_CONFIG_PATH="$PIZFIX/lib/pkgconfig" "$PIZFIX/bin/pkg-config" --define-prefix --libs openssl11)"
+  grep -Fq "opt/openssl1.1/lib" <<<"$libs"
   local tests="test_dgst test_evp test_rsa test_ec test_x509 test_ssl_new test_cms"
   if ! HARNESS_JOBS="$JOBS" make test TESTS="$tests"; then
     make test V=1 TESTS="$tests"
@@ -120,7 +143,8 @@ port_test() {
 }
 
 port_package_smoke() {
-  local ver dgst_out
+  local ver dgst_out pc_bin pc_ver pc_cflags pc_libs tok incdir libdir
+  local expected_inc expected_lib
   ver="$("$PKG_PREFIX/bin/openssl11" version)"
   grep -q 'OpenSSL 1\.1\.1w' <<<"$ver"
   dgst_out="$(printf 'hello\n' | "$PKG_PREFIX/bin/openssl11" dgst -sha256)"
@@ -128,5 +152,68 @@ port_package_smoke() {
   test -f "$PKG_PREFIX/lib/libssl.so.1.1"
   test -f "$PKG_PREFIX/lib/libcrypto.so.1.1"
   test -f "$PKG_PREFIX/lib/pkgconfig/openssl11.pc"
-  grep -Fq "/opt/openssl1.1" "$PKG_PREFIX/lib/pkgconfig/openssl11.pc"
+
+  expected_inc="$(cd "$PKG_PREFIX/opt/openssl1.1/include" && pwd -P)"
+  expected_lib="$(cd "$PKG_PREFIX/opt/openssl1.1/lib" && pwd -P)"
+  if [[ -x "$PKG_PREFIX/bin/pkg-config" ]]; then
+    pc_bin="$PKG_PREFIX/bin/pkg-config"
+  else
+    pc_bin="$(command -v pkg-config)"
+  fi
+
+  pc_ver="$(PKG_CONFIG_PATH="$PKG_PREFIX/lib/pkgconfig" "$pc_bin" --modversion openssl11)"
+  grep -qx '1\.1\.1w' <<<"$pc_ver"
+
+  local mode pc_path pkg_name
+  for mode in default define-prefix opt-prefix; do
+    case "$mode" in
+      default)
+        pc_path="$PKG_PREFIX/lib/pkgconfig"
+        pkg_name="openssl11"
+        pc_cflags="$(PKG_CONFIG_PATH="$pc_path" "$pc_bin" --cflags "$pkg_name")"
+        pc_libs="$(PKG_CONFIG_PATH="$pc_path" "$pc_bin" --libs "$pkg_name")"
+        ;;
+      define-prefix)
+        local pc_help
+        pc_help="$("$pc_bin" --help 2>&1 || true)"
+        if ! grep -Fq -- '--define-prefix' <<<"$pc_help"; then
+          continue
+        fi
+        pc_path="$PKG_PREFIX/lib/pkgconfig"
+        pkg_name="openssl11"
+        pc_cflags="$(PKG_CONFIG_PATH="$pc_path" "$pc_bin" --define-prefix --cflags "$pkg_name")"
+        pc_libs="$(PKG_CONFIG_PATH="$pc_path" "$pc_bin" --define-prefix --libs "$pkg_name")"
+        ;;
+      opt-prefix)
+        pc_path="$PKG_PREFIX/opt/openssl1.1/lib/pkgconfig"
+        pkg_name="openssl"
+        pc_cflags="$(PKG_CONFIG_PATH="$pc_path" "$pc_bin" --cflags "$pkg_name")"
+        pc_libs="$(PKG_CONFIG_PATH="$pc_path" "$pc_bin" --libs "$pkg_name")"
+        ;;
+    esac
+
+    incdir=""
+    for tok in $pc_cflags; do
+      case "$tok" in
+        -I*) incdir="${tok#-I}"; break ;;
+      esac
+    done
+    test -n "$incdir"
+    test -f "$incdir/openssl/ssl.h"
+    grep -Fq 'OpenSSL 1.1.1w' "$incdir/openssl/opensslv.h"
+    test "$(cd "$incdir" && pwd -P)" = "$expected_inc"
+
+    libdir=""
+    for tok in $pc_libs; do
+      case "$tok" in
+        -L*) libdir="${tok#-L}"; break ;;
+      esac
+    done
+    test -n "$libdir"
+    test -f "$libdir/libssl.so"
+    test -f "$libdir/libcrypto.so"
+    test "$(cd "$libdir" && pwd -P)" = "$expected_lib"
+    grep -qE '(^|[[:space:]])-lssl([[:space:]]|$)' <<<"$pc_libs"
+    grep -qE '(^|[[:space:]])-lcrypto([[:space:]]|$)' <<<"$pc_libs"
+  done
 }

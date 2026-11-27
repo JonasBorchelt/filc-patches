@@ -300,8 +300,28 @@ EOF
     return 1
   fi
 
+  # Measure ext/bz2/tests/with_files.phpt isolated first so CI logs separate
+  # true bz2 hangs from multi-port CPU contention during parallel runs.
+  local bz2_t0 bz2_t1
+  bz2_t0="$("$php_bin" -n -r 'echo intdiv(hrtime(true), 1000000);')"
+  TEST_PHP_EXECUTABLE="$php_bin" \
+    NO_INTERACTION=1 \
+    REPORT_EXIT_STATUS=1 \
+    "$php_bin" -n "$SRC_DIR/run-tests.php" \
+      -q \
+      -p "$php_bin" \
+      -d extension_dir="$ext_dir" \
+      --set-timeout 60 \
+      --show-diff \
+      "$SRC_DIR/ext/bz2/tests/with_files.phpt"
+  bz2_t1="$("$php_bin" -n -r 'echo intdiv(hrtime(true), 1000000);')"
+  echo "php8.5 isolated with_files.phpt elapsed_ms=$((bz2_t1 - bz2_t0))"
+
   # Curated upstream run-tests.php suite covering fibers, weakrefs, uri,
   # sqlite3, json, and bz2 (parallelized across available jobs).
+  # Use --set-timeout 180 (matching upstream run-tests.php's 3x ASAN multiplier):
+  # Fil-C capability/GC overhead plus concurrent multi-port publish load can
+  # exceed the default 60s per-test timeout under 4 concurrent workers.
   local run_tests_log="$SRC_DIR/.filc-run-tests.log"
   TEST_PHP_EXECUTABLE="$php_bin" \
     NO_INTERACTION=1 \
@@ -311,6 +331,7 @@ EOF
       -j"$JOBS" \
       -p "$php_bin" \
       -d extension_dir="$ext_dir" \
+      --set-timeout 180 \
       --show-diff \
       "$SRC_DIR/Zend/tests/fibers" \
       "$SRC_DIR/Zend/tests/weakrefs" \

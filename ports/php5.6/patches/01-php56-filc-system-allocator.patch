@@ -1,0 +1,28 @@
+Subject: Default to system allocator under Fil-C
+Policy-Class: P4-Audit
+Rationale: Zend's 2 MiB chunk allocator hides intra-chunk overflows and UAF between PHP values; default USE_ZEND_ALLOC=0 under __FILC__ so every value gets its own capability.
+Upstream-Status: Fil-C-Specific
+Fil-C-Origin-Commits: 18e0199cef6c30fc815442c0dd3f9d97fae3702a
+Origin-Kind: filc-upstream
+Origin-Project: pizlonator/fil-c
+Origin-Commit: 18e0199cef6c30fc815442c0dd3f9d97fae3702a
+Origin-URL: https://github.com/pizlonator/fil-c/commit/18e0199cef6c30fc815442c0dd3f9d97fae3702a
+
+diff --git a/Zend/zend_alloc.c b/Zend/zend_alloc.c
+index c7babe1..0a70cdc 100644
+--- a/Zend/zend_alloc.c
++++ b/Zend/zend_alloc.c
+@@ -2731,7 +2731,13 @@ static void alloc_globals_ctor(zend_alloc_globals *alloc_globals TSRMLS_DC)
+ {
+ 	char *tmp = getenv("USE_ZEND_ALLOC");
+ 
++#ifdef __FILC__
++	/* Default to system malloc so every PHP value gets its own capability.
++	 * Set USE_ZEND_ALLOC=1 to opt into Zend's chunk allocator. */
++	if (!tmp || !zend_atoi(tmp, 0)) {
++#else
+ 	if (tmp && !zend_atoi(tmp, 0)) {
++#endif
+ 		alloc_globals->mm_heap = malloc(sizeof(struct _zend_mm_heap));
+ 		memset(alloc_globals->mm_heap, 0, sizeof(struct _zend_mm_heap));
+ 		alloc_globals->mm_heap->use_zend_alloc = 0;

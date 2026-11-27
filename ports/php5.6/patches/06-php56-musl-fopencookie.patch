@@ -1,0 +1,39 @@
+Subject: Backport upstream PHP 8.x musl fopencookie off_t * seeker signature to PHP 5.6
+Policy-Class: P2-Package
+Rationale: musl declares cookie_seek_function_t as int (*)(void *, off_t *, int) and does not expose glibc's __off64_t/off64_t unless _LARGEFILE64_SOURCE is set, causing PHP 5.6's configure probe to fall back to the obsolete glibc 2.0 by-value off_t seeker signature (rejected by Clang 20 -Wincompatible-function-pointer-types). Backport PHP 8.x's off_t * fallback signature in main/streams/cast.c.
+Upstream-Status: Backport (upstream PHP 8.x musl fopencookie compatibility)
+Fil-C-Origin-Commits: none
+Origin-Kind: backport
+Origin-Project: php/php-src
+
+diff --git a/main/streams/cast.c b/main/streams/cast.c
+index 0603a72..a189c39 100644
+--- a/main/streams/cast.c
++++ b/main/streams/cast.c
+@@ -110,7 +110,10 @@ static ssize_t stream_cookie_writer(void *cookie, const char *buffer, size_t siz
+ }
+ 
+ # ifdef COOKIE_SEEKER_USES_OFF64_T
+-static int stream_cookie_seeker(void *cookie, __off64_t *position, int whence)
++static int stream_cookie_seeker(void *cookie, off64_t *position, int whence)
++# else
++static int stream_cookie_seeker(void *cookie, off_t *position, int whence)
++# endif
+ {
+ 	TSRMLS_FETCH();
+ 
+@@ -121,14 +124,6 @@ static int stream_cookie_seeker(void *cookie, __off64_t *position, int whence)
+ 	}
+ 	return 0;
+ }
+-# else
+-static int stream_cookie_seeker(void *cookie, off_t position, int whence)
+-{
+-	TSRMLS_FETCH();
+-
+-	return php_stream_seek((php_stream *)cookie, position, whence);
+-}
+-# endif
+ 
+ static int stream_cookie_closer(void *cookie)
+ {

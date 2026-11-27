@@ -1,0 +1,7 @@
+01-php56-filc-system-allocator.patch
+02-php56-filc-portable-asm.patch
+03-php56-filc-opcache-private-mmap.patch
+04-php56-openssl11-compat.patch
+05-php56-libxml2-icu-compat.patch
+06-php56-musl-fopencookie.patch
+07-php56-shutdown-stream-uaf.patch

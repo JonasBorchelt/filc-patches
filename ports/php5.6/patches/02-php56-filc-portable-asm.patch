@@ -1,0 +1,235 @@
+Subject: Use portable C paths instead of inline assembly under Fil-C
+Policy-Class: P2-Package
+Rationale: Take Zend's portable C paths for zend_mm_high_bit, zend_mm_low_bit, safe_address, ZEND_VM_GUARD, ZEND_SIGNED_MULTIPLY_LONG, and fast arithmetic instead of architecture inline assembly, restrict x87 FPU inline asm to __i386__, and disable bundled PCRE1 SLJIT codegen (SUPPORT_JIT) under __FILC__.
+Upstream-Status: Upstream-Candidate
+Fil-C-Origin-Commits: fd1f26a649078e4e12cb01026cf43199b6e6d160
+Origin-Kind: filc-upstream
+Origin-Project: pizlonator/fil-c
+Origin-Commit: fd1f26a649078e4e12cb01026cf43199b6e6d160
+Origin-URL: https://github.com/pizlonator/fil-c/commit/fd1f26a649078e4e12cb01026cf43199b6e6d160
+
+diff --git a/Zend/zend_alloc.c b/Zend/zend_alloc.c
+index 0a70cdc..ea1624a 100644
+--- a/Zend/zend_alloc.c
++++ b/Zend/zend_alloc.c
+@@ -664,12 +664,12 @@ static void *_zend_mm_realloc_int(zend_mm_heap *heap, void *p, size_t size ZEND_
+ 
+ static inline unsigned int zend_mm_high_bit(size_t _size)
+ {
+-#if defined(__GNUC__) && (defined(__native_client__) || defined(i386))
++#if defined(__GNUC__) && (defined(__native_client__) || defined(i386)) && !defined(__FILC__)
+ 	unsigned int n;
+ 
+ 	__asm__("bsrl %1,%0\n\t" : "=r" (n) : "rm"  (_size) : "cc");
+ 	return n;
+-#elif defined(__GNUC__) && defined(__x86_64__)
++#elif defined(__GNUC__) && defined(__x86_64__) && !defined(__FILC__)
+ 	unsigned long n;
+ 
+         __asm__("bsr %1,%0\n\t" : "=r" (n) : "rm"  (_size) : "cc");
+@@ -692,12 +692,12 @@ static inline unsigned int zend_mm_high_bit(size_t _size)
+ 
+ static inline unsigned int zend_mm_low_bit(size_t _size)
+ {
+-#if defined(__GNUC__) && (defined(__native_client__) || defined(i386))
++#if defined(__GNUC__) && (defined(__native_client__) || defined(i386)) && !defined(__FILC__)
+ 	unsigned int n;
+ 
+ 	__asm__("bsfl %1,%0\n\t" : "=r" (n) : "rm"  (_size) : "cc");
+ 	return n;
+-#elif defined(__GNUC__) && defined(__x86_64__)
++#elif defined(__GNUC__) && defined(__x86_64__) && !defined(__FILC__)
+         unsigned long n;
+ 
+         __asm__("bsf %1,%0\n\t" : "=r" (n) : "rm"  (_size) : "cc");
+@@ -2458,7 +2458,7 @@ ZEND_API size_t _zend_mem_block_size(void *ptr TSRMLS_DC ZEND_FILE_LINE_DC ZEND_
+ 	return _zend_mm_block_size(AG(mm_heap), ptr ZEND_FILE_LINE_RELAY_CC ZEND_FILE_LINE_ORIG_RELAY_CC);
+ }
+ 
+-#if defined(__GNUC__) && (defined(__native_client__) || defined(i386))
++#if defined(__GNUC__) && (defined(__native_client__) || defined(i386)) && !defined(__FILC__)
+ 
+ static inline size_t safe_address(size_t nmemb, size_t size, size_t offset)
+ {
+@@ -2478,7 +2478,7 @@ static inline size_t safe_address(size_t nmemb, size_t size, size_t offset)
+ 	return res;
+ }
+ 
+-#elif defined(__GNUC__) && defined(__x86_64__)
++#elif defined(__GNUC__) && defined(__x86_64__) && !defined(__FILC__)
+ 
+ static inline size_t safe_address(size_t nmemb, size_t size, size_t offset)
+ {
+@@ -2507,7 +2507,7 @@ static inline size_t safe_address(size_t nmemb, size_t size, size_t offset)
+         return res;
+ }
+ 
+-#elif defined(__GNUC__) && defined(__arm__)
++#elif defined(__GNUC__) && defined(__arm__) && !defined(__FILC__)
+ 
+ static inline size_t safe_address(size_t nmemb, size_t size, size_t offset)
+ {
+@@ -2528,7 +2528,7 @@ static inline size_t safe_address(size_t nmemb, size_t size, size_t offset)
+         return res;
+ }
+ 
+-#elif defined(__GNUC__) && defined(__aarch64__)
++#elif defined(__GNUC__) && defined(__aarch64__) && !defined(__FILC__)
+ 
+ static inline size_t safe_address(size_t nmemb, size_t size, size_t offset)
+ {
+diff --git a/Zend/zend_execute.c b/Zend/zend_execute.c
+index b422624..5a57e25 100644
+--- a/Zend/zend_execute.c
++++ b/Zend/zend_execute.c
+@@ -1787,7 +1787,7 @@ static zend_always_inline void** zend_vm_stack_push_args(int count TSRMLS_DC) /*
+ #define ZEND_VM_INC_OPCODE() \
+ 	OPLINE++
+ 
+-#ifdef __GNUC__
++#if defined(__GNUC__) && !defined(__FILC__)
+ # define ZEND_VM_GUARD(name) __asm__("#" #name)
+ #else
+ # define ZEND_VM_GUARD(name)
+diff --git a/Zend/zend_float.h b/Zend/zend_float.h
+index b61114e..7a7b4bb 100644
+--- a/Zend/zend_float.h
++++ b/Zend/zend_float.h
+@@ -327,7 +327,7 @@ END_EXTERN_C()
+                 return _xpfpa_result; \
+             } while (0)
+ 
+-#elif defined(HAVE_FPU_INLINE_ASM_X86)
++#elif defined(HAVE_FPU_INLINE_ASM_X86) && defined(__i386__)
+ 
+ /*
+   Custom x86 inline assembler implementation.
+diff --git a/Zend/zend_multiply.h b/Zend/zend_multiply.h
+index a4d48b1..9a3fb64 100644
+--- a/Zend/zend_multiply.h
++++ b/Zend/zend_multiply.h
+@@ -19,7 +19,7 @@
+ 
+ /* $Id$ */
+ 
+-#if defined(__i386__) && defined(__GNUC__)
++#if defined(__i386__) && defined(__GNUC__) && !defined(__FILC__)
+ 
+ #define ZEND_SIGNED_MULTIPLY_LONG(a, b, lval, dval, usedval) do {	\
+ 	long __tmpvar; 													\
+@@ -31,7 +31,7 @@
+ 	else (lval) = __tmpvar;											\
+ } while (0)
+ 
+-#elif defined(__x86_64__) && defined(__GNUC__)
++#elif defined(__x86_64__) && defined(__GNUC__) && !defined(__FILC__)
+ 
+ #define ZEND_SIGNED_MULTIPLY_LONG(a, b, lval, dval, usedval) do {	\
+ 	long __tmpvar; 													\
+@@ -43,7 +43,7 @@
+ 	else (lval) = __tmpvar;											\
+ } while (0)
+ 
+-#elif defined(__arm__) && defined(__GNUC__)
++#elif defined(__arm__) && defined(__GNUC__) && !defined(__FILC__)
+ 
+ #define ZEND_SIGNED_MULTIPLY_LONG(a, b, lval, dval, usedval) do {	\
+ 	long __tmpvar; 													\
+@@ -55,7 +55,7 @@
+ 	else (lval) = __tmpvar;											\
+ } while (0)
+ 
+-#elif defined(__aarch64__) && defined(__GNUC__)
++#elif defined(__aarch64__) && defined(__GNUC__) && !defined(__FILC__)
+ 
+ #define ZEND_SIGNED_MULTIPLY_LONG(a, b, lval, dval, usedval) do {	\
+ 	long __tmpvar; 													\
+diff --git a/Zend/zend_operators.h b/Zend/zend_operators.h
+index 3057be4..26d7565 100644
+--- a/Zend/zend_operators.h
++++ b/Zend/zend_operators.h
+@@ -510,7 +510,7 @@ ZEND_API void zend_update_current_locale(void);
+ static zend_always_inline int fast_increment_function(zval *op1)
+ {
+ 	if (EXPECTED(Z_TYPE_P(op1) == IS_LONG)) {
+-#if defined(__GNUC__) && defined(__i386__)
++#if defined(__GNUC__) && defined(__i386__) && !defined(__FILC__)
+ 		__asm__(
+ 			"incl (%0)\n\t"
+ 			"jno  0f\n\t"
+@@ -523,7 +523,7 @@ static zend_always_inline int fast_increment_function(zval *op1)
+ 			  "n"(IS_DOUBLE),
+ 			  "n"(ZVAL_OFFSETOF_TYPE)
+ 			: "cc");
+-#elif defined(__GNUC__) && defined(__x86_64__)
++#elif defined(__GNUC__) && defined(__x86_64__) && !defined(__FILC__)
+ 		__asm__(
+ 			"incq (%0)\n\t"
+ 			"jno  0f\n\t"
+@@ -553,7 +553,7 @@ static zend_always_inline int fast_increment_function(zval *op1)
+ static zend_always_inline int fast_decrement_function(zval *op1)
+ {
+ 	if (EXPECTED(Z_TYPE_P(op1) == IS_LONG)) {
+-#if defined(__GNUC__) && defined(__i386__)
++#if defined(__GNUC__) && defined(__i386__) && !defined(__FILC__)
+ 		__asm__(
+ 			"decl (%0)\n\t"
+ 			"jno  0f\n\t"
+@@ -566,7 +566,7 @@ static zend_always_inline int fast_decrement_function(zval *op1)
+ 			  "n"(IS_DOUBLE),
+ 			  "n"(ZVAL_OFFSETOF_TYPE)
+ 			: "cc");
+-#elif defined(__GNUC__) && defined(__x86_64__)
++#elif defined(__GNUC__) && defined(__x86_64__) && !defined(__FILC__)
+ 		__asm__(
+ 			"decq (%0)\n\t"
+ 			"jno  0f\n\t"
+@@ -597,7 +597,7 @@ static zend_always_inline int fast_add_function(zval *result, zval *op1, zval *o
+ {
+ 	if (EXPECTED(Z_TYPE_P(op1) == IS_LONG)) {
+ 		if (EXPECTED(Z_TYPE_P(op2) == IS_LONG)) {
+-#if defined(__GNUC__) && defined(__i386__)
++#if defined(__GNUC__) && defined(__i386__) && !defined(__FILC__)
+ 		__asm__(
+ 			"movl	(%1), %%eax\n\t"
+ 			"addl   (%2), %%eax\n\t"
+@@ -620,7 +620,7 @@ static zend_always_inline int fast_add_function(zval *result, zval *op1, zval *o
+ 			  "n"(IS_DOUBLE),
+ 			  "n"(ZVAL_OFFSETOF_TYPE)
+ 			: "eax","cc");
+-#elif defined(__GNUC__) && defined(__x86_64__)
++#elif defined(__GNUC__) && defined(__x86_64__) && !defined(__FILC__)
+ 		__asm__(
+ 			"movq	(%1), %%rax\n\t"
+ 			"addq   (%2), %%rax\n\t"
+@@ -683,7 +683,7 @@ static zend_always_inline int fast_sub_function(zval *result, zval *op1, zval *o
+ {
+ 	if (EXPECTED(Z_TYPE_P(op1) == IS_LONG)) {
+ 		if (EXPECTED(Z_TYPE_P(op2) == IS_LONG)) {
+-#if defined(__GNUC__) && defined(__i386__)
++#if defined(__GNUC__) && defined(__i386__) && !defined(__FILC__)
+ 		__asm__(
+ 			"movl	(%1), %%eax\n\t"
+ 			"subl   (%2), %%eax\n\t"
+@@ -710,7 +710,7 @@ static zend_always_inline int fast_sub_function(zval *result, zval *op1, zval *o
+ 			  "n"(IS_DOUBLE),
+ 			  "n"(ZVAL_OFFSETOF_TYPE)
+ 			: "eax","cc");
+-#elif defined(__GNUC__) && defined(__x86_64__)
++#elif defined(__GNUC__) && defined(__x86_64__) && !defined(__FILC__)
+ 		__asm__(
+ 			"movq	(%1), %%rax\n\t"
+ 			"subq   (%2), %%rax\n\t"
+diff --git a/ext/pcre/pcrelib/config.h b/ext/pcre/pcrelib/config.h
+--- a/ext/pcre/pcrelib/config.h
++++ b/ext/pcre/pcrelib/config.h
+@@ -397,7 +397,9 @@
+ #undef SUPPORT_GCOV
+ 
+ /* Define to any value to enable support for Just-In-Time compiling. */
++#ifndef __FILC__
+ #define SUPPORT_JIT
++#endif
+ 
+ /* Define to any value to allow pcregrep to be linked with libbz2, so that it
+    is able to handle .bz2 files. */

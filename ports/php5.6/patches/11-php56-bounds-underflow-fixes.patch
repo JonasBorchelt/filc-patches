@@ -1,0 +1,135 @@
+Subject: Guard buffer-underflow reads on empty paths and strings in SPL, INI, open_basedir, phar, sqlite3, and strip_tags
+Policy-Class: P2-Package
+Rationale: Under Fil-C, evaluating IS_SLASH_AT(buf, len - 1) or buf[len - 1] when len is 0 triggers a deterministic ptr < lower panic. In ext/spl/spl_directory.c, spl_filesystem_info_set_filename() evaluated IS_SLASH_AT(intern->file_name, intern->file_name_len - 1) before checking intern->file_name_len > 1, panicking on new SplFileInfo(''). Backport upstream php/php-src commit 9f9ee0186eb3d1fcc2b3a4ecc55a0195233fd670 ("Fix memory error in spl_directory.c", landed in PHP 7.0), commit 7ec8b8d49f42e6edf520324b202c5754cd6d9e90 (main/php_ini.c php_load_zend_extension_cb), and the PHP 7.4 p >= buf + 1 guards in ext/standard/string.c php_strip_tags_ex(), and add matching non-empty length guards to the remaining [len - 1] path sites audited in main/fopen_wrappers.c, main/php_open_temporary_file.c, ext/phar/phar_object.c, and ext/sqlite3/sqlite3.c.
+Upstream-Status: Backport (php/php-src commits 9f9ee0186eb3d1fcc2b3a4ecc55a0195233fd670 and 7ec8b8d49f42e6edf520324b202c5754cd6d9e90, PHP 7.4 ext/standard/string.c, plus local matching [len-1] bounds guards)
+Fil-C-Origin-Commits: none
+Origin-Kind: backport
+Origin-Project: php/php-src
+Origin-Commit: 9f9ee0186eb3d1fcc2b3a4ecc55a0195233fd670
+Origin-URL: https://github.com/php/php-src/commit/9f9ee0186eb3d1fcc2b3a4ecc55a0195233fd670
+
+--- a/ext/spl/spl_directory.c
++++ b/ext/spl/spl_directory.c
+@@ -397,7 +397,7 @@
+ 	intern->file_name = use_copy ? estrndup(path, len) : path;
+ 	intern->file_name_len = len;
+ 
+-	while(IS_SLASH_AT(intern->file_name, intern->file_name_len-1) && intern->file_name_len > 1) {
++	while (intern->file_name_len > 1 && IS_SLASH_AT(intern->file_name, intern->file_name_len-1)) {
+ 		intern->file_name[intern->file_name_len-1] = 0;
+ 		intern->file_name_len--;
+ 	}
+--- a/main/php_ini.c
++++ b/main/php_ini.c
+@@ -365,12 +365,14 @@
+ 	} else {
+ 	    char *libpath;
+ 		char *extension_dir = INI_STR("extension_dir");
+-		int extension_dir_len = strlen(extension_dir);
++		int extension_dir_len = extension_dir ? strlen(extension_dir) : 0;
+ 
+-		if (IS_SLASH(extension_dir[extension_dir_len-1])) {
++		if (extension_dir_len > 0 && IS_SLASH(extension_dir[extension_dir_len-1])) {
+ 			spprintf(&libpath, 0, "%s%s", extension_dir, filename);
+-		} else {
++		} else if (extension_dir_len > 0) {
+ 			spprintf(&libpath, 0, "%s%c%s", extension_dir, DEFAULT_SLASH, filename);
++		} else {
++			libpath = estrdup(filename);
+ 		}
+ 		zend_load_extension(libpath);
+ 		efree(libpath);
+--- a/main/fopen_wrappers.c
++++ b/main/fopen_wrappers.c
+@@ -226,14 +226,15 @@
+ 
+ 	/* Resolve open_basedir to resolved_basedir */
+ 	if (expand_filepath(local_open_basedir, resolved_basedir TSRMLS_CC) != NULL) {
++		size_t basedir_len = strlen(basedir);
+ 		/* Handler for basedirs that end with a / */
+ 		resolved_basedir_len = strlen(resolved_basedir);
+ #if defined(PHP_WIN32) || defined(NETWARE)
+-		if (basedir[strlen(basedir) - 1] == PHP_DIR_SEPARATOR || basedir[strlen(basedir) - 1] == '/') {
++		if (basedir_len > 0 && (basedir[basedir_len - 1] == PHP_DIR_SEPARATOR || basedir[basedir_len - 1] == '/')) {
+ #else
+-		if (basedir[strlen(basedir) - 1] == PHP_DIR_SEPARATOR) {
++		if (basedir_len > 0 && basedir[basedir_len - 1] == PHP_DIR_SEPARATOR) {
+ #endif
+-			if (resolved_basedir[resolved_basedir_len - 1] != PHP_DIR_SEPARATOR) {
++			if (resolved_basedir_len == 0 || resolved_basedir[resolved_basedir_len - 1] != PHP_DIR_SEPARATOR) {
+ 				resolved_basedir[resolved_basedir_len] = PHP_DIR_SEPARATOR;
+ 				resolved_basedir[++resolved_basedir_len] = '\0';
+ 			}
+@@ -243,8 +244,8 @@
+ 		}
+ 
+ 		resolved_name_len = strlen(resolved_name);
+-		if (path_tmp[path_len - 1] == PHP_DIR_SEPARATOR) {
+-			if (resolved_name[resolved_name_len - 1] != PHP_DIR_SEPARATOR) {
++		if (path_len > 0 && path_tmp[path_len - 1] == PHP_DIR_SEPARATOR) {
++			if (resolved_name_len == 0 || resolved_name[resolved_name_len - 1] != PHP_DIR_SEPARATOR) {
+ 				resolved_name[resolved_name_len] = PHP_DIR_SEPARATOR;
+ 				resolved_name[++resolved_name_len] = '\0';
+ 			}
+--- a/main/php_open_temporary_file.c
++++ b/main/php_open_temporary_file.c
+@@ -132,7 +132,7 @@
+ 		return -1;
+ 	}
+ 
+-	if (IS_SLASH(new_state.cwd[new_state.cwd_length - 1])) {
++	if (new_state.cwd_length > 0 && IS_SLASH(new_state.cwd[new_state.cwd_length - 1])) {
+ 		trailing_slash = "";
+ 	} else {
+ 		trailing_slash = "/";
+--- a/ext/standard/string.c
++++ b/ext/standard/string.c
+@@ -4720,7 +4720,7 @@
+ 				switch (state) {
+ 					case 1: /* HTML/XML */
+ 						lc = '>';
+-						if (is_xml && *(p -1) == '-') {
++						if (is_xml && p >= buf + 1 && *(p -1) == '-') {
+ 							break;
+ 						}
+ 						in_q = state = is_xml = 0;
+@@ -4741,7 +4741,7 @@
+ 						break;
+ 
+ 					case 2: /* PHP */
+-						if (!br && lc != '\"' && *(p-1) == '?') {
++						if (!br && p >= buf + 1 && lc != '\"' && *(p-1) == '?') {
+ 							in_q = state = 0;
+ 							tp = tbuf;
+ 						}
+--- a/ext/phar/phar_object.c
++++ b/ext/phar/phar_object.c
+@@ -798,7 +798,7 @@
+ 
+ 			ctr.response_code = 0;
+ 
+-			if (path_info[strlen(path_info)-1] == '/') {
++			if (path_info[0] && path_info[strlen(path_info)-1] == '/') {
+ 				ctr.line_len = spprintf(&(ctr.line), 4096, "Location: %s%s", path_info, entry + 1);
+ 			} else {
+ 				ctr.line_len = spprintf(&(ctr.line), 4096, "Location: %s%s", path_info, entry);
+--- a/ext/sqlite3/sqlite3.c
++++ b/ext/sqlite3/sqlite3.c
+@@ -371,7 +371,7 @@
+ 	}
+ #endif
+ 
+-	if (!SQLITE3G(extension_dir)) {
++	if (!SQLITE3G(extension_dir) || !SQLITE3G(extension_dir)[0]) {
+ 		php_sqlite3_error(db_obj, "SQLite Extension are disabled");
+ 		RETURN_FALSE;
+ 	}
+@@ -384,7 +384,7 @@
+ 	extension_dir = SQLITE3G(extension_dir);
+ 	extension_dir_len = strlen(SQLITE3G(extension_dir));
+ 
+-	if (IS_SLASH(extension_dir[extension_dir_len-1])) {
++	if (extension_dir_len > 0 && IS_SLASH(extension_dir[extension_dir_len-1])) {
+ 		spprintf(&lib_path, 0, "%s%s", extension_dir, extension);
+ 	} else {
+ 		spprintf(&lib_path, 0, "%s%c%s", extension_dir, DEFAULT_SLASH, extension);

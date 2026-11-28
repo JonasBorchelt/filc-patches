@@ -4,3 +4,5 @@
 04-php-filc-opcache-private-mmap.patch
 05-php74-libxml2-icu-compat.patch
 06-php74-musl-fopencookie.patch
+07-php74-filc-opcache-provenance.patch
+08-php74-filc-callback-signatures.patch

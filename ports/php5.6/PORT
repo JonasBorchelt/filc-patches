@@ -17,12 +17,12 @@ EXTRACT_DIR="php-5.6.40"
 TIER=5
 DEPS="openssl1.1 curl-openssl1.1 zlib bzip2 sqlite libxml2 icu libedit pkgconf"
 BUILD_SYSTEM="autotools"
-CONFIGURE_ARGS="--disable-opcache --enable-fpm --with-openssl --with-zlib --with-curl --with-sqlite3 --with-pdo-sqlite --enable-intl --with-libedit --enable-mbstring --enable-bcmath --enable-calendar --enable-exif --enable-pcntl --enable-sockets"
+CONFIGURE_ARGS="--enable-fpm --with-openssl --with-zlib --with-curl --with-sqlite3 --with-pdo-sqlite --enable-intl --with-libedit --enable-mbstring --enable-bcmath --enable-calendar --enable-exif --enable-pcntl --enable-sockets"
 MAKE_ARGS=""
 INSTALL_ARGS=""
 TEST_CMD=""
 POLICY_CLASS="P4-Audit"
-POLICY_RATIONALE="EOL legacy PHP 5.6 built from Freexian Extended LTS jessie (5.6.40+dfsg-0+deb8u23, 85 ELTS security patches verified via signed InRelease -> Sources.gz) with Freexian ELTS jessie php-json (pecl-jsonc 1.3.6-1, PHP-3.01, plus bundled json-c under MIT/Expat, ENABLE_RDRAND disabled so /dev/urandom is used without inline assembly) compiled statically as built-in ext/json against OpenSSL 1.1.1w (openssl1.1) and static curl-openssl1.1 (keeping OpenSSL 3 completely out of the musl process) with 12 Fil-C/modern-lib/backport patches: (01) USE_ZEND_ALLOC=0 default, (02) portable C paths for inline assembly and bundled PCRE1 SUPPORT_JIT disabled under __FILC__, (03) MAP_PRIVATE opcache mapping (inactive while opcache is disabled), (04) deb.sury.org OpenSSL 1.1 compatibility patch (0054), (05) libxml2 2.12-2.15, ICU 68+/70+, and C++17 register compatibility, (06) musl fopencookie compatibility, (07) PHP 7.4 shutdown stream use-after-free backport (bug #78396), (08) PHP 7.0 Clang 16+ function-pointer type fixes in ext/zlib and main/php_scandir, (09) PHP 7.0 Clang 16+ C99 strictness and pointer-type fixes in libmagic, libmbfl, ext/session, and php_mblen, (10) provenance-preserving pointer tagging in Zend GC, executor, unserializer, phpdbg, and libmagic, (11) empty-path and [len-1] buffer-underflow guards in SPL, INI, open_basedir, temp file, strip_tags, phar, and sqlite3 (backporting php/php-src 9f9ee0186eb3 and 7ec8b8d49f42), and (12) Clang NULL-pointer zero-extension fix in EX_TMP_VAR, get_temporary_variable, and opcache VAR_NUM/NUM_VAR. Note: opcache for 5.6 is disabled until a use-after-free in its persistence path is fixed. Uses bundled PCRE1 and bundled Oniguruma, pkg-config shims for xml2-config/icu-config, and installs side-by-side with --program-suffix=5.6 (including versioned phar5.6)."
+POLICY_RATIONALE="EOL legacy PHP 5.6 built from Freexian Extended LTS jessie (5.6.40+dfsg-0+deb8u23, 85 ELTS security patches verified via signed InRelease -> Sources.gz) with Freexian ELTS jessie php-json (pecl-jsonc 1.3.6-1, PHP-3.01, plus bundled json-c under MIT/Expat, ENABLE_RDRAND disabled so /dev/urandom is used without inline assembly) compiled statically as built-in ext/json against OpenSSL 1.1.1w (openssl1.1) and static curl-openssl1.1 (keeping OpenSSL 3 completely out of the musl process) with 14 Fil-C/modern-lib/backport patches: (01) USE_ZEND_ALLOC=0 default, (02) portable C paths for inline assembly and bundled PCRE1 SUPPORT_JIT disabled under __FILC__, (03) MAP_PRIVATE opcache mapping, (04) deb.sury.org OpenSSL 1.1 compatibility patch (0054), (05) libxml2 2.12-2.15, ICU 68+/70+, and C++17 register compatibility, (06) musl fopencookie compatibility, (07) PHP 7.4 shutdown stream use-after-free backport (bug #78396), (08) PHP 7.0 Clang 16+ function-pointer type fixes in ext/zlib and main/php_scandir, (09) PHP 7.0 Clang 16+ C99 strictness and pointer-type fixes in libmagic, libmbfl, ext/session, and php_mblen, (10) provenance-preserving pointer tagging in Zend GC, executor, unserializer, phpdbg, and libmagic, (11) empty-path and [len-1] buffer-underflow guards in SPL, INI, open_basedir, temp file, strip_tags, phar, and sqlite3 (backporting php/php-src 9f9ee0186eb3 and 7ec8b8d49f42), (12) Clang NULL-pointer zero-extension fix in EX_TMP_VAR, get_temporary_variable, and opcache VAR_NUM/NUM_VAR, (13) OPcache persistence constant zval pointer rebasing onto live shared-memory op_array->literals, and (14) indirect callback signature alignment across cli/fpm/cgi/Zend/libxml/gd. Uses bundled PCRE1 and bundled Oniguruma, pkg-config shims for xml2-config/icu-config, and installs side-by-side with --program-suffix=5.6 (including versioned phar5.6)."
 FILC_ORIGIN_REF="8553fcd026b9:projects/php.projeny"
 
 port_configure() {
@@ -176,7 +176,6 @@ SHIM
       --with-config-file-path="$PIZFIX/etc/php5.6" \
       --with-config-file-scan-dir="$PIZFIX/etc/php5.6/conf.d" \
       --without-pear \
-      --disable-opcache \
       --enable-json \
       --with-libxml-dir="$shim_dir" \
       --with-icu-dir="$shim_dir" \
@@ -338,7 +337,10 @@ PY
   test -x "$PIZFIX/bin/phar5.6.phar"
   test -L "$PIZFIX/bin/phar5.6"
   test ! -e "$ext_dir/json.so"
-  test ! -e "$ext_dir/opcache.so"
+  test -f "$ext_dir/opcache.so"
+  "$php_bin" -n -d extension_dir="$ext_dir" -d zend_extension=opcache.so -m | grep -Fxq 'Zend OPcache'
+  "$php_bin" -n -d extension_dir="$ext_dir" -d zend_extension=opcache.so -v | grep -q 'with Zend OPcache'
+  "$fpm_bin" -n -d extension_dir="$ext_dir" -d zend_extension=opcache.so -m | grep -Fxq 'Zend OPcache'
   "$php_bin" -n -d phar.readonly=0 <<'EOF' | grep -Fxq 'PHP56_PHAR_SHUTDOWN_OK'
 <?php
 assert_options(ASSERT_ACTIVE, 1);
@@ -406,7 +408,13 @@ $i++;
 assert(is_float($i));
 assert(strtolower("Fil-C PHP 5.6") === "fil-c php 5.6");
 assert(strtoupper("Fil-C php 5.6") === "FIL-C PHP 5.6");
-assert(extension_loaded("Zend OPcache") === false);
+assert(extension_loaded("Zend OPcache") === true);
+assert(in_array("Zend OPcache", get_loaded_extensions(true), true));
+$op = opcache_get_status(true);
+assert(is_array($op) && $op["opcache_enabled"] === true && isset($op["scripts"]) && count($op["scripts"]) >= 1);
+$gen_fn = function () { static $n = 7; yield $n; };
+$gen = $gen_fn();
+assert($gen->current() === 7);
 
 assert(strpos(OPENSSL_VERSION_TEXT, "OpenSSL 1.1.1") === 0);
 assert(hash("sha256", "hello\n") === "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03");
@@ -570,6 +578,9 @@ echo "PHP56_FILC_SMOKE_OK\n";
 EOF
   "$php_bin" -n \
     -d extension_dir="$ext_dir" \
+    -d zend_extension=opcache.so \
+    -d opcache.enable_cli=1 \
+    -d opcache.file_update_protection=0 \
     "$tmp_smoke" | grep -Fxq 'PHP56_FILC_SMOKE_OK' || rc=$?
   rm -f "$tmp_smoke"
   if [[ "$rc" -ne 0 ]]; then
@@ -596,7 +607,10 @@ assert(is_string($prefix) && strpos(realpath(PHP_BINARY), $prefix . "/") === 0);
 assert(strpos(OPENSSL_VERSION_TEXT, "OpenSSL 1.1.1") === 0);
 $cv = curl_version();
 assert(is_array($cv) && isset($cv["ssl_version"]) && strpos($cv["ssl_version"], "OpenSSL/1.1.1") === 0);
-assert(extension_loaded("Zend OPcache") === false);
+assert(extension_loaded("Zend OPcache") === true);
+assert(in_array("Zend OPcache", get_loaded_extensions(true), true));
+$op = opcache_get_status(true);
+assert(is_array($op) && $op["opcache_enabled"] === true && isset($op["scripts"]) && count($op["scripts"]) >= 1);
 assert(openssl_digest("hello\n", "sha256") === "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03");
 assert(extension_loaded("json") === true);
 $jpayload = array("ok" => array(1, 2, 3), "unicode" => "hällo 日本語");
@@ -693,6 +707,9 @@ EOF
   PHP56_SMOKE_PREFIX="$expected_prefix" \
     "$php_bin" -n \
     -d extension_dir="$ext_dir" \
+    -d zend_extension=opcache.so \
+    -d opcache.enable_cli=1 \
+    -d opcache.file_update_protection=0 \
     "$tmp_smoke" | grep -Fxq 'PHP56_PKG_SMOKE_OK' || rc=$?
   rm -f "$tmp_smoke"
   return "$rc"
@@ -772,7 +789,10 @@ PY
   test ! -e "$PKG_PREFIX/bin/peardev"
   test ! -e "$PKG_PREFIX/bin/pecl"
   test ! -e "$ext_dir/json.so"
-  test ! -e "$ext_dir/opcache.so"
+  test -f "$ext_dir/opcache.so"
+  "$php_bin" -n -d extension_dir="$ext_dir" -d zend_extension=opcache.so -m | grep -Fxq 'Zend OPcache'
+  "$php_bin" -n -d extension_dir="$ext_dir" -d zend_extension=opcache.so -v | grep -q 'with Zend OPcache'
+  "$fpm_bin" -n -d extension_dir="$ext_dir" -d zend_extension=opcache.so -m | grep -Fxq 'Zend OPcache'
   "$php_bin" -n -d phar.readonly=0 <<'EOF' | grep -Fxq 'PHP56_PHAR_SHUTDOWN_OK'
 <?php
 assert_options(ASSERT_ACTIVE, 1);

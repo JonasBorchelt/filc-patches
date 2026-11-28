@@ -21,7 +21,7 @@ MAKE_ARGS=""
 INSTALL_ARGS=""
 TEST_CMD=""
 POLICY_CLASS="P4-Audit"
-POLICY_RATIONALE="EOL legacy PHP 7.4 built from Freexian Extended LTS bullseye (7.4.33-1+deb11u15, 97 ELTS security patches verified via signed InRelease -> Sources.gz) against OpenSSL 1.1.1w (openssl1.1) and static curl-openssl1.1 (keeping OpenSSL 3 completely out of the musl process) with 5 Fil-C/modern-lib patches: (01) USE_ZEND_ALLOC=0 default and strcase provenance fix, (02) portable C paths for inline assembly/asm-goto, (03) capability-preserving char * pointer arithmetic for zend_type and typed-property source lists, (04) MAP_PRIVATE opcache mapping, and (05) libxml2 2.12+ const xmlError/encoding.h and ICU 68+ boolean compatibility. Installed side-by-side with --program-suffix=7.4 and versioned directories."
+POLICY_RATIONALE="EOL legacy PHP 7.4 built from Freexian Extended LTS bullseye (7.4.33-1+deb11u15, 97 ELTS security patches verified via signed InRelease -> Sources.gz) against OpenSSL 1.1.1w (openssl1.1) and static curl-openssl1.1 (keeping OpenSSL 3 completely out of the musl process) with 8 Fil-C/modern-lib patches: (01) USE_ZEND_ALLOC=0 default and strcase provenance fix, (02) portable C paths for inline assembly/asm-goto, (03) capability-preserving char * pointer arithmetic for zend_type and typed-property source lists, (04) MAP_PRIVATE opcache mapping, (05) libxml2 2.12+ const xmlError/encoding.h and ICU 68+ boolean compatibility, (06) musl fopencookie compatibility, (07) OPcache pointer provenance and capability-preserving arena copy/alignment under __FILC__, and (08) indirect callback signature alignment across cli/fpm/cgi/phpdbg/Zend/libxml/gd. Installed side-by-side with --program-suffix=7.4 and versioned directories."
 FILC_ORIGIN_REF="8553fcd026b9:projects/php.projeny"
 
 port_configure() {
@@ -167,15 +167,19 @@ PY
   echo "php-fpm7.4 version: $fpm_ver"
   printf '%s\n' "$fpm_ver" | grep -q '^PHP 7\.4\.33 '
 
-  "$php_bin" -n \
-    -d extension_dir="$ext_dir" \
-    -d zend.assertions=1 \
-    -d assert.exception=1 \
-    -d zend_extension=opcache \
-    -d opcache.enable_cli=1 \
-    <<'EOF' | grep -Fxq 'PHP74_FILC_SMOKE_OK'
+  test -f "$ext_dir/opcache.so"
+  "$php_bin" -n -d extension_dir="$ext_dir" -d zend_extension=opcache.so -m | grep -Fxq 'Zend OPcache'
+  "$php_bin" -n -d extension_dir="$ext_dir" -d zend_extension=opcache.so -v | grep -q 'with Zend OPcache'
+  "$fpm_bin" -n -d extension_dir="$ext_dir" -d zend_extension=opcache.so -m | grep -Fxq 'Zend OPcache'
+
+  local tmp_smoke rc=0
+  tmp_smoke="$(mktemp "${TMPDIR:-/tmp}/filc-php74-test-smoke.XXXXXX")"
+  cat > "$tmp_smoke" <<'EOF'
 <?php
-// 1. Typed properties + WeakReference + class type hints (zend_type + source_list capabilities)
+// 1. Typed properties + WeakReference + class type hints (zend_type + source_list capabilities) + OPcache
+assert(in_array("Zend OPcache", get_loaded_extensions(true), true));
+$op = opcache_get_status(true);
+assert(is_array($op) && $op["opcache_enabled"] === true && isset($op["scripts"]) && count($op["scripts"]) >= 1);
 class Box {
     public ?stdClass $item = null;
     public int $count = 0;
@@ -351,6 +355,16 @@ rmdir($td);
 
 echo "PHP74_FILC_SMOKE_OK\n";
 EOF
+  "$php_bin" -n \
+    -d extension_dir="$ext_dir" \
+    -d zend.assertions=1 \
+    -d assert.exception=1 \
+    -d zend_extension=opcache.so \
+    -d opcache.enable_cli=1 \
+    -d opcache.file_update_protection=0 \
+    "$tmp_smoke" | grep -Fxq 'PHP74_FILC_SMOKE_OK' || rc=$?
+  rm -f "$tmp_smoke"
+  return "$rc"
 }
 
 port_package_smoke() {
@@ -419,14 +433,23 @@ PY
   fpm_ver="${out%%$'\n'*}"
   printf '%s\n' "$fpm_ver" | grep -q '^PHP 7\.4\.33 '
 
-  "$php_bin" -n \
-    -d extension_dir="$ext_dir" \
-    -d zend.assertions=1 \
-    -d assert.exception=1 \
-    -d zend_extension=opcache \
-    -d opcache.enable_cli=1 \
-    <<'EOF' | grep -Fxq 'PHP74_PKG_SMOKE_OK'
+  test -f "$ext_dir/opcache.so"
+  "$php_bin" -n -d extension_dir="$ext_dir" -d zend_extension=opcache.so -m | grep -Fxq 'Zend OPcache'
+  "$php_bin" -n -d extension_dir="$ext_dir" -d zend_extension=opcache.so -v | grep -q 'with Zend OPcache'
+  "$fpm_bin" -n -d extension_dir="$ext_dir" -d zend_extension=opcache.so -m | grep -Fxq 'Zend OPcache'
+
+  local tmp_smoke rc=0
+  tmp_smoke="$(mktemp "${TMPDIR:-/tmp}/filc-php74-pkg-smoke.XXXXXX")"
+  cat > "$tmp_smoke" <<'EOF'
 <?php
+class FilcOpcachePkgProbe74 {
+    public string $v = "ok";
+    public function get(): string { return $this->v; }
+}
+assert((new FilcOpcachePkgProbe74())->get() === "ok");
+assert(in_array("Zend OPcache", get_loaded_extensions(true), true));
+$op = opcache_get_status(true);
+assert(is_array($op) && $op["opcache_enabled"] === true && isset($op["scripts"]) && count($op["scripts"]) >= 1);
 $prefix = realpath(getenv("PKG_PREFIX"));
 assert(is_string($prefix) && strpos(realpath(PHP_BINARY), $prefix . "/") === 0);
 assert(strpos(OPENSSL_VERSION_TEXT, "OpenSSL 1.1.1") === 0);
@@ -521,4 +544,14 @@ rmdir($td);
 
 echo "PHP74_PKG_SMOKE_OK\n";
 EOF
+  "$php_bin" -n \
+    -d extension_dir="$ext_dir" \
+    -d zend.assertions=1 \
+    -d assert.exception=1 \
+    -d zend_extension=opcache.so \
+    -d opcache.enable_cli=1 \
+    -d opcache.file_update_protection=0 \
+    "$tmp_smoke" | grep -Fxq 'PHP74_PKG_SMOKE_OK' || rc=$?
+  rm -f "$tmp_smoke"
+  return "$rc"
 }

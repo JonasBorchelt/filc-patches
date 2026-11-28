@@ -5,3 +5,5 @@
 05-php73-libxml2-icu-compat.patch
 06-php73-musl-fopencookie.patch
 07-php73-shutdown-stream-uaf.patch
+08-php73-filc-opcache-provenance.patch
+09-php73-filc-callback-signatures.patch

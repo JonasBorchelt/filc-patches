@@ -1,0 +1,55 @@
+Rebase OPcache persisted constant zval pointers onto live SHM literals under Fil-C
+
+In ext/opcache/zend_persist.c, zend_persist_op_array_ex() copies
+op_array->literals into shared memory, frees orig_literals via efree(),
+and then relocates each IS_CONST opline operand using:
+
+    (char*)opline->op{1,2}.zv + ((char*)op_array->literals - (char*)orig_literals)
+
+Under Fil-C, pointer arithmetic preserves the capability of the left-hand
+pointer operand (opline->op{1,2}.zv), which belonged to the just-freed
+orig_literals allocation. Dereferencing the relocated pointer during VM
+execution then fails with a pointer-to-free-object check.
+
+Rebase onto (char*)op_array->literals and add the offset
+((char*)opline->op{1,2}.zv - (char*)orig_literals) so the resulting
+pointer carries the live shared-memory capability of op_array->literals.
+
+--- a/ext/opcache/zend_persist.c
++++ b/ext/opcache/zend_persist.c
+@@ -254,13 +254,13 @@
+ 
+ #if ZEND_EXTENSION_API_NO > PHP_5_3_X_API_NO
+ 	if (op_array->literals) {
+-		orig_literals = zend_shared_alloc_get_xlat_entry(op_array->literals);
+-		if (orig_literals) {
+-			op_array->literals = orig_literals;
++		zend_literal *persist_literals = zend_shared_alloc_get_xlat_entry(op_array->literals);
++		orig_literals = op_array->literals;
++		if (persist_literals) {
++			op_array->literals = persist_literals;
+ 		} else {
+ 			zend_literal *p = zend_accel_memdup(op_array->literals, sizeof(zend_literal) * op_array->last_literal);
+ 			zend_literal *end = p + op_array->last_literal;
+-			orig_literals = op_array->literals;
+ 			op_array->literals = p;
+ 			while (p < end) {
+ 				zend_persist_zval(&p->constant TSRMLS_CC);
+@@ -283,7 +283,7 @@
+ 		for (; opline < end ; opline++, offset++) {
+ 			if (ZEND_OP1_TYPE(opline) == IS_CONST) {
+ #if ZEND_EXTENSION_API_NO > PHP_5_3_X_API_NO
+-				opline->op1.zv = (zval*)((char*)opline->op1.zv + ((char*)op_array->literals - (char*)orig_literals));
++				opline->op1.zv = (zval*)((char*)op_array->literals + ((char*)opline->op1.zv - (char*)orig_literals));
+ #else
+ 				zend_persist_zval(&opline->op1.u.constant TSRMLS_CC);
+ 				zend_protect_zval(&opline->op1.u.constant TSRMLS_CC);
+@@ -291,7 +291,7 @@
+ 			}
+ 			if (ZEND_OP2_TYPE(opline) == IS_CONST) {
+ #if ZEND_EXTENSION_API_NO > PHP_5_3_X_API_NO
+-				opline->op2.zv = (zval*)((char*)opline->op2.zv + ((char*)op_array->literals - (char*)orig_literals));
++				opline->op2.zv = (zval*)((char*)op_array->literals + ((char*)opline->op2.zv - (char*)orig_literals));
+ #else
+ 				zend_persist_zval(&opline->op2.u.constant TSRMLS_CC);
+ 				zend_protect_zval(&opline->op2.u.constant TSRMLS_CC);

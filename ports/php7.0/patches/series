@@ -4,3 +4,5 @@
 04-php70-libxml2-icu-compat.patch
 05-php70-musl-fopencookie.patch
 06-php70-shutdown-stream-uaf.patch
+07-php70-filc-opcache-provenance.patch
+08-php70-filc-callback-signatures.patch

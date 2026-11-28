@@ -1,0 +1,140 @@
+Preserve Fil-C pointer provenance and capabilities across OPcache persistence and arena load
+
+Fix three classes of Fil-C pointer-provenance bugs in PHP 7.0 ext/opcache:
+
+1. ARENA_REALLOC() in zend_accelerator_util_funcs.c added the delta
+   (ZCG(arena_mem) - current_persistent_script->arena_mem) to ptr, keeping
+   the SHM capability of ptr instead of rebasing onto ZCG(arena_mem).
+2. The __SSE2__ 64-byte alignment blocks in ZendAccelerator.c,
+   zend_persist.c, zend_persist_calc.c, zend_accelerator_util_funcs.c, and
+   zend_file_cache.c cast pointers through (zend_uintptr_t ... & ~63L),
+   stripping Fil-C capabilities, and used SSE2 vector loads/stores in
+   fast_memcpy() that strip pointer metadata when copying arena structs.
+   Disable the __SSE2__ fast path under __FILC__ so the portable memcpy()
+   and capability-preserving allocation paths are used everywhere.
+3. Rebase opline->op{1,2}.zv onto (char*)op_array->literals in
+   zend_persist.c (ZEND_USE_ABS_CONST_ADDR path) so pointers never retain
+   the freed orig_literals capability.
+
+--- a/ext/opcache/ZendAccelerator.c
++++ b/ext/opcache/ZendAccelerator.c
+@@ -1224,7 +1224,7 @@
+ 	memory_used = zend_accel_script_persist_calc(new_persistent_script, NULL, 0, 0);
+ 
+ 	/* Allocate memory block */
+-#ifdef __SSE2__
++#if defined(__SSE2__) && !defined(__FILC__)
+ 	/* Align to 64-byte boundary */
+ 	ZCG(mem) = zend_arena_alloc(&CG(arena), memory_used + 64);
+ 	ZCG(mem) = (void*)(((zend_uintptr_t)ZCG(mem) + 63L) & ~63L);
+@@ -1312,7 +1312,7 @@
+ 	memory_used = zend_accel_script_persist_calc(new_persistent_script, key, key_length, 1);
+ 
+ 	/* Allocate shared memory */
+-#ifdef __SSE2__
++#if defined(__SSE2__) && !defined(__FILC__)
+ 	/* Align to 64-byte boundary */
+ 	ZCG(mem) = zend_shared_alloc(memory_used + 64);
+ 	ZCG(mem) = (void*)(((zend_uintptr_t)ZCG(mem) + 63L) & ~63L);
+--- a/ext/opcache/zend_accelerator_util_funcs.c
++++ b/ext/opcache/zend_accelerator_util_funcs.c
+@@ -35,7 +35,7 @@
+ #endif
+ 
+ #define ARENA_REALLOC(ptr) \
+-	(void*)(((char*)(ptr)) + ((char*)ZCG(arena_mem) - (char*)ZCG(current_persistent_script)->arena_mem))
++	(void*)((char*)ZCG(arena_mem) + ((char*)(ptr) - (char*)ZCG(current_persistent_script)->arena_mem))
+ 
+ typedef int (*id_function_t)(void *, void *);
+ typedef void (*unique_copy_ctor_func_t)(void *pElement);
+@@ -648,7 +648,7 @@
+ 	return;
+ }
+ 
+-#ifdef __SSE2__
++#if defined(__SSE2__) && !defined(__FILC__)
+ #include <mmintrin.h>
+ #include <emmintrin.h>
+ 
+@@ -689,7 +689,7 @@
+ 		ZCG(current_persistent_script) = persistent_script;
+ 		ZCG(arena_mem) = NULL;
+ 		if (EXPECTED(persistent_script->arena_size)) {
+-#ifdef __SSE2__
++#if defined(__SSE2__) && !defined(__FILC__)
+ 			/* Target address must be aligned to 64-byte boundary */
+ 			ZCG(arena_mem) = zend_arena_alloc(&CG(arena), persistent_script->arena_size + 64);
+ 			ZCG(arena_mem) = (void*)(((zend_uintptr_t)ZCG(arena_mem) + 63L) & ~63L);
+--- a/ext/opcache/zend_persist.c
++++ b/ext/opcache/zend_persist.c
+@@ -530,10 +530,10 @@
+ 		for (; opline < end ; opline++, offset++) {
+ # if ZEND_USE_ABS_CONST_ADDR
+ 			if (ZEND_OP1_TYPE(opline) == IS_CONST) {
+-				opline->op1.zv = (zval*)((char*)opline->op1.zv + ((char*)op_array->literals - (char*)orig_literals));
++				opline->op1.zv = (zval*)((char*)op_array->literals + ((char*)opline->op1.zv - (char*)orig_literals));
+ 			}
+ 			if (ZEND_OP2_TYPE(opline) == IS_CONST) {
+-				opline->op2.zv = (zval*)((char*)opline->op2.zv + ((char*)op_array->literals - (char*)orig_literals));
++				opline->op2.zv = (zval*)((char*)op_array->literals + ((char*)opline->op2.zv - (char*)orig_literals));
+ 			}
+ # endif
+ # if ZEND_USE_ABS_JMP_ADDR
+@@ -920,7 +920,7 @@
+ 	}
+ 	zend_accel_store_string(script->full_path);
+ 
+-#ifdef __SSE2__
++#if defined(__SSE2__) && !defined(__FILC__)
+ 	/* Align to 64-byte boundary */
+ 	ZCG(mem) = (void*)(((zend_uintptr_t)ZCG(mem) + 63L) & ~63L);
+ #else
+--- a/ext/opcache/zend_persist_calc.c
++++ b/ext/opcache/zend_persist_calc.c
+@@ -401,7 +401,7 @@
+ 	}
+ 	ADD_STRING(new_persistent_script->full_path);
+ 
+-#ifdef __SSE2__
++#if defined(__SSE2__) && !defined(__FILC__)
+ 	/* Align size to 64-byte boundary */
+ 	new_persistent_script->size = (new_persistent_script->size + 63) & ~63;
+ #endif
+@@ -410,7 +410,7 @@
+ 	zend_hash_persist_calc(&new_persistent_script->function_table, zend_persist_op_array_calc);
+ 	zend_persist_op_array_calc_ex(&new_persistent_script->main_op_array);
+ 
+-#ifdef __SSE2__
++#if defined(__SSE2__) && !defined(__FILC__)
+ 	/* Align size to 64-byte boundary */
+ 	new_persistent_script->arena_size = (new_persistent_script->arena_size + 63) & ~63;
+ #endif
+--- a/ext/opcache/zend_file_cache.c
++++ b/ext/opcache/zend_file_cache.c
+@@ -767,7 +767,7 @@
+ 		return FAILURE;
+ 	}
+ 
+-#ifdef __SSE2__
++#if defined(__SSE2__) && !defined(__FILC__)
+ 	/* Align to 64-byte boundary */
+ 	mem = emalloc(script->size + 64);
+ 	buf = (void*)(((zend_uintptr_t)mem + 63L) & ~63L);
+@@ -1319,7 +1319,7 @@
+ 	}
+ 
+ 	checkpoint = zend_arena_checkpoint(CG(arena));
+-#ifdef __SSE2__
++#if defined(__SSE2__) && !defined(__FILC__)
+ 	/* Align to 64-byte boundary */
+ 	mem = zend_arena_alloc(&CG(arena), info.mem_size + info.str_size + 64);
+ 	mem = (void*)(((zend_uintptr_t)mem + 63L) & ~63L);
+@@ -1380,7 +1380,7 @@
+ 			goto use_process_mem;
+ 		}
+ 
+-#ifdef __SSE2__
++#if defined(__SSE2__) && !defined(__FILC__)
+ 		/* Align to 64-byte boundary */
+ 		buf = zend_shared_alloc(info.mem_size + 64);
+ 		buf = (void*)(((zend_uintptr_t)buf + 63L) & ~63L);

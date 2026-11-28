@@ -10,3 +10,5 @@
 10-php56-filc-pointer-tagging.patch
 11-php56-bounds-underflow-fixes.patch
 12-php56-clang-opcache-var-num.patch
+13-php56-filc-opcache-persist-provenance.patch
+14-php56-filc-callback-signatures.patch

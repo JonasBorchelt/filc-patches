@@ -1,0 +1,103 @@
+Preserve Fil-C pointer capabilities and callback signatures in PHP 5.6 zend_qsort
+
+PHP 5.6's _zend_qsort_swap() in Zend/zend_qsort.c swapped arbitrary
+elements via 4-byte int* and 1-byte char* accesses. When sorting arrays
+of pointers or structs containing pointers (such as Bucket* in
+zend_hash_sort, zend_llist_element* in zend_llist_sort, or
+struct bucketindex in array_unique), copying pointers through int*
+strips their Fil-C capabilities, causing immediate out-of-bounds
+capability traps on the first comparator dereference (e.g. php -m
+print_modules -> module_name_cmp). PHP 7 replaced zend_qsort with
+typed swap callbacks in Zend/zend_sort.c.
+
+Fix three issues in Zend/zend_qsort.c:
+1. Replace the int*/char* loop in _zend_qsort_swap() with pointer-aligned
+   chunked memcpy() via a void* stack buffer (and early return on a == b),
+   preserving Fil-C pointer capabilities for all element types and sizes.
+2. Guard nmemb <= 1 || siz == 0 before computing (nmemb - 1) * siz to
+   avoid size_t underflow on empty arrays, and widen offset to size_t.
+3. Avoid casting 2-arg compare_func_t to 3-arg compare_r_func_t in
+   zend_qsort() by forwarding through a typed wrapper and context struct.
+
+--- a/Zend/zend_qsort.c
++++ b/Zend/zend_qsort.c
+@@ -27,30 +27,22 @@
+ 
+ static void _zend_qsort_swap(void *a, void *b, size_t siz)
+ {
+-	register char  *tmp_a_char;
+-	register char  *tmp_b_char;
+-	register int   *tmp_a_int;
+-	register int   *tmp_b_int;
+-	register size_t i;
+-	int             t_i;
+-	char            t_c;
++	void *tmp[32];
++	char *pa = (char *) a;
++	char *pb = (char *) b;
+ 
+-	tmp_a_int = (int *) a;
+-	tmp_b_int = (int *) b;
+-
+-	for (i = sizeof(int); i <= siz; i += sizeof(int)) {
+-		t_i = *tmp_a_int;
+-		*tmp_a_int++ = *tmp_b_int;
+-		*tmp_b_int++ = t_i;
++	if (a == b) {
++		return;
+ 	}
+ 
+-	tmp_a_char = (char *) tmp_a_int;
+-	tmp_b_char = (char *) tmp_b_int;
+-
+-	for (i = i - sizeof(int) + 1; i <= siz; ++i) {
+-		t_c = *tmp_a_char;
+-		*tmp_a_char++ = *tmp_b_char;
+-		*tmp_b_char++ = t_c;
++	while (siz > 0) {
++		size_t chunk = siz > sizeof(tmp) ? sizeof(tmp) : siz;
++		memcpy(tmp, pa, chunk);
++		memcpy(pa, pb, chunk);
++		memcpy(pb, tmp, chunk);
++		pa += chunk;
++		pb += chunk;
++		siz -= chunk;
+ 	}
+ }
+ 
+@@ -64,7 +56,11 @@
+ 	register char  *seg2;
+ 	register char  *seg2p;
+ 	register int    loop;
+-	uint            offset;
++	size_t          offset;
++
++	if (nmemb <= 1 || siz == 0) {
++		return;
++	}
+ 
+ 	begin_stack[0] = (char *) base;
+ 	end_stack[0]   = (char *) base + ((nmemb - 1) * siz);
+@@ -118,9 +114,21 @@
+ 	}
+ }
+ 
++struct _zend_qsort_cmp_ctx {
++	compare_func_t compare;
++};
++
++static int _zend_qsort_cmp_wrapper(const void *a, const void *b TSRMLS_DC, void *arg)
++{
++	struct _zend_qsort_cmp_ctx *ctx = (struct _zend_qsort_cmp_ctx *) arg;
++	return ctx->compare(a, b TSRMLS_CC);
++}
++
+ ZEND_API void zend_qsort(void *base, size_t nmemb, size_t siz, compare_func_t compare TSRMLS_DC)
+ {
+-	zend_qsort_r(base, nmemb, siz, (compare_r_func_t)compare, NULL TSRMLS_CC);
++	struct _zend_qsort_cmp_ctx ctx;
++	ctx.compare = compare;
++	zend_qsort_r(base, nmemb, siz, _zend_qsort_cmp_wrapper, &ctx TSRMLS_CC);
+ }
+ 
+ /* 

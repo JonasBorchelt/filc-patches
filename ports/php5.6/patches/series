@@ -12,3 +12,4 @@
 12-php56-clang-opcache-var-num.patch
 13-php56-filc-opcache-persist-provenance.patch
 14-php56-filc-callback-signatures.patch
+15-php56-filc-qsort-capability-swap.patch

@@ -16,7 +16,7 @@ on:
       include_legacy_php:
         description: "Include legacy Freexian ELTS PHP 7.4, 7.3, 7.0, and 5.6 images"
         required: false
-        default: true
+        default: false
         type: boolean
   push:
     branches:
@@ -33,7 +33,7 @@ permissions:
   contents: read
 
 env:
-  ENABLE_LEGACY_PHP: "true"
+  ENABLE_LEGACY_PHP: "false"
 
 jobs:
   plan:
@@ -78,7 +78,7 @@ jobs:
           if input_val in ("true", "false"):
               enable_legacy = input_val == "true"
           else:
-              enable_legacy = os.environ.get("ENABLE_LEGACY_PHP", "true").strip().lower() == "true"
+              enable_legacy = os.environ.get("ENABLE_LEGACY_PHP", "false").strip().lower() == "true"
           if enable_legacy:
               include.extend(legacy_php)
 

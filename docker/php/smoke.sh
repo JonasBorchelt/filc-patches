@@ -14,10 +14,9 @@ VARIANT="${3:?usage: smoke.sh <image-ref> <php-series> <variant>}"
 PHP_MAJOR="${PHP_SERIES%%.*}"
 PHP_MINOR="${PHP_SERIES#*.}"
 PHP_ASSERT_ARGS=()
-PHP_OPCACHE_ARGS=()
+PHP_OPCACHE_ARGS=(-d opcache.enable_cli=1)
 if [[ "$PHP_MAJOR" -ge 7 ]]; then
   PHP_ASSERT_ARGS=(-d zend.assertions=1 -d assert.exception=1)
-  PHP_OPCACHE_ARGS=(-d opcache.enable_cli=1)
 fi
 
 echo "=== Smoke-testing ${IMAGE} (PHP ${PHP_SERIES}, major=${PHP_MAJOR}, variant=${VARIANT}) ==="
@@ -50,6 +49,7 @@ if [[ "$RC" -ne 0 ]]; then
   exit "$RC"
 fi
 printf '%s\n' "$VER_OUT" | head -n 1 | grep -Eq "^PHP ${PHP_SERIES//./\\.}\."
+printf '%s\n' "$VER_OUT" | grep -Fq "with Zend OPcache"
 
 RC=0
 MOD_OUT="$(docker run --rm "${IMAGE}" php -m 2>&1)" || RC=$?
@@ -59,7 +59,7 @@ if [[ "$RC" -ne 0 ]]; then
 fi
 REQUIRED_MODS=(
   openssl sqlite3 pdo_sqlite curl mbstring intl bcmath exif pcntl sockets
-  json pcre zlib dom simplexml xmlwriter iconv
+  json pcre zlib dom simplexml xmlwriter iconv "Zend OPcache"
 )
 if [[ "$PHP_MAJOR" -ge 8 ]] || { [[ "$PHP_MAJOR" -eq 7 ]] && [[ "$PHP_MINOR" -ge 2 ]]; }; then
   REQUIRED_MODS+=(sodium)
@@ -144,12 +144,9 @@ assert(strtolower("FILC_OK") === "filc_ok");
 if (PHP_VERSION_ID >= 70200) {
     assert(strlen(sodium_crypto_generichash("filc")) === SODIUM_CRYPTO_GENERICHASH_BYTES);
 }
-if (PHP_VERSION_ID >= 70000) {
-    $op = opcache_get_status(false);
-    assert(is_array($op) && $op["opcache_enabled"] === true);
-} else {
-    assert(extension_loaded("Zend OPcache") === false);
-}
+$op = opcache_get_status(false);
+assert(is_array($op) && $op["opcache_enabled"] === true);
+assert(in_array("Zend OPcache", get_loaded_extensions(true), true));
 $coll = new Collator("en_US");
 assert($coll->compare("a", "b") < 0);
 
@@ -238,15 +235,10 @@ if [[ "$PHP_MAJOR" -ge 8 ]]; then
     exit 1
   fi
 else
-  # Legacy PHP 7.x ports ship opcache.so enabled by default; PHP 5.6 ships
-  # without opcache.so until its persistence UAF is fixed.
+  # Legacy PHP 5.6 and 7.x ports all ship opcache.so enabled by default.
   SHARED_OUT="$(docker run --rm "${IMAGE}" sh -eux -c '
     ext_dir="$(php -r "echo ini_get(\"extension_dir\");")"
-    if [ "'"${PHP_MAJOR}"'" -ge 7 ]; then
-      test -f "${ext_dir}/opcache.so"
-    else
-      test ! -e "${ext_dir}/opcache.so"
-    fi
+    test -f "${ext_dir}/opcache.so"
     opt_exts=""
     for ext in mysqli pdo_mysql pgsql pdo_pgsql gmp soap; do
       if [ -f "${ext_dir}/${ext}.so" ]; then
@@ -256,20 +248,30 @@ else
     if [ -n "$opt_exts" ]; then
       docker-php-ext-enable $opt_exts
     fi
-    php -d display_startup_errors=1 -d display_errors=1 -d error_reporting=E_ALL '"${PHP_ASSERT_ARGS[*]:-}"' -r '\''
-      if (PHP_VERSION_ID < 70000) {
-        assert_options(ASSERT_ACTIVE, 1);
-        assert_options(ASSERT_BAIL, 1);
-        assert_options(ASSERT_WARNING, 1);
-        assert(extension_loaded("Zend OPcache") === false);
-      } else {
-        assert(extension_loaded("Zend OPcache"));
-      }
-      assert(extension_loaded("json"));
-      $drivers = PDO::getAvailableDrivers();
-      assert(in_array("sqlite", $drivers, true));
-      echo "LEGACY_PHP_EXTS_OK\n";
-    '\''
+    cat > /tmp/filc-opcache-smoke.php <<'\''PHP'\''
+<?php
+if (PHP_VERSION_ID < 70000) {
+    assert_options(ASSERT_ACTIVE, 1);
+    assert_options(ASSERT_BAIL, 1);
+    assert_options(ASSERT_WARNING, 1);
+}
+class FilcDockerOpcacheProbe {
+    public $v = "ok";
+    public function get() { return $this->v; }
+}
+$p = new FilcDockerOpcacheProbe();
+assert($p->get() === "ok");
+assert(extension_loaded("Zend OPcache"));
+assert(in_array("Zend OPcache", get_loaded_extensions(true), true));
+$op = opcache_get_status(true);
+assert(is_array($op) && $op["opcache_enabled"] === true && isset($op["scripts"]) && count($op["scripts"]) >= 1);
+assert(extension_loaded("json"));
+$drivers = PDO::getAvailableDrivers();
+assert(in_array("sqlite", $drivers, true));
+echo "LEGACY_PHP_EXTS_OK\n";
+PHP
+    php -d display_startup_errors=1 -d display_errors=1 -d error_reporting=E_ALL '"${PHP_ASSERT_ARGS[*]:-}"' -d opcache.enable_cli=1 -d opcache.file_update_protection=0 /tmp/filc-opcache-smoke.php
+    rm -f /tmp/filc-opcache-smoke.php
   ' 2>&1)"
   echo "$SHARED_OUT"
   printf '%s\n' "$SHARED_OUT" | grep -Fxq "LEGACY_PHP_EXTS_OK"
@@ -300,12 +302,9 @@ trap cleanup_dropin EXIT
 if [[ "$PHP_MAJOR" -ge 8 ]]; then
   DROPIN_CLI_EXTS="intl bcmath exif opcache sockets pcntl mysqli pdo_mysql pgsql pdo_pgsql gmp soap"
   DROPIN_FPM_EXTS="intl bcmath opcache mysqli pdo_mysql pgsql pdo_pgsql gmp soap"
-elif [[ "$PHP_MAJOR" -ge 7 ]]; then
+else
   DROPIN_CLI_EXTS="intl bcmath exif opcache sockets pcntl"
   DROPIN_FPM_EXTS="intl bcmath opcache"
-else
-  DROPIN_CLI_EXTS="intl bcmath exif sockets pcntl"
-  DROPIN_FPM_EXTS="intl bcmath"
 fi
 
 if [[ "$VARIANT" == "cli" ]]; then
@@ -359,11 +358,7 @@ EOF
   printf '%s\n' "$DROPIN_OUT" | grep -Fq '"dom":true'
   printf '%s\n' "$DROPIN_OUT" | grep -Fq '"simplexml":true'
   printf '%s\n' "$DROPIN_OUT" | grep -Fq '"xmlwriter":true'
-  if [[ "$PHP_MAJOR" -ge 7 ]]; then
-    printf '%s\n' "$DROPIN_OUT" | grep -Fq '"opcache":true'
-  else
-    printf '%s\n' "$DROPIN_OUT" | grep -Fq '"opcache":false'
-  fi
+  printf '%s\n' "$DROPIN_OUT" | grep -Fq '"opcache":true'
   if [[ "$PHP_MAJOR" -ge 8 ]]; then
     printf '%s\n' "$DROPIN_OUT" | grep -Fq '"mysqli":true'
     printf '%s\n' "$DROPIN_OUT" | grep -Fq '"pdo_mysql":true'
@@ -414,13 +409,7 @@ EOF
       }
     done
   else
-    FPM_REQUIRED=(openssl intl iconv dom SimpleXML xmlwriter pcntl json)
-    if [[ "$PHP_MAJOR" -ge 7 ]]; then
-      FPM_REQUIRED=("Zend OPcache" "${FPM_REQUIRED[@]}")
-    elif printf '%s\n' "$FPM_MODS" | grep -Fxiq "Zend OPcache"; then
-      echo "error: unexpected Zend OPcache loaded in php-fpm -m on PHP ${PHP_SERIES}" >&2
-      exit 1
-    fi
+    FPM_REQUIRED=("Zend OPcache" openssl intl iconv dom SimpleXML xmlwriter pcntl json)
     for ext in "${FPM_REQUIRED[@]}"; do
       printf '%s\n' "$FPM_MODS" | grep -Fxiq "$ext" || {
         echo "error: expected extension missing in php-fpm -m: $ext" >&2

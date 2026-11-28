@@ -160,10 +160,9 @@ if [[ -d "${SRC_PIZFIX}/opt/openssl1.1/lib/engines-1.1" ]]; then
   cp -a "${SRC_PIZFIX}/opt/openssl1.1/lib/engines-1.1" "${DST_PIZFIX}/opt/openssl1.1/lib/"
 fi
 
-# Enable loadable OPcache extension on PHP 7.0-8.4 (PHP 8.5 has OPcache built-in;
-# OPcache for 5.6 is disabled until a use-after-free in its persistence path is fixed).
-# Use explicit .so suffix for uniform compatibility across PHP 7.0 (pre-7.2) and 7.3+.
-if [[ "${PHP_VERSION}" != "5.6" && -f "${DST_PIZFIX}/lib/php${PHP_VERSION}/extensions/opcache.so" ]]; then
+# Enable loadable OPcache extension on PHP 5.6-8.4 (PHP 8.5 has OPcache built-in).
+# Use explicit .so suffix for uniform compatibility across PHP 5.6/7.0 (pre-7.2) and 7.3+.
+if [[ -f "${DST_PIZFIX}/lib/php${PHP_VERSION}/extensions/opcache.so" ]]; then
   printf 'zend_extension=opcache.so\n' > "${DST_PIZFIX}/etc/php${PHP_VERSION}/conf.d/10-opcache.ini"
 fi
 

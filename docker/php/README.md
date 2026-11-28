@@ -15,9 +15,9 @@ Drop-in container images for memory-safe PHP compiled with [Fil-C](https://filc.
 | PHP 7.4 (Freexian ELTS) | `7.4-cli`, `7.4`, `7.4.33-cli`, `7.4.33` | `7.4-fpm`, `7.4.33-fpm` | eol (Freexian ELTS, OpenSSL 1.1.1w) |
 | PHP 7.3 (Freexian ELTS) | `7.3-cli`, `7.3`, `7.3.31-cli`, `7.3.31` | `7.3-fpm`, `7.3.31-fpm` | eol (Freexian ELTS, OpenSSL 1.1.1w) |
 | PHP 7.0 (Freexian ELTS) | `7.0-cli`, `7.0`, `7.0.33-cli`, `7.0.33` | `7.0-fpm`, `7.0.33-fpm` | eol (Freexian ELTS, OpenSSL 1.1.1w) |
-| PHP 5.6 (Freexian ELTS) | `5.6-cli`, `5.6`, `5.6.40-cli`, `5.6.40` | `5.6-fpm`, `5.6.40-fpm` | eol (Freexian ELTS, OpenSSL 1.1.1w, static pecl-jsonc, no opcache) |
+| PHP 5.6 (Freexian ELTS) | `5.6-cli`, `5.6`, `5.6.40-cli`, `5.6.40` | `5.6-fpm`, `5.6.40-fpm` | eol (Freexian ELTS, OpenSSL 1.1.1w, static pecl-jsonc) |
 
-Legacy PHP 7.4, 7.3, 7.0, and 5.6 images are built from Freexian Extended LTS sources with backported CVE patches and OpenSSL 1.1.1w, labeled `support=eol`, and controlled by the workflow's `ENABLE_LEGACY_PHP` switch (`false` while channel 0.1.7 revision 2 fixes legacy callback signatures and PHP 5.6 OPcache).
+Legacy PHP 7.4, 7.3, 7.0, and 5.6 images are built from Freexian Extended LTS sources with backported CVE patches and OpenSSL 1.1.1w, labeled `support=eol`, and controlled by the workflow's `ENABLE_LEGACY_PHP` switch (`true` by default).
 
 ## Drop-In Compatibility
 

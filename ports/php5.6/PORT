@@ -161,6 +161,66 @@ SHIM
   fi
 }
 
+port_build() {
+  if [[ "${FILC_PHP56_COLLECT_STRICT:-0}" != "1" ]]; then
+    make -j "$JOBS"
+    return $?
+  fi
+
+  # Diagnostic-only collection mode (never active in normal/release builds):
+  # downgrade Clang 16+ C99 strictness errors to warnings and run make -k so
+  # every site across the entire tree is collected in one pass.
+  local existing_extra strict_flags collect_log make_rc=0
+  existing_extra="$(sed -n 's/^EXTRA_CFLAGS = //p' Makefile | head -n 1 || true)"
+  strict_flags="-Wno-error=implicit-int -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=incompatible-function-pointer-types -Wimplicit-int -Wimplicit-function-declaration -Wint-conversion -Wincompatible-function-pointer-types"
+  collect_log="$SRC_DIR/clang-strict-collect.log"
+  : > "$collect_log"
+
+  set +e
+  make -k -j "$JOBS" EXTRA_CFLAGS="${existing_extra:+$existing_extra }$strict_flags" >"$collect_log" 2>&1
+  make_rc=$?
+  set -e
+
+  "${HOST_PYTHON3:-/usr/bin/python3}" - "$SRC_DIR" "$collect_log" "$make_rc" >&2 <<'PY'
+import os, re, sys
+
+src_dir, log_path, make_rc = sys.argv[1], sys.argv[2], sys.argv[3]
+src_prefix = src_dir.rstrip("/") + "/"
+strict_re = re.compile(
+    r"\[-(?:Wimplicit-int|Wimplicit-function-declaration|Wint-conversion|Wincompatible-function-pointer-types)\]"
+)
+err_re = re.compile(r":\s*(?:fatal )?error:")
+
+strict_hits = []
+strict_seen = set()
+other_errs = []
+err_seen = set()
+
+with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+    for raw in f:
+        line = raw.rstrip("\r\n").replace(src_prefix, "")
+        if strict_re.search(line):
+            if line not in strict_seen:
+                strict_seen.add(line)
+                strict_hits.append(line)
+        elif err_re.search(line):
+            if line not in err_seen:
+                err_seen.add(line)
+                other_errs.append(line)
+
+strict_hits.sort()
+other_errs.sort()
+print(f"--- CLANG STRICT COLLECT REPORT (php5.6, make_rc={make_rc}, strict_hits={len(strict_hits)}, other_errors={len(other_errs)}) ---")
+for h in strict_hits:
+    print(f"STRICT: {h}")
+for e in other_errs:
+    print(f"ERROR: {e}")
+print("--- END CLANG STRICT COLLECT REPORT (php5.6) ---")
+PY
+  echo "error: FILC_PHP56_COLLECT_STRICT=1 diagnostic collection run complete (intentional non-zero exit)" >&2
+  return 1
+}
+
 port_test() {
   local php_bin fpm_bin ext_dir out ver fpm_ver
   php_bin="$PIZFIX/bin/php5.6"

@@ -960,11 +960,12 @@ module PublishPortsStream
     total = lines.length
     return lines if total <= max_lines
 
-    # When build-port or package-port dumped a Fil-C panic report or timeout
-    # diagnostics block, preserve it unabridged together with the preceding lines.
+    # When build-port or package-port dumped a Fil-C panic report, timeout
+    # diagnostics block, or strict-collect report, preserve it unabridged.
     panic_start = lines.index { |ln| ln.start_with?("--- FIL-C PANIC REPORT (") }
     diag_start = lines.index { |ln| ln.start_with?("--- TIMEOUT DIAGNOSTICS (") }
-    special_start = [panic_start, diag_start].compact.min
+    collect_start = lines.index { |ln| ln.start_with?("--- CLANG STRICT COLLECT REPORT (") }
+    special_start = [panic_start, diag_start, collect_start].compact.min
     if special_start
       win_start = [special_start - 15, 0].max
       slice = lines[win_start..]

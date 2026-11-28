@@ -133,5 +133,14 @@ its own license, verified against the pinned source files:
   headers (Regents of the University of California, `Copyright (c) 1991, 1993`;
   Colin Percival and Alexander Peslyak, BSD-2-Clause).
 
+- **Legacy Freexian Extended LTS ports** (`ports/openssl1.1`,
+  `ports/curl-openssl1.1`, `ports/php5.6`, `ports/php7.0`, `ports/php7.3`,
+  `ports/php7.4`): Pinned via signed Freexian ELTS `InRelease` -> `Sources.gz`
+  metadata. Because Debian's `php5` `+dfsg` source tarball excludes the original
+  `ext/json`, `ports/php5.6` additionally pins Freexian ELTS `jessie`
+  `php-json` (`pecl-jsonc` 1.3.6-1) and builds it statically as built-in
+  `ext/json` (**PHP-3.01** for the `jsonc` extension and **MIT / Expat** for the
+  bundled `json-c` library; `LICENSE="PHP-3.01 AND MIT"`).
+
 Every adopted patch and runtime path documents its exact upstream origin
 commits (`Fil-C-Origin-Commits` and `runtime/filc/PROVENANCE.md`).

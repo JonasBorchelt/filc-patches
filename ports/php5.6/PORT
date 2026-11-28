@@ -1,6 +1,6 @@
 NAME="php5.6"
 VERSION="5.6.40+deb8u23"
-LICENSE="PHP-3.01"
+LICENSE="PHP-3.01 AND MIT"
 SUPPORT_STATUS="eol"
 EOL_DATE="2018-12-31"
 SECURITY_SOURCE="freexian-elts"
@@ -11,6 +11,7 @@ UPSTREAM_PGP_KEY="ports/pgp-keys/freexian-elts-archive-key.asc"
 UPSTREAM_PGP_FPR="AB597C4F6F3380BD4B2BEBC2A07310D369055D5A"
 DEBIAN_TARBALL_URL="https://deb.freexian.com/extended-lts/pool/main/p/php5/php5_5.6.40+dfsg-0+deb8u23.debian.tar.xz"
 DEBIAN_TARBALL_SHA256="a9bb07558803ef70ea0f860cfdefd2006ad35fc99735dd2ef111bc6d10b9952e"
+DEBIAN_EXTRA_SOURCES="php-json|1.3.6-1|https://deb.freexian.com/extended-lts/pool/main/p/php-json/php-json_1.3.6.orig.tar.xz|eea622cda914d98278fda97c4f13678a3d746b3cff296ad9961da565e6e1f095"
 DEBIAN_SECURITY_PATCHES="0051-Fix-PHP-bug-64827-Segfault-in-zval_mark_grey-zend_gc.patch CVE-2019-9022.patch CVE-2019-9637.patch CVE-2019-9638_CVE-2019-9639.patch CVE-2019-9640.patch CVE-2019-9641.patch CVE-2019-11034.patch CVE-2019-11035.patch CVE-2019-11036.patch CVE-2019-11039.patch CVE-2019-11040.patch 0005-Fix-bug-77967-Bypassing-open_basedir-restrictions-vi.patch CVE-2019-11041.patch CVE-2019-11042.patch 0001-Fix-77919-Potential-UAF-in-Phar-RSHUTDOWN.patch 0052-Revert-PEAR-version-to-last-working-version-from-PHP.patch CVE-2019-11043.patch CVE-2019-11046.patch CVE-2019-11047.patch CVE-2019-11045.patch CVE-2019-11050.patch CVE-2020-7059.patch CVE-2020-7060.patch CVE-2020-7062.patch CVE-2020-7063.patch CVE-2020-7064.patch CVE-2020-7067.patch CVE-2020-7066.patch CVE-2019-11048-1.patch CVE-2019-11048-2.patch not-cve-but-bug-CVE-2019-18218.patch CVE-2020-7070.patch CVE-2019-9675.patch CVE-2020-7068.patch CVE-2020-7071.patch CVE-2021-21702.patch 0053-Add-simple-Firebird-payload-fake-server-to-test-suite.patch CVE-2021-21704.patch CVE-2021-21705.patch CVE-2021-21703.patch CVE-2021-21707.patch CVE-2022-31625.patch CVE-2022-31626.patch CVE-2022-31628-1.patch CVE-2022-31628-2.patch CVE-2022-31629.patch CVE-2023-0567.patch CVE-2023-0568.patch CVE-2023-0662.patch CVE-2022-31631.patch CVE-2023-3823.patch CVE-2023-3824.patch CVE-2024-2756.patch CVE-2024-3096.patch CVE-2024-5458.patch CVE-2024-8925.patch CVE-2024-8927.patch CVE-2024-8932.patch CVE-2024-11233.patch CVE-2024-11234.patch CVE-2024-11236/01-7742f79.patch CVE-2024-11236/02-2dbe142.patch GHSA-4w77-75f9-2c8w.patch 0110-Fix-74267-segfault-with-streams-and-invalid-data.patch CVE-2024-8929/01-2f5aa9f.patch CVE-2024-8929/02-32f905f.patch CVE-2024-8929/03-c70b97d.patch CVE-2024-8929/04-51f5539.patch CVE-2024-8929/05-eb951b3.patch 0118-Fix-bug-69899.patch http-server-8.0.patch openssl-server-8.1.patch CVE-2025-1217/01-1c157d3fa2e.patch CVE-2025-1217/02-51e2015af3f.patch CVE-2025-1217/03-d20b4c97a9f.patch 0124-Fixed-compilation-warnings.patch 0125-Fix-test-compat-with-libxml2-2.9.5.patch CVE-2025-1219/01-f901bec494a.patch CVE-2025-1219/02-b6004a043c1.patch CVE-2025-1734.patch CVE-2025-1736/01-d0d60503b54.patch CVE-2025-1736/02-3d9c02364db.patch CVE-2025-1736/03-56cdbe63c24.patch CVE-2025-1736/04-41d49abbd99.patch CVE-2025-1861.patch"
 EXTRACT_DIR="php-5.6.40"
 TIER=5
@@ -21,15 +22,49 @@ MAKE_ARGS=""
 INSTALL_ARGS=""
 TEST_CMD=""
 POLICY_CLASS="P4-Audit"
-POLICY_RATIONALE="EOL legacy PHP 5.6 built from Freexian Extended LTS jessie (5.6.40+dfsg-0+deb8u23, 85 ELTS security patches verified via signed InRelease -> Sources.gz; --disable-json because ext/json is excluded from Debian's +dfsg source tarball) against OpenSSL 1.1.1w (openssl1.1) and static curl-openssl1.1 (keeping OpenSSL 3 completely out of the musl process) with 9 Fil-C/modern-lib/backport patches: (01) USE_ZEND_ALLOC=0 default, (02) portable C paths for inline assembly and bundled PCRE1 SUPPORT_JIT disabled under __FILC__, (03) MAP_PRIVATE opcache mapping, (04) deb.sury.org OpenSSL 1.1 compatibility patch (0054), (05) libxml2 2.12-2.15, ICU 68+/70+, and C++17 register compatibility, (06) musl fopencookie compatibility, (07) PHP 7.4 shutdown stream use-after-free backport (bug #78396), (08) PHP 7.0 Clang 16+ function-pointer type fixes in ext/zlib and main/php_scandir, and (09) PHP 7.0 Clang 16+ C99 strictness and pointer-type fixes in libmagic, libmbfl, ext/session, and php_mblen. Uses bundled PCRE1 and bundled Oniguruma, pkg-config shims for xml2-config/icu-config, and installs side-by-side with --program-suffix=5.6 (including versioned phar5.6)."
+POLICY_RATIONALE="EOL legacy PHP 5.6 built from Freexian Extended LTS jessie (5.6.40+dfsg-0+deb8u23, 85 ELTS security patches verified via signed InRelease -> Sources.gz) with Freexian ELTS jessie php-json (pecl-jsonc 1.3.6-1, PHP-3.01, plus bundled json-c under MIT/Expat, ENABLE_RDRAND disabled so /dev/urandom is used without inline assembly) compiled statically as built-in ext/json against OpenSSL 1.1.1w (openssl1.1) and static curl-openssl1.1 (keeping OpenSSL 3 completely out of the musl process) with 9 Fil-C/modern-lib/backport patches: (01) USE_ZEND_ALLOC=0 default, (02) portable C paths for inline assembly and bundled PCRE1 SUPPORT_JIT disabled under __FILC__, (03) MAP_PRIVATE opcache mapping, (04) deb.sury.org OpenSSL 1.1 compatibility patch (0054), (05) libxml2 2.12-2.15, ICU 68+/70+, and C++17 register compatibility, (06) musl fopencookie compatibility, (07) PHP 7.4 shutdown stream use-after-free backport (bug #78396), (08) PHP 7.0 Clang 16+ function-pointer type fixes in ext/zlib and main/php_scandir, and (09) PHP 7.0 Clang 16+ C99 strictness and pointer-type fixes in libmagic, libmbfl, ext/session, and php_mblen. Uses bundled PCRE1 and bundled Oniguruma, pkg-config shims for xml2-config/icu-config, and installs side-by-side with --program-suffix=5.6 (including versioned phar5.6)."
 FILC_ORIGIN_REF="8553fcd026b9:projects/php.projeny"
 
 port_configure() {
+  # Stage Freexian ELTS php-json (pecl-jsonc 1.3.6, PHP-3.01 + bundled json-c MIT)
+  # into ext/json for static built-in compilation (Debian's +dfsg tarball strips
+  # original ext/json). Keep ENABLE_RDRAND undefined so json-c uses /dev/urandom
+  # with zero inline assembly under Fil-C.
+  local jsonc_src="$FILC_EXTRA_SOURCES_DIR/php-json/pecl-json-c-1.3.6/jsonc-1.3.6"
+  if [[ ! -f "$jsonc_src/json.c" || ! -f "$jsonc_src/php_json.h" ]]; then
+    echo "error: verified php-json (jsonc 1.3.6) sources missing at $jsonc_src" >&2
+    return 1
+  fi
+  rm -rf "$SRC_DIR/ext/json"
+  cp -R "$jsonc_src" "$SRC_DIR/ext/json"
+  cat > "$SRC_DIR/ext/json/json-c/config.h" <<'JSONC_CFG'
+#include "php_config.h"
+#ifndef HAVE_STRNCASECMP
+#define HAVE_STRNCASECMP 1
+#endif
+#ifndef HAVE_OPEN
+#define HAVE_OPEN 1
+#endif
+#ifndef HAVE_REALLOC
+#define HAVE_REALLOC 1
+#endif
+#ifndef HAVE_VSYSLOG
+#define HAVE_VSYSLOG 1
+#endif
+#ifndef HAVE_ENDIAN_H
+#define HAVE_ENDIAN_H 1
+#endif
+#ifndef HAVE_STDARG_H
+#define HAVE_STDARG_H 1
+#endif
+JSONC_CFG
+
   # PHP 5.6 ext/iconv/config.m4 falls back to /usr/local /usr and unconditionally
   # prepends -I$PHP_ICONV_PREFIX/include and -L$PHP_ICONV_PREFIX/lib to CFLAGS
   # and LDFLAGS whenever libc provides iconv(). Also fix implicit int main()
   # and missing stdlib.h/stdio.h in PHP_READDIR_R_TYPE and AC_ZEND_BROKEN_SPRINTF
-  # probes (rejected by Clang 20), and version phar5.6 in ext/phar/Makefile.frag.
+  # probes (rejected by Clang 20), wire jsonc sources into ext/json, and version
+  # phar5.6 in ext/phar/Makefile.frag.
   "${HOST_RUBY:-ruby}" -e '
     p = "configure"
     s = File.binread(p)
@@ -49,6 +84,15 @@ port_configure() {
     uname_matches = s.scan(uname_old).length
     raise "PHP_UNAME assignment not found in configure (matches=#{uname_matches})" unless uname_matches == 1
     s = s.sub(uname_old, "PHP_UNAME=\"${PHP_UNAME:-`uname -a | xargs`}\"")
+    json_src_old = "for ac_src in json.c JSON_parser.c; do"
+    json_src_matches = s.scan(json_src_old).length
+    raise "ext/json source list not found in configure (matches=#{json_src_matches})" unless json_src_matches == 4
+    json_src_new = "for ac_src in json.c json-c/arraylist.c json-c/debug.c json-c/json_c_version.c json-c/json_object.c json-c/json_object_iterator.c json-c/json_tokener.c json-c/json_util.c json-c/linkhash.c json-c/random_seed.c json-c/printbuf.c; do"
+    s = s.gsub(json_src_old, json_src_new)
+    json_dir_old = "EXT_CLI_STATIC=\"$EXT_CLI_STATIC json\"\n  fi\n\n\n    BUILD_DIR=\"$BUILD_DIR $ext_builddir\""
+    json_dir_matches = s.scan(json_dir_old).length
+    raise "ext/json BUILD_DIR block not found in configure (matches=#{json_dir_matches})" unless json_dir_matches == 1
+    s = s.sub(json_dir_old, "EXT_CLI_STATIC=\"$EXT_CLI_STATIC json\"\n  fi\n\n\n    BUILD_DIR=\"$BUILD_DIR $ext_builddir $ext_builddir/json-c\"")
     File.binwrite(p, s)
     pf = "ext/phar/Makefile.frag"
     ps = File.binread(pf)
@@ -132,7 +176,7 @@ SHIM
       --with-config-file-path="$PIZFIX/etc/php5.6" \
       --with-config-file-scan-dir="$PIZFIX/etc/php5.6/conf.d" \
       --without-pear \
-      --disable-json \
+      --enable-json \
       --with-libxml-dir="$shim_dir" \
       --with-icu-dir="$shim_dir" \
       --enable-fpm \
@@ -292,6 +336,7 @@ PY
 
   test -x "$PIZFIX/bin/phar5.6.phar"
   test -L "$PIZFIX/bin/phar5.6"
+  test ! -e "$ext_dir/json.so"
   "$php_bin" -n -d phar.readonly=0 <<'EOF' | grep -Fxq 'PHP56_PHAR_SHUTDOWN_OK'
 <?php
 assert_options(ASSERT_ACTIVE, 1);
@@ -370,6 +415,17 @@ assert(openssl_digest("hello\n", "sha256") === "5891b5b522d5df086d0ff0b110fbd9d2
 assert(gzuncompress(gzcompress("filc-zlib-php56")) === "filc-zlib-php56");
 assert(bzdecompress(bzcompress("filc-bz2-php56")) === "filc-bz2-php56");
 assert(preg_match('/^([a-z]+)-(\d+)$/', 'filc-56', $matches) === 1 && $matches[2] === '56');
+assert(extension_loaded("json") === true);
+$jpayload = array("ok" => array(1, 2, 3), "unicode" => "hällo 日本語");
+$jenc = json_encode($jpayload);
+assert(is_string($jenc) && strpos($jenc, "\\u00e4") !== false && json_last_error() === JSON_ERROR_NONE);
+$jenc_u = json_encode($jpayload, JSON_UNESCAPED_UNICODE);
+assert(is_string($jenc_u) && strpos($jenc_u, "hällo 日本語") !== false);
+$jd = json_decode($jenc, true);
+assert($jd === $jpayload && json_last_error() === JSON_ERROR_NONE);
+$jd_u = json_decode($jenc_u, true);
+assert($jd_u === $jpayload && json_last_error() === JSON_ERROR_NONE);
+assert(json_decode("{invalid-json") === null && json_last_error() === JSON_ERROR_SYNTAX && strlen(json_last_error_msg()) > 0);
 $ser = unserialize(serialize(array("ok" => array(1, 2, 3))));
 assert($ser["ok"] === array(1, 2, 3));
 assert(escapeshellarg("filc'56") === "'filc'\\''56'");
@@ -558,6 +614,7 @@ PY
   test ! -e "$PKG_PREFIX/bin/pear"
   test ! -e "$PKG_PREFIX/bin/peardev"
   test ! -e "$PKG_PREFIX/bin/pecl"
+  test ! -e "$ext_dir/json.so"
   "$php_bin" -n -d phar.readonly=0 <<'EOF' | grep -Fxq 'PHP56_PHAR_SHUTDOWN_OK'
 <?php
 assert_options(ASSERT_ACTIVE, 1);
@@ -600,6 +657,10 @@ assert(is_array($cv) && isset($cv["ssl_version"]) && strpos($cv["ssl_version"], 
 $op = opcache_get_status(false);
 assert(is_array($op) && $op["opcache_enabled"] === true);
 assert(openssl_digest("hello\n", "sha256") === "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03");
+assert(extension_loaded("json") === true);
+$jpayload = array("ok" => array(1, 2, 3), "unicode" => "hällo 日本語");
+assert(json_decode(json_encode($jpayload, JSON_UNESCAPED_UNICODE), true) === $jpayload && json_last_error() === JSON_ERROR_NONE);
+assert(json_decode("{invalid-json") === null && json_last_error() === JSON_ERROR_SYNTAX);
 assert(gzuncompress(gzcompress("filc-zlib-php56")) === "filc-zlib-php56");
 $coll = new Collator("en_US");
 assert($coll->compare("a", "b") < 0);

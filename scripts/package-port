@@ -192,6 +192,7 @@ module PortPackager
         "upstream_sha256" => meta["UPSTREAM_SHA256"],
         "debian_tarball_url" => meta["DEBIAN_TARBALL_URL"].to_s.strip,
         "debian_tarball_sha256" => meta["DEBIAN_TARBALL_SHA256"].to_s.strip,
+        "debian_extra_sources" => meta["DEBIAN_EXTRA_SOURCES"].to_s.strip,
         "port_dir" => pdir
       }
       port_meta["docker_image"] = docker_img if docker_img
@@ -528,7 +529,7 @@ module PortPackager
   # Extracts the SHA-256-verified upstream source archive into an isolated temp dir
   # and proves exact fixed-string provenance for every generic token (including
   # bundled .whl/.zip and .gem archives shipped inside upstream tarballs).
-  def verify_upstream_provenance(upstream_tarball, generic_hits, throttle_fn: nil)
+  def verify_upstream_provenance(upstream_tarball, generic_hits, extra_tarballs: [], throttle_fn: nil)
     return [{}, generic_hits] if generic_hits.empty?
 
     needed = generic_hits.map { |h| h[:token] }.uniq
@@ -536,50 +537,55 @@ module PortPackager
     found = {}
     tar_bin = cmd_available?("gtar") ? "gtar" : "tar"
 
-    Dir.mktmpdir("filc-prov-src-") do |src_td|
-      _o, err, st = capture3_cmd([tar_bin, "-xf", upstream_tarball, "-C", src_td], throttle_fn: throttle_fn)
-      unless st.success?
-        raise "failed to extract verified upstream source #{File.basename(upstream_tarball)} for provenance check: #{err.strip}"
-      end
+    all_tarballs = [upstream_tarball] + Array(extra_tarballs).compact
+    all_tarballs.each do |tb|
+      break if remaining.empty?
 
-      nested_zips = []
-      nested_gems = []
-
-      Dir.glob(File.join(src_td, "**", "*"), File::FNM_DOTMATCH).sort.each do |path|
-        break if remaining.empty?
-        next unless File.file?(path) && !File.symlink?(path)
-
-        rel = path.sub("#{src_td}/", "")
-        if rel.end_with?(".whl", ".zip")
-          nested_zips << [path, rel]
-          next
-        elsif rel.end_with?(".gem")
-          nested_gems << [path, rel]
-          next
+      Dir.mktmpdir("filc-prov-src-") do |src_td|
+        _o, err, st = capture3_cmd([tar_bin, "-xf", tb, "-C", src_td], throttle_fn: throttle_fn)
+        unless st.success?
+          raise "failed to extract verified upstream source #{File.basename(tb)} for provenance check: #{err.strip}"
         end
 
-        raw = File.binread(path)
-        remaining.dup.each do |tok|
-          next unless raw.include?(tok.b)
+        nested_zips = []
+        nested_gems = []
 
-          found[tok] = rel
-          remaining.delete(tok)
-        end
-      end
-
-      unless remaining.empty?
-        nested_zips.each do |zp, zrel|
+        Dir.glob(File.join(src_td, "**", "*"), File::FNM_DOTMATCH).sort.each do |path|
           break if remaining.empty?
+          next unless File.file?(path) && !File.symlink?(path)
 
-          search_zip_for_tokens(zp, zrel, remaining, found)
+          rel = path.sub("#{src_td}/", "")
+          if rel.end_with?(".whl", ".zip")
+            nested_zips << [path, rel]
+            next
+          elsif rel.end_with?(".gem")
+            nested_gems << [path, rel]
+            next
+          end
+
+          raw = File.binread(path)
+          remaining.dup.each do |tok|
+            next unless raw.include?(tok.b)
+
+            found[tok] = rel
+            remaining.delete(tok)
+          end
         end
-      end
 
-      unless remaining.empty?
-        nested_gems.each do |gp, grel|
-          break if remaining.empty?
+        unless remaining.empty?
+          nested_zips.each do |zp, zrel|
+            break if remaining.empty?
 
-          search_gem_for_tokens(gp, grel, remaining, found, tar_bin, throttle_fn: throttle_fn)
+            search_zip_for_tokens(zp, zrel, remaining, found)
+          end
+        end
+
+        unless remaining.empty?
+          nested_gems.each do |gp, grel|
+            break if remaining.empty?
+
+            search_gem_for_tokens(gp, grel, remaining, found, tar_bin, throttle_fn: throttle_fn)
+          end
         end
       end
     end
@@ -588,11 +594,13 @@ module PortPackager
     [found, unverified]
   end
 
-  def evaluate_package_leaks(stage_dir, literals:, exact_rules:, upstream_tarball:, scan_elf_strings: true, throttle_fn: nil)
+  def evaluate_package_leaks(stage_dir, literals:, exact_rules:, upstream_tarball:, extra_tarballs: [], scan_elf_strings: true, throttle_fn: nil)
     hard_hits, generic_hits = scan_directory_leaks(
       stage_dir, literals: literals, exact_rules: exact_rules, scan_elf_strings: scan_elf_strings, throttle_fn: throttle_fn
     )
-    provenance_map, unverified = verify_upstream_provenance(upstream_tarball, generic_hits, throttle_fn: throttle_fn)
+    provenance_map, unverified = verify_upstream_provenance(
+      upstream_tarball, generic_hits, extra_tarballs: extra_tarballs, throttle_fn: throttle_fn
+    )
 
     allowed = []
     generic_hits.each do |gh|
@@ -1248,6 +1256,29 @@ module PortPackager
     [found, url_base, actual]
   end
 
+  def find_cached_extra_tarballs(cache_dir, port_meta)
+    raw = port_meta["debian_extra_sources"].to_s.strip
+    return [] if raw.empty?
+
+    raw.split.map do |espec|
+      _epkg, _ever, eurl, esha = espec.split("|", 4)
+      raise "invalid debian_extra_sources entry for #{port_meta['name']}: #{espec.inspect}" if eurl.to_s.empty? || !SHA256_RE.match?(esha.to_s)
+
+      url_base = File.basename(eurl.split("?", 2).first)
+      candidates = [
+        File.join(cache_dir, "#{port_meta['name']}-#{port_meta['version']}-#{esha[0, 12]}-#{url_base}"),
+        File.join(cache_dir, url_base)
+      ]
+      found = candidates.find { |p| File.file?(p) }
+      raise "cached extra source tarball not found for #{port_meta['name']} (#{url_base}) in #{cache_dir}" unless found
+
+      actual = file_sha256(found)
+      raise "extra source SHA-256 mismatch for #{found}: expected #{esha}, got #{actual}" unless actual == esha
+
+      found
+    end
+  end
+
   def sign_with_minisign!(file_path, sig_path, trusted_comment:, key_file:, key_env:)
     if key_file && !key_file.empty?
       actual_key_file = key_file
@@ -1692,9 +1723,11 @@ module PortPackager
       tdeps = transitive_deps_topo(all_ports, name)
       pcount, added, removed = count_patches(meta["port_dir"])
 
-      # Resolve and SHA-256-verify the upstream source tarball first so the leak-gate
-      # can prove upstream provenance for generic patterns without trusting unverified files.
+      # Resolve and SHA-256-verify the upstream source tarball (plus any pinned
+      # extra ELTS sources) first so the leak-gate can prove upstream provenance
+      # for generic patterns without trusting unverified files.
       cached_src, src_fname, src_sha = find_cached_source_tarball(cache_dir, meta)
+      cached_extra_srcs = find_cached_extra_tarballs(cache_dir, meta)
 
       bin_fname = nil
       bin_rel = nil
@@ -1786,6 +1819,7 @@ module PortPackager
             literals: literals,
             exact_rules: exact_rules,
             upstream_tarball: cached_src,
+            extra_tarballs: cached_extra_srcs,
             scan_elf_strings: true,
             throttle_fn: throttle_fn
           )
@@ -1849,6 +1883,7 @@ module PortPackager
             literals: literals,
             exact_rules: exact_rules,
             upstream_tarball: cached_src,
+            extra_tarballs: cached_extra_srcs,
             scan_elf_strings: false,
             throttle_fn: throttle_fn
           )

@@ -288,6 +288,12 @@ def validate_metadata(name, meta, repo_root)
         errors << "#{name}: invalid DEBIAN_BINARY_TARBALLS entry #{py_repr(bspec)}"
       end
     end
+    meta.fetch("DEBIAN_EXTRA_SOURCES", "").split.each do |espec|
+      eparts = espec.split("|")
+      if eparts.length != 4 || eparts[0].empty? || eparts[1].empty? || !eparts[2].start_with?("https://") || !SHA256_RE.match?(eparts[3].to_s)
+        errors << "#{name}: invalid DEBIAN_EXTRA_SOURCES entry #{py_repr(espec)}"
+      end
+    end
 
     key_abs = File.expand_path(spec["key"], repo_root)
     if !File.file?(key_abs)
@@ -686,27 +692,32 @@ def verify_debian_elts_pin(name, meta, spec, repo_root, cache_dir)
   end
 
   sources_txt = Zlib::GzipReader.new(StringIO.new(src_bytes)).read.force_encoding(Encoding::UTF_8).scrub
-  checksums = nil
-  sources_txt.split("\n\n").each do |stanza|
-    pkg_m = /^Package:\s*(\S+)/.match(stanza)
-    ver_m = /^Version:\s*(\S+)/.match(stanza)
-    next unless pkg_m && ver_m && pkg_m[1] == spec["pkg"] && ver_m[1] == spec["ver"]
+  stanza_checksums = lambda do |target_pkg, target_ver|
+    found_map = nil
+    sources_txt.split("\n\n").each do |stanza|
+      pkg_m = /^Package:\s*(\S+)/.match(stanza)
+      ver_m = /^Version:\s*(\S+)/.match(stanza)
+      next unless pkg_m && ver_m && pkg_m[1] == target_pkg && ver_m[1] == target_ver
 
-    map = {}
-    in_cs = false
-    stanza.each_line do |ln|
-      if ln.start_with?("Checksums-Sha256:")
-        in_cs = true
-      elsif in_cs && ln.start_with?(" ")
-        parts = ln.strip.split(/\s+/, 3)
-        map[parts[2]] = parts[0].downcase if parts.length == 3
-      elsif in_cs
-        in_cs = false
+      map = {}
+      in_cs = false
+      stanza.each_line do |ln|
+        if ln.start_with?("Checksums-Sha256:")
+          in_cs = true
+        elsif in_cs && ln.start_with?(" ")
+          parts = ln.strip.split(/\s+/, 3)
+          map[parts[2]] = parts[0].downcase if parts.length == 3
+        elsif in_cs
+          in_cs = false
+        end
       end
+      found_map = map
+      break
     end
-    checksums = map
-    break
+    found_map
   end
+
+  checksums = stanza_checksums.call(spec["pkg"], spec["ver"])
   raise RuntimeError, "package #{spec['pkg']} #{spec['ver']} not found in #{sources_url}" unless checksums
 
   orig_name = File.basename(meta.fetch("UPSTREAM_URL").split("?", 2)[0])
@@ -731,9 +742,24 @@ def verify_debian_elts_pin(name, meta, spec, repo_root, cache_dir)
     end
   end
 
+  extra_count = 0
+  meta.fetch("DEBIAN_EXTRA_SOURCES", "").split.each do |espec|
+    epkg, ever, eurl, esha = espec.split("|", 4)
+    ecs = stanza_checksums.call(epkg, ever)
+    raise RuntimeError, "extra ELTS package #{epkg} #{ever} not found in #{sources_url}" unless ecs
+
+    efname = File.basename(eurl.split("?", 2)[0])
+    got_e = ecs[efname]
+    if got_e != esha
+      raise RuntimeError, "extra ELTS SHA-256 mismatch for #{efname}: PORT=#{esha}, ELTS=#{py_repr(got_e)}"
+    end
+    extra_count += 1
+  end
+
   src_note = inr_cached ? "cached InRelease, verified" : "fetched InRelease, verified"
+  extra_note = extra_count > 0 ? ", extra=#{extra_count}" : ""
   "OK [debian-elts] #{name} #{meta['VERSION']} " \
-  "(fpr=#{spec['fpr'][0, 12]}..., orig=#{want_orig[0, 12]}..., deb=#{want_deb[0, 12]}..., #{src_note})"
+  "(fpr=#{spec['fpr'][0, 12]}..., orig=#{want_orig[0, 12]}..., deb=#{want_deb[0, 12]}...#{extra_note}, #{src_note})"
 end
 
 def verify_port_online(name, meta, repo_root, cache_dir, strict)

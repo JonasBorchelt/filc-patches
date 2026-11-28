@@ -129,6 +129,8 @@ DEBIAN_TARBALL_SHA256=""
 DEBIAN_DSC_SHA256=""
 DEBIAN_SECURITY_PATCHES=""
 DEBIAN_BINARY_TARBALLS=""
+DEBIAN_EXTRA_SOURCES=""
+FILC_EXTRA_SOURCES_DIR=""
 
 # shellcheck source=/dev/null
 source "$PORT_FILE"
@@ -601,7 +603,7 @@ run_stage_fn() {
     trace_flag="set -x;"
   fi
   local stage_script="set -eEuo pipefail; export PS4='+ [$fn:\${LINENO}] '; trap 'rc=\$?; echo \"STAGE_CMD_FAILED port=\$PORT_NAME stage=\$CURRENT_STAGE fn=$fn line=\${LINENO} rc=\$rc cmd=\${BASH_COMMAND}\" >&2' ERR; source \"\$PORT_FILE\"; $trace_flag $fn"
-  export PORT_NAME CURRENT_STAGE PORT_FILE SRC_DIR PIZFIX CC CXX AR RANLIB NM lt_cv_sys_global_symbol_pipe PREFIX PKG_CONFIG_PATH PATH CFLAGS CXXFLAGS LDFLAGS JOBS
+  export PORT_NAME CURRENT_STAGE PORT_FILE SRC_DIR PIZFIX CC CXX AR RANLIB NM lt_cv_sys_global_symbol_pipe PREFIX PKG_CONFIG_PATH PATH CFLAGS CXXFLAGS LDFLAGS JOBS FILC_EXTRA_SOURCES_DIR
   if [[ "$use_lock" == "1" ]]; then
     run_install_cmd bash -c "$stage_script"
   else
@@ -759,6 +761,48 @@ if [[ -n "$DEBIAN_TARBALL_URL" ]]; then
 elif [[ -n "$DEBIAN_BINARY_TARBALLS" ]]; then
   echo "error: $PORT_FILE sets DEBIAN_BINARY_TARBALLS without DEBIAN_TARBALL_URL" >&2
   exit 1
+fi
+if [[ -n "$DEBIAN_EXTRA_SOURCES" ]]; then
+  FILC_EXTRA_SOURCES_DIR="$PORT_BUILD_DIR/_extra_sources"
+  rm -rf "$FILC_EXTRA_SOURCES_DIR"
+  mkdir -p "$FILC_EXTRA_SOURCES_DIR"
+  for espec in $DEBIAN_EXTRA_SOURCES; do
+    IFS='|' read -r epkg ever eurl esha extra_rest <<< "$espec"
+    if [[ -n "${extra_rest:-}" || -z "${epkg:-}" || -z "${ever:-}" || -z "${eurl:-}" || ! "${esha:-}" =~ ^[0-9a-f]{64}$ ]]; then
+      echo "error: invalid DEBIAN_EXTRA_SOURCES entry (expected <pkg>|<ver>|<url>|<sha256>): $espec" >&2
+      exit 1
+    fi
+    if [[ "$epkg" == */* || "$epkg" == *".."* ]]; then
+      echo "error: unsafe DEBIAN_EXTRA_SOURCES package name: $epkg" >&2
+      exit 1
+    fi
+    efname="$(basename "${eurl%%\?*}")"
+    epath="$CACHE_DIR/${NAME}-${VERSION}-${esha:0:12}-${efname}"
+    if [[ ! -f "$epath" ]]; then
+      tmp_edl="$epath.part.$$"
+      rm -f "$tmp_edl"
+      curl -fsSL --retry 3 --retry-delay 2 -o "$tmp_edl" "$eurl"
+      mv "$tmp_edl" "$epath"
+    fi
+    actual_esha="$(compute_sha256 "$epath")"
+    if [[ "$actual_esha" != "$esha" ]]; then
+      echo "error: SHA-256 mismatch for extra ELTS source $epath" >&2
+      echo "  expected: $esha" >&2
+      echo "  actual:   $actual_esha" >&2
+      rm -f "$epath"
+      exit 1
+    fi
+    while IFS= read -r member; do
+      [[ -z "$member" ]] && continue
+      if [[ "$member" == /* || "$member" == *".."* ]]; then
+        echo "error: unsafe member path in $efname: $member" >&2
+        exit 1
+      fi
+    done < <(tar -tf "$epath")
+    mkdir -p "$FILC_EXTRA_SOURCES_DIR/$epkg"
+    echo "Extra ELTS source SHA-256 verified: $epkg $ever ($actual_esha)"
+    tar -xf "$epath" -C "$FILC_EXTRA_SOURCES_DIR/$epkg"
+  done
 fi
 if [[ -f "$PORT_DIR/patches/series" ]]; then
   while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do

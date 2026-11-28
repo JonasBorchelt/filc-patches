@@ -263,6 +263,10 @@ def validate_metadata(name: str, meta: dict, repo_root: str) -> list:
             bsha = parts[1] if len(parts) == 2 else ""
             if not bname or "/" in bname or ".." in bname or not SHA256_RE.match(bsha):
                 errors.append(f"{name}: invalid DEBIAN_BINARY_TARBALLS entry {bspec!r}")
+        for espec in meta.get("DEBIAN_EXTRA_SOURCES", "").split():
+            eparts = espec.split("|")
+            if len(eparts) != 4 or not eparts[0] or not eparts[1] or not eparts[2].startswith("https://") or not SHA256_RE.match(eparts[3]):
+                errors.append(f"{name}: invalid DEBIAN_EXTRA_SOURCES entry {espec!r}")
 
         key_abs = os.path.join(repo_root, spec["key"])
         if not os.path.isfile(key_abs):
@@ -657,25 +661,28 @@ def verify_debian_elts_pin(name: str, meta: dict, spec: dict, repo_root: str, ca
             )
 
     sources_txt = gzip.decompress(src_bytes).decode("utf-8", errors="replace")
-    checksums = None
-    for stanza in sources_txt.split("\n\n"):
-        pkg_m = re.search(r"^Package:\s*(\S+)", stanza, re.M)
-        ver_m = re.search(r"^Version:\s*(\S+)", stanza, re.M)
-        if not (pkg_m and ver_m and pkg_m.group(1) == spec["pkg"] and ver_m.group(1) == spec["ver"]):
-            continue
-        cmap = {}
-        in_cs = False
-        for ln in stanza.splitlines():
-            if ln.startswith("Checksums-Sha256:"):
-                in_cs = True
-            elif in_cs and ln.startswith(" "):
-                parts = ln.strip().split(None, 2)
-                if len(parts) == 3:
-                    cmap[parts[2]] = parts[0].lower()
-            elif in_cs:
-                in_cs = False
-        checksums = cmap
-        break
+
+    def stanza_checksums(target_pkg: str, target_ver: str):
+        for stanza in sources_txt.split("\n\n"):
+            pkg_m = re.search(r"^Package:\s*(\S+)", stanza, re.M)
+            ver_m = re.search(r"^Version:\s*(\S+)", stanza, re.M)
+            if not (pkg_m and ver_m and pkg_m.group(1) == target_pkg and ver_m.group(1) == target_ver):
+                continue
+            cmap = {}
+            in_cs = False
+            for ln in stanza.splitlines():
+                if ln.startswith("Checksums-Sha256:"):
+                    in_cs = True
+                elif in_cs and ln.startswith(" "):
+                    parts = ln.strip().split(None, 2)
+                    if len(parts) == 3:
+                        cmap[parts[2]] = parts[0].lower()
+                elif in_cs:
+                    in_cs = False
+            return cmap
+        return None
+
+    checksums = stanza_checksums(spec["pkg"], spec["ver"])
     if checksums is None:
         raise RuntimeError(f"package {spec['pkg']} {spec['ver']} not found in {sources_url}")
 
@@ -699,10 +706,23 @@ def verify_debian_elts_pin(name: str, meta: dict, spec: dict, repo_root: str, ca
                 f"dsc SHA-256 mismatch for {spec['pkg']} {spec['ver']}: PORT={want_dsc}, ELTS={got_dsc!r}"
             )
 
+    extra_count = 0
+    for espec in meta.get("DEBIAN_EXTRA_SOURCES", "").split():
+        epkg, ever, eurl, esha = espec.split("|", 3)
+        ecs = stanza_checksums(epkg, ever)
+        if ecs is None:
+            raise RuntimeError(f"extra ELTS package {epkg} {ever} not found in {sources_url}")
+        efname = os.path.basename(eurl.split("?", 1)[0])
+        got_e = ecs.get(efname)
+        if got_e != esha:
+            raise RuntimeError(f"extra ELTS SHA-256 mismatch for {efname}: PORT={esha}, ELTS={got_e!r}")
+        extra_count += 1
+
     src_note = "cached InRelease, verified" if inr_cached else "fetched InRelease, verified"
+    extra_note = f", extra={extra_count}" if extra_count > 0 else ""
     return (
         f"OK [debian-elts] {name} {meta['VERSION']} "
-        f"(fpr={spec['fpr'][:12]}..., orig={want_orig[:12]}..., deb={want_deb[:12]}..., {src_note})"
+        f"(fpr={spec['fpr'][:12]}..., orig={want_orig[:12]}..., deb={want_deb[:12]}...{extra_note}, {src_note})"
     )
 
 

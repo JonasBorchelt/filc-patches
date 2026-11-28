@@ -6,3 +6,4 @@
 06-php56-musl-fopencookie.patch
 07-php56-shutdown-stream-uaf.patch
 08-php56-clang-fnptr-compat.patch
+09-php56-clang-c99-compat.patch

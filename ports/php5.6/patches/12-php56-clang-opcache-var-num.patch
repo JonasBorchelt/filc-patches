@@ -1,0 +1,42 @@
+Subject: Avoid Clang NULL-pointer zero-extension in opcache VAR_NUM and EX_TMP_VAR
+Policy-Class: P1-Portability
+Rationale: In PHP 5.6, ext/opcache/Optimizer/zend_optimizer_internal.h defines VAR_NUM(v) as ((zend_uint)(EX_TMP_VAR_NUM(0, 0) - EX_TMP_VAR(0, v))) where EX_TMP_VAR(0, v) expands to ((temp_variable*)(((char*)(0)) + ((int)(v)))). Modern Clang CodeGen lowers NULL + (int)v directly to LLVM inttoptr i32 %v to ptr, which zero-extends negative 32-bit temporary-variable byte offsets (e.g. 0xffffffc0 for T=0) to 0x00000000ffffffc0 instead of sign-extending to -sizeof(temp_variable). Subtracting from EX_TMP_VAR_NUM(0, 0) yields 0xfc000000 + T (4227858432 + T) at every optimization level (-O0/-O1/-O2), causing an immediate out-of-bounds read in zend_t_usage() (block_pass.c:1905) and every other optimizer VAR_NUM() array access whenever opcache optimizes a script. Replace the NULL-pointer arithmetic in VAR_NUM(), NUM_VAR(), and get_temporary_variable() with exact signed zend_intptr_t arithmetic, and widen the offset in EX_TMP_VAR() to (zend_intptr_t)(int)(n) while preserving char * pointer arithmetic so Fil-C pointer provenance on execute_data remains intact.
+Upstream-Status: Inappropriate [PHP 5.6 is EOL; PHP 7.0 replaced temp_variable negative-offset encoding with positive EX_VAR_TO_NUM/EX_NUM_TO_VAR integer arithmetic]
+Fil-C-Origin-Commits: none
+Origin-Kind: local
+
+--- a/ext/opcache/Optimizer/zend_optimizer_internal.h
++++ b/ext/opcache/Optimizer/zend_optimizer_internal.h
+@@ -25,8 +25,8 @@
+ #include "ZendAccelerator.h"
+ 
+ #if ZEND_EXTENSION_API_NO > PHP_5_4_X_API_NO
+-# define VAR_NUM(v) ((zend_uint)(EX_TMP_VAR_NUM(0, 0) - EX_TMP_VAR(0, v)))
+-# define NUM_VAR(v) ((zend_uint)(zend_uintptr_t)EX_TMP_VAR_NUM(0, v))
++# define VAR_NUM(v) ((zend_uint)((-(zend_intptr_t)(int)(v)) / (zend_intptr_t)sizeof(temp_variable) - 1))
++# define NUM_VAR(v) ((zend_uint)(-(zend_intptr_t)(1 + (zend_uintptr_t)(v)) * (zend_intptr_t)sizeof(temp_variable)))
+ #elif ZEND_EXTENSION_API_NO > PHP_5_2_X_API_NO
+ # define VAR_NUM(v) ((v)/ZEND_MM_ALIGNED_SIZE(sizeof(temp_variable)))
+ # define NUM_VAR(v) ((v)*ZEND_MM_ALIGNED_SIZE(sizeof(temp_variable)))
+--- a/Zend/zend_compile.h
++++ b/Zend/zend_compile.h
+@@ -414,7 +414,7 @@
+ 
+ #define EX(element) execute_data.element
+ 
+-#define EX_TMP_VAR(ex, n)	   ((temp_variable*)(((char*)(ex)) + ((int)(n))))
++#define EX_TMP_VAR(ex, n)	   ((temp_variable*)(((char*)(ex)) + ((zend_intptr_t)(int)(n))))
+ #define EX_TMP_VAR_NUM(ex, n)  (EX_TMP_VAR(ex, 0) - (1 + (n)))
+ 
+ #define EX_CV_NUM(ex, n)       (((zval***)(((char*)(ex))+ZEND_MM_ALIGNED_SIZE(sizeof(zend_execute_data))))+(n))
+--- a/Zend/zend_compile.c
++++ b/Zend/zend_compile.c
+@@ -292,7 +292,7 @@
+ 
+ static zend_uint get_temporary_variable(zend_op_array *op_array) /* {{{ */
+ {
+-	return (zend_uint)(zend_uintptr_t)EX_TMP_VAR_NUM(0, (op_array->T)++);
++	return (zend_uint)(-(zend_intptr_t)(1 + (zend_uintptr_t)(op_array->T)++) * (zend_intptr_t)sizeof(temp_variable));
+ }
+ /* }}} */
+ 

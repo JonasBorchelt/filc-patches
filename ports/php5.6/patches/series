@@ -9,3 +9,4 @@
 09-php56-clang-c99-compat.patch
 10-php56-filc-pointer-tagging.patch
 11-php56-bounds-underflow-fixes.patch
+12-php56-clang-opcache-var-num.patch

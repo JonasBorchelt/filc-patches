@@ -5,3 +5,4 @@
 05-php56-libxml2-icu-compat.patch
 06-php56-musl-fopencookie.patch
 07-php56-shutdown-stream-uaf.patch
+08-php56-clang-fnptr-compat.patch

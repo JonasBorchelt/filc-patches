@@ -1,0 +1,32 @@
+Subject: Fix incompatible function-pointer types in ext/zlib and main/php_scandir for Clang 16+
+Policy-Class: P2-Package
+Rationale: Clang 16+ treats -Wincompatible-function-pointer-types as a hard error. While Zend/zend_API.h already casts globals constructors in ZEND_GINIT()/PHP_GINIT(), ext/zlib/zlib.c bypassed PHP_GINIT(zlib) and passed raw ZEND_MODULE_GLOBALS_CTOR_N(zlib) (type void (*)(zend_zlib_globals *) instead of void (*)(void *)) in php_zlib_module_entry; similarly main/php_scandir.c passed compare (const struct dirent **) directly to qsort() without casting to int (*)(const void *, const void *). Align both sites with upstream PHP 7.0.
+Upstream-Status: Backport (fixed upstream in PHP 7.0 ext/zlib/zlib.c and main/php_scandir.c)
+Fil-C-Origin-Commits: none
+Origin-Kind: backport
+Origin-Project: php/php-src
+Origin-Commit: PHP-7.0.33
+Origin-URL: https://github.com/php/php-src/tree/PHP-7.0.33
+
+--- a/ext/zlib/zlib.c
++++ b/ext/zlib/zlib.c
+@@ -1032,7 +1032,7 @@ zend_module_entry php_zlib_module_entry = {
+ 	PHP_MINFO(zlib),
+ 	"2.0",
+ 	PHP_MODULE_GLOBALS(zlib),
+-	ZEND_MODULE_GLOBALS_CTOR_N(zlib),
++	PHP_GINIT(zlib),
+ 	NULL,
+ 	NULL,
+ 	STANDARD_MODULE_PROPERTIES_EX
+--- a/main/php_scandir.c
++++ b/main/php_scandir.c
+@@ -112,7 +112,7 @@ PHPAPI int php_scandir(const char *dirname, struct dirent **namelist[], int (*se
+ 	*namelist = vector;
+ 
+ 	if (compare) {
+-		qsort (*namelist, nfiles, sizeof(struct dirent *), compare);
++		qsort (*namelist, nfiles, sizeof(struct dirent *), (int (*) (const void *, const void *)) compare);
+ 	}
+ 
+ 	return nfiles;

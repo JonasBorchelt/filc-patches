@@ -12,7 +12,7 @@ set -euo pipefail
 
 STAGE_ROOT="${1:?usage: install-filc-php.sh <stage-root>}"
 PHP_VERSION="${PHP_VERSION:?PHP_VERSION is required (e.g. 8.5)}"
-FILC_CHANNEL="${FILC_CHANNEL:-0.1.6}"
+FILC_CHANNEL="${FILC_CHANNEL:-0.1.7}"
 FILC_BASE_URL="${FILC_BASE_URL:-https://filc.connected.link}"
 FILC_BASE_URL="${FILC_BASE_URL%/}"
 FILC_GITHUB_RELEASE_URL="${FILC_GITHUB_RELEASE_URL:-}"
